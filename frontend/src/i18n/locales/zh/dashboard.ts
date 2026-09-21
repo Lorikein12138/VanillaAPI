@@ -693,8 +693,10 @@ export default {
       unitPerMillion: '$ / 1M token',
       perUnitRequest: '/ 次',
       perUnitImage: '/ 张',
+      perUnitSecond: '/ 秒',
       perRequest: '按次计费',
-      perImage: '按图片计费'
+      perImage: '按张计费',
+      perSecond: '按秒计费'
     },
     nav: {
       login: '登录',

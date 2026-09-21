@@ -57,6 +57,108 @@ func TestListPlazaGroups_GroupCentricAggregation(t *testing.T) {
 	require.Equal(t, "claude-sonnet", out[0].Models[1].Name)
 }
 
+func TestListPlazaGroups_ModelAllowlistDoesNotFilterChannelPricingModels(t *testing.T) {
+	channels := []Channel{
+		{
+			ID: 1, Name: "associated-active", Status: StatusActive, GroupIDs: []int64{10},
+			ModelPricing: []ChannelModelPricing{{
+				Platform: PlatformAnthropic,
+				Models:   []string{"model-a", "model-b", "model-c"},
+			}},
+		},
+		{
+			ID: 2, Name: "associated-inactive", Status: "inactive", GroupIDs: []int64{10},
+			ModelPricing: []ChannelModelPricing{{
+				Platform: PlatformAnthropic,
+				Models:   []string{"model-inactive"},
+			}},
+		},
+		{
+			ID: 3, Name: "unassociated-active", Status: StatusActive, GroupIDs: []int64{99},
+			ModelPricing: []ChannelModelPricing{{
+				Platform: PlatformAnthropic,
+				Models:   []string{"model-unassociated"},
+			}},
+		},
+		{
+			ID: 4, Name: "associated-wrong-platform", Status: StatusActive, GroupIDs: []int64{10},
+			ModelPricing: []ChannelModelPricing{{
+				Platform: PlatformOpenAI,
+				Models:   []string{"model-wrong-platform"},
+			}},
+		},
+	}
+	groups := []Group{{
+		ID:             10,
+		Name:           "allowlisted-group",
+		Platform:       PlatformAnthropic,
+		RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{
+			Enabled: true,
+			Models:  []string{"model-a"},
+		},
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, []string{"model-a", "model-b", "model-c"}, []string{
+		out[0].Models[0].Name,
+		out[0].Models[1].Name,
+		out[0].Models[2].Name,
+	})
+}
+
+func TestListPlazaGroups_ExposesIndependentVideoRate(t *testing.T) {
+	channels := []Channel{
+		plazaPricedChannel(1, "ch", []int64{10, 20}, PlatformOpenAI, "grok-imagine-video"),
+	}
+	groups := []Group{
+		{
+			ID:                   10,
+			Name:                 "video-independent",
+			Platform:             PlatformOpenAI,
+			RateMultiplier:       0.15,
+			ImageRateIndependent: true,
+			ImageRateMultiplier:  1.25,
+			VideoRateIndependent: true,
+			VideoRateMultiplier:  0.25,
+		},
+		{
+			ID:                   20,
+			Name:                 "video-group-rate",
+			Platform:             PlatformOpenAI,
+			RateMultiplier:       0.2,
+			ImageRateIndependent: false,
+			ImageRateMultiplier:  0.75,
+			VideoRateIndependent: false,
+			VideoRateMultiplier:  0,
+		},
+	}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	byID := make(map[int64]PlazaGroup, len(out))
+	for _, group := range out {
+		byID[group.ID] = group
+	}
+
+	independent := byID[10]
+	require.True(t, independent.VideoRateIndependent)
+	require.Equal(t, 0.25, independent.VideoRateMultiplier)
+	require.True(t, independent.ImageRateIndependent)
+	require.Equal(t, 1.25, independent.ImageRateMultiplier)
+
+	groupRate := byID[20]
+	require.False(t, groupRate.VideoRateIndependent)
+	require.Equal(t, 0.0, groupRate.VideoRateMultiplier)
+	require.False(t, groupRate.ImageRateIndependent)
+	require.Equal(t, 0.75, groupRate.ImageRateMultiplier)
+}
+
 func TestWithDefaultMaxReasoningEffortMultiplier_Fable51(t *testing.T) {
 	base := &ChannelModelPricing{BillingMode: BillingModeToken}
 	got := withDefaultMaxReasoningEffortMultiplier(base, "claude-fable-5-1")

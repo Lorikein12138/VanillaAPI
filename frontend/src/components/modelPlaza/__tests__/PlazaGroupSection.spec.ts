@@ -68,6 +68,8 @@ function group(overrides: Partial<ModelPlazaGroup> = {}): ModelPlazaGroup {
     is_exclusive: false,
     image_rate_independent: false,
     image_rate_multiplier: 1,
+    video_rate_independent: false,
+    video_rate_multiplier: 1,
     long_context_pricing_enabled: true,
     models: [ladderModel(2)],
     ...overrides
@@ -135,5 +137,14 @@ describe('PlazaGroupSection 高峰配置传递', () => {
   it('分组未启用高峰时窗口描述为空串', () => {
     const wrapper = mountSection(group())
     expect(wrapper.findComponent(PlazaModelPricingTable).props('peakWindow')).toBe('')
+  })
+
+  it('把分组视频独立倍率配置原值传给价格表', () => {
+    const wrapper = mountSection(
+      group({ video_rate_independent: true, video_rate_multiplier: 0.25 })
+    )
+    const table = wrapper.findComponent(PlazaModelPricingTable)
+    expect(table.props('videoRateIndependent')).toBe(true)
+    expect(table.props('videoRateMultiplier')).toBe(0.25)
   })
 })
