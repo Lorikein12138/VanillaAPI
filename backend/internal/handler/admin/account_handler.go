@@ -2764,6 +2764,62 @@ func (h *AccountHandler) SetSchedulable(c *gin.Context) {
 	response.Success(c, h.buildAccountResponseWithRuntime(c.Request.Context(), account))
 }
 
+type accountTestExplicitModelOption struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Type        string `json:"type"`
+}
+
+func accountTestExplicitModelOptions(account *service.Account) []accountTestExplicitModelOption {
+	if account == nil || account.Credentials == nil {
+		return nil
+	}
+
+	keys := make(map[string]struct{})
+	add := func(key, value string) {
+		key = strings.TrimSpace(key)
+		if key == "" || strings.TrimSpace(value) == "" {
+			return
+		}
+		keys[key] = struct{}{}
+	}
+
+	switch rawMapping := account.Credentials["model_mapping"].(type) {
+	case map[string]any:
+		for key, value := range rawMapping {
+			stringValue, ok := value.(string)
+			if ok {
+				add(key, stringValue)
+			}
+		}
+	case map[string]string:
+		for key, value := range rawMapping {
+			add(key, value)
+		}
+	default:
+		return nil
+	}
+
+	if len(keys) == 0 {
+		return nil
+	}
+	orderedKeys := make([]string, 0, len(keys))
+	for key := range keys {
+		orderedKeys = append(orderedKeys, key)
+	}
+	sort.Strings(orderedKeys)
+
+	options := make([]accountTestExplicitModelOption, 0, len(orderedKeys))
+	for _, key := range orderedKeys {
+		options = append(options, accountTestExplicitModelOption{
+			ID:          key,
+			DisplayName: key,
+			Type:        "model",
+		})
+	}
+	return options
+}
+
 // GetAvailableModels handles getting available models for an account
 // GET /api/v1/admin/accounts/:id/models
 func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
@@ -2777,6 +2833,13 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	if err != nil {
 		response.NotFound(c, "Account not found")
 		return
+	}
+
+	if !account.IsOpenAIPassthroughEnabled() {
+		if options := accountTestExplicitModelOptions(account); len(options) > 0 {
+			response.Success(c, options)
+			return
+		}
 	}
 
 	// Handle OpenAI accounts

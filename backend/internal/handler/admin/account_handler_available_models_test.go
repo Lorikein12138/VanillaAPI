@@ -30,20 +30,74 @@ func (s *availableModelsAdminService) GetAccount(_ context.Context, id int64) (*
 }
 
 func setupAvailableModelsRouter(adminSvc service.AdminService) *gin.Engine {
+	return setupAvailableModelsRouterWithAccountTestService(adminSvc, nil)
+}
+
+func setupAvailableModelsRouterWithAccountTestService(
+	adminSvc service.AdminService,
+	accountTestService *service.AccountTestService,
+) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	handler := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, nil, accountTestService, nil, nil, nil, nil, nil)
 	router.GET("/api/v1/admin/accounts/:id/models", handler.GetAvailableModels)
 	return router
+}
+
+type availableModelsAccountRepo struct {
+	service.AccountRepository
+	account service.Account
+}
+
+func (r *availableModelsAccountRepo) GetByID(_ context.Context, id int64) (*service.Account, error) {
+	if r.account.ID != id {
+		return nil, service.ErrNoAvailableAccounts
+	}
+	account := r.account
+	return &account, nil
+}
+
+func setupAvailableModelsRouterWithOpenAIModelDiscovery(
+	adminSvc service.AdminService,
+	account service.Account,
+	upstream service.HTTPUpstream,
+) *gin.Engine {
+	repo := &availableModelsAccountRepo{account: account}
+	cfg := &config.Config{
+		RunMode:  config.RunModeSimple,
+		Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}},
+	}
+	gatewayService := service.NewOpenAIGatewayService(
+		repo,
+		nil, nil, nil, nil, nil, nil,
+		cfg,
+		nil, nil, nil, nil, nil,
+		upstream,
+		nil, nil, nil, nil, nil, nil, nil, nil,
+	)
+	accountTestService := service.NewAccountTestService(
+		repo,
+		nil,
+		nil,
+		nil,
+		nil,
+		upstream,
+		cfg,
+		nil,
+	)
+	accountTestService.SetOpenAIGatewayService(gatewayService)
+	return setupAvailableModelsRouterWithAccountTestService(adminSvc, accountTestService)
 }
 
 type syncUpstreamHTTPUpstream struct {
 	resp      *http.Response
 	responses []*http.Response
 	err       error
+	calls     int
 }
 
 func (u *syncUpstreamHTTPUpstream) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	u.calls++
 	if u.err != nil {
 		return nil, u.err
 	}
@@ -57,6 +111,10 @@ func (u *syncUpstreamHTTPUpstream) Do(req *http.Request, proxyURL string, accoun
 
 func (u *syncUpstreamHTTPUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func (u *syncUpstreamHTTPUpstream) callCount() int {
+	return u.calls
 }
 
 func setupSyncUpstreamModelsRouter(adminSvc service.AdminService, upstream service.HTTPUpstream) *gin.Engine {
@@ -76,6 +134,185 @@ func setupSyncUpstreamModelsRouter(adminSvc service.AdminService, upstream servi
 	router.POST("/api/v1/admin/accounts/:id/models/sync-upstream", handler.SyncUpstreamModels)
 	router.POST("/api/v1/admin/accounts/models/sync-upstream-preview", handler.SyncUpstreamModelsPreview)
 	return router
+}
+
+type availableModelOptionResponse struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	Type        string `json:"type"`
+}
+
+func decodeAvailableModelOptions(t *testing.T, body []byte) []availableModelOptionResponse {
+	t.Helper()
+	var resp struct {
+		Data []availableModelOptionResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp))
+	return resp.Data
+}
+
+func TestAccountHandlerGetAvailableModels_ExplicitMappingShortCircuitsUpstream(t *testing.T) {
+	account := service.Account{
+		ID:       52,
+		Name:     "openai-explicit-mapping",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeAPIKey,
+		Status:   service.StatusActive,
+		Credentials: map[string]any{
+			"api_key":  "test-key",
+			"base_url": "https://provider.example/v1",
+			"model_mapping": map[string]any{
+				" gpt-image-2 ": " upstream-image-model ",
+				"gpt-5.6-sol":   "gpt-5.6-sol",
+			},
+		},
+	}
+	svc := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: account}
+	upstream := &syncUpstreamHTTPUpstream{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"upstream-only"}]}`)),
+	}}
+	router := setupAvailableModelsRouterWithOpenAIModelDiscovery(svc, account, upstream)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/52/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	models := decodeAvailableModelOptions(t, rec.Body.Bytes())
+	require.Equal(t, []availableModelOptionResponse{
+		{ID: "gpt-5.6-sol", DisplayName: "gpt-5.6-sol", Type: "model"},
+		{ID: "gpt-image-2", DisplayName: "gpt-image-2", Type: "model"},
+	}, models)
+	require.NotContains(t, rec.Body.String(), "upstream-image-model")
+	require.NotContains(t, rec.Body.String(), "upstream-only")
+	require.Equal(t, 0, upstream.callCount())
+}
+
+func TestAccountHandlerGetAvailableModels_ExplicitMappingReturnsSortedKeys(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       53,
+			Name:     "gemini-explicit-mapping",
+			Platform: service.PlatformGemini,
+			Type:     service.AccountTypeAPIKey,
+			Status:   service.StatusActive,
+			Credentials: map[string]any{
+				"model_mapping": map[string]string{
+					" zeta-alias ": " target-zeta ",
+					"zeta-alias":   "other-target",
+					"alpha-alias":  "target-alpha",
+					"claude-*":     "target-claude",
+				},
+			},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/53/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	models := decodeAvailableModelOptions(t, rec.Body.Bytes())
+	require.Equal(t, []availableModelOptionResponse{
+		{ID: "alpha-alias", DisplayName: "alpha-alias", Type: "model"},
+		{ID: "claude-*", DisplayName: "claude-*", Type: "model"},
+		{ID: "zeta-alias", DisplayName: "zeta-alias", Type: "model"},
+	}, models)
+	require.NotContains(t, rec.Body.String(), "target-alpha")
+	require.NotContains(t, rec.Body.String(), "target-zeta")
+}
+
+func TestAccountHandlerGetAvailableModels_ExplicitMappingFiltersInvalidMixedEntries(t *testing.T) {
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       54,
+			Name:     "claude-mixed-mapping",
+			Platform: service.PlatformAnthropic,
+			Type:     service.AccountTypeAPIKey,
+			Status:   service.StatusActive,
+			Credentials: map[string]any{
+				"model_mapping": map[string]any{
+					" valid-alias ": " upstream-model ",
+					"blank-key":     " ",
+					"blank-value":   "   ",
+					"non-string":    42,
+					"nil-value":     nil,
+					"":              "upstream-empty-key",
+				},
+			},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/54/models", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	models := decodeAvailableModelOptions(t, rec.Body.Bytes())
+	require.Equal(t, []availableModelOptionResponse{
+		{ID: "valid-alias", DisplayName: "valid-alias", Type: "model"},
+	}, models)
+	require.NotContains(t, rec.Body.String(), "claude-3-7-sonnet")
+}
+
+func TestAccountHandlerGetAvailableModels_ExplicitMappingInvalidFallsBack(t *testing.T) {
+	tests := []struct {
+		name           string
+		credentials    map[string]any
+		fallbackIDs    []string
+		defaultCatalog bool
+	}{
+		{name: "missing", credentials: nil, defaultCatalog: true},
+		{name: "empty", credentials: map[string]any{"model_mapping": map[string]any{}}, defaultCatalog: true},
+		{name: "wrong type", credentials: map[string]any{"model_mapping": "not-a-map"}, defaultCatalog: true},
+		{name: "all invalid", credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"blank-key":   " ",
+				"blank-value": "",
+				"non-string":  false,
+			},
+		}, fallbackIDs: []string{"blank-key", "blank-value"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &availableModelsAdminService{
+				stubAdminService: newStubAdminService(),
+				account: service.Account{
+					ID:          55,
+					Name:        "gemini-no-explicit-mapping",
+					Platform:    service.PlatformGemini,
+					Type:        service.AccountTypeAPIKey,
+					Status:      service.StatusActive,
+					Credentials: tt.credentials,
+				},
+			}
+			router := setupAvailableModelsRouter(svc)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/55/models", nil)
+			router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			models := decodeAvailableModelOptions(t, rec.Body.Bytes())
+			require.NotEmpty(t, models)
+			if tt.defaultCatalog {
+				require.Contains(t, rec.Body.String(), "gemini-2.5-pro")
+				return
+			}
+			ids := make([]string, 0, len(models))
+			for _, model := range models {
+				ids = append(ids, model.ID)
+			}
+			require.ElementsMatch(t, tt.fallbackIDs, ids)
+		})
+	}
 }
 
 func TestAccountHandlerGetAvailableModels_GrokUsesXAIModels(t *testing.T) {
@@ -209,15 +446,11 @@ func TestAccountHandlerGetAvailableModels_OpenAIOAuthPassthroughFallsBackToDefau
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-
-	var resp struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+	models := decodeAvailableModelOptions(t, rec.Body.Bytes())
+	require.NotEmpty(t, models)
+	for _, model := range models {
+		require.NotEqual(t, "gpt-5", model.ID)
 	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotEmpty(t, resp.Data)
-	require.NotEqual(t, "gpt-5", resp.Data[0].ID)
 }
 
 func TestAccountHandlerGetAvailableModels_OpenAIAPIKeyDefaultsToConcreteGPT56Sol(t *testing.T) {
