@@ -77,7 +77,20 @@ function mountModal(account: Record<string, unknown> = {
     global: {
       stubs: {
         BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' },
-        Select: { template: '<div class="select-stub"></div>' },
+        Select: {
+          props: ['options'],
+          emits: ['update:modelValue'],
+          template: `<div class="select-stub">
+            <button
+              v-for="option in options"
+              :key="option.id ?? option.value"
+              class="select-option"
+              @click="$emit('update:modelValue', option.id ?? option.value)"
+            >
+              {{ option.display_name ?? option.label ?? option.id ?? option.value }}
+            </button>
+          </div>`
+        },
         TextArea: {
           props: ['modelValue'],
           emits: ['update:modelValue'],
@@ -146,6 +159,34 @@ describe('AccountTestModal', () => {
     const preview = wrapper.find('img[alt="test-image-1"]')
     expect(preview.exists()).toBe(true)
     expect(preview.attributes('src')).toBe('data:image/png;base64,QUJD')
+  })
+
+  it('模型选择器显示 raw ID、保留白名单别名并提交所选 key', async () => {
+    getAvailableModels.mockResolvedValue([
+      { id: 'gcli-gemini-2.5-pro', display_name: 'Gemini 2.5 Pro' },
+      { id: 'gcli-gemini-2.5-flash', display_name: 'Gemini 2.5 Flash' }
+    ])
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
+    ) as any
+
+    const wrapper = mountModal()
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const options = wrapper.findAll('button.select-option')
+    expect(options.map((option) => option.text().trim())).toEqual([
+      'gcli-gemini-2.5-pro',
+      'gcli-gemini-2.5-flash'
+    ])
+
+    await options[0].trigger('click')
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    const [, request] = (global.fetch as any).mock.calls[0]
+    expect(JSON.parse(request.body).model_id).toBe('gcli-gemini-2.5-pro')
   })
 
   it('grok 账号测试默认选择 Grok 模型', async () => {
