@@ -46,6 +46,8 @@ function mountTable(
   extraProps?: {
     imageRateIndependent?: boolean
     imageRateMultiplier?: number | null
+    videoRateIndependent?: boolean
+    videoRateMultiplier?: number | null
     peakWindow?: string
     peakRateMultiplier?: number | null
   }
@@ -246,6 +248,114 @@ describe('PlazaModelPricingTable', () => {
     expect(text).toContain('modelPlaza.table.perRequest')
     // 单位后缀跟在价格后(按次 → / 次)
     expect(text).toContain('modelPlaza.table.perUnitRequest')
+  })
+
+  it('视频独立倍率开启时,金额与倍率列均覆盖用户专属倍率并按秒展示', () => {
+    const model = tokenModel({
+      name: 'grok-imagine-video-1',
+      pricing: {
+        billing_mode: 'video',
+        input_price: null,
+        output_price: null,
+        cache_write_price: null,
+        cache_read_price: null,
+        image_input_price: null,
+        image_output_price: null,
+        per_request_price: 0.08,
+        intervals: []
+      },
+      official_pricing: null
+    })
+    const wrapper = mountTable([model], 0.15, 0.1, {
+      videoRateIndependent: true,
+      videoRateMultiplier: 0.25
+    })
+    const text = wrapper.text()
+
+    expect(text).toContain('$0.02')
+    expect(text).not.toContain('$0.008')
+    expect(text).toContain('modelPlaza.table.perSecond')
+    expect(text).toContain('modelPlaza.table.perUnitSecond')
+    expect(wrapper.findAll('tbody tr td').at(-1)!.text()).toBe('0.25x')
+  })
+
+  it('视频独立倍率为 0 时金额与倍率列保留 0,不回退到默认倍率', () => {
+    const model = tokenModel({
+      name: 'video-zero-rate',
+      pricing: {
+        billing_mode: 'video',
+        input_price: null,
+        output_price: null,
+        cache_write_price: null,
+        cache_read_price: null,
+        image_input_price: null,
+        image_output_price: null,
+        per_request_price: 0.08,
+        intervals: []
+      },
+      official_pricing: null
+    })
+    const wrapper = mountTable([model], 0.15, 0.1, {
+      videoRateIndependent: true,
+      videoRateMultiplier: 0
+    })
+
+    expect(wrapper.text()).toContain('$0.00')
+    expect(wrapper.findAll('tbody tr td').at(-1)!.text()).toBe('0x')
+  })
+
+  it('视频独立倍率关闭或旧响应缺少字段时回退到用户专属倍率', () => {
+    const model = tokenModel({
+      name: 'video-fallback',
+      pricing: {
+        billing_mode: 'video',
+        input_price: null,
+        output_price: null,
+        cache_write_price: null,
+        cache_read_price: null,
+        image_input_price: null,
+        image_output_price: null,
+        per_request_price: 0.08,
+        intervals: []
+      },
+      official_pricing: null
+    })
+
+    const closed = mountTable([model], 0.15, 0.1, {
+      videoRateIndependent: false,
+      videoRateMultiplier: 0.25
+    })
+    const oldResponse = mountTable([model], 0.15, 0.1)
+    for (const wrapper of [closed, oldResponse]) {
+      expect(wrapper.text()).toContain('$0.008')
+      expect(wrapper.findAll('tbody tr td').at(-1)!.text()).toContain('0.1x')
+      expect(wrapper.text()).not.toContain('NaN')
+    }
+  })
+
+  it('计费模式决定单位,模型名含 video 的 per_request 仍按次', () => {
+    const model = tokenModel({
+      name: 'grok-imagine-video-but-request',
+      pricing: {
+        billing_mode: 'per_request',
+        input_price: null,
+        output_price: null,
+        cache_write_price: null,
+        cache_read_price: null,
+        image_input_price: null,
+        image_output_price: null,
+        per_request_price: 0.08,
+        intervals: []
+      },
+      official_pricing: null
+    })
+    const wrapper = mountTable([model], 1)
+    const text = wrapper.text()
+
+    expect(text).toContain('modelPlaza.table.perRequest')
+    expect(text).toContain('modelPlaza.table.perUnitRequest')
+    expect(text).not.toContain('modelPlaza.table.perSecond')
+    expect(text).not.toContain('modelPlaza.table.perUnitSecond')
   })
 
   it('token 模型阶梯定价内联进输入/输出列,按倍率折算', () => {

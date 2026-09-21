@@ -179,7 +179,7 @@
             </td>
           </template>
 
-          <!-- 按次 / 按图片计费:实付区整体合并,阶梯芯片或单一按次价 -->
+          <!-- 按次 / 按图片 / 按视频计费:实付区整体合并,阶梯芯片或单一按次价 -->
           <template v-else>
             <td colspan="3" class="pz-cell px-3 py-2.5 align-middle">
               <div
@@ -276,7 +276,7 @@
             <span v-else class="text-gray-400 dark:text-dark-500">-</span>
           </td>
 
-          <!-- 折扣倍率(分时时段行展示 生效倍率×时段倍率;生图独立倍率行展示独立倍率;专属倍率划线展示原倍率) -->
+          <!-- 折扣倍率(分时时段行展示 生效倍率×时段倍率;媒体独立倍率行展示独立倍率;专属倍率划线展示原倍率) -->
           <td
             class="border-l border-gray-100 py-2.5 pl-3 pr-5 text-right align-middle font-mono text-xs dark:border-dark-700/60"
           >
@@ -287,15 +287,15 @@
               >{{ periodRate(period) }}x</span
             >
             <span
-              v-else-if="usesIndependentImageRate(m)"
+              v-else-if="usesIndependentImageRate(m) || usesIndependentVideoRate(m)"
               class="font-bold text-gray-700 dark:text-gray-300"
               >{{ requestRate(m) }}x</span
             >
             <template v-else-if="hasCustomRate">
               <span class="mr-1 text-gray-400 line-through dark:text-dark-500">{{ rateMultiplier }}x</span>
-              <span class="font-bold text-primary-600 dark:text-primary-400">{{ effectiveRate }}x</span>
+              <span class="font-bold text-primary-600 dark:text-primary-400">{{ requestRate(m) }}x</span>
             </template>
-            <span v-else class="font-bold text-gray-700 dark:text-gray-300">{{ effectiveRate }}x</span>
+            <span v-else class="font-bold text-gray-700 dark:text-gray-300">{{ requestRate(m) }}x</span>
           </td>
         </tr>
       </tbody>
@@ -310,7 +310,9 @@ import { formatScaled, resolveIntervalPrices } from '@/utils/pricing'
 import { platformAccentColor, platformBadgeLightClass, platformLabel } from '@/utils/platformColors'
 import {
   BILLING_MODE_TOKEN,
+  BILLING_MODE_PER_REQUEST,
   BILLING_MODE_IMAGE,
+  BILLING_MODE_VIDEO,
   type BillingMode
 } from '@/constants/channel'
 import type { PlazaModel, PlazaTimePricingPeriod } from '@/api/modelPlaza'
@@ -327,6 +329,9 @@ const props = defineProps<{
   /** 生图独立倍率:true 时图片计费模型的实付倍率取 imageRateMultiplier,不取分组/专属倍率。 */
   imageRateIndependent?: boolean
   imageRateMultiplier?: number | null
+  /** 视频独立倍率:true 时视频计费模型的实付倍率取 videoRateMultiplier,不取分组/专属倍率。 */
+  videoRateIndependent?: boolean
+  videoRateMultiplier?: number | null
   /**
    * 高峰窗口描述(含倍率与服务器时区标注),空串/缺省 = 分组未启用高峰。
    * 表格所有价格均为不含高峰因子的口径,该窗口仅用于分时时段行的 tooltip 披露:
@@ -373,9 +378,15 @@ function billingMode(m: PlazaModel): BillingMode {
 }
 
 function billingModeLabel(m: PlazaModel): string {
-  return billingMode(m) === BILLING_MODE_IMAGE
-    ? t('modelPlaza.table.perImage')
-    : t('modelPlaza.table.perRequest')
+  switch (billingMode(m)) {
+    case BILLING_MODE_IMAGE:
+      return t('modelPlaza.table.perImage')
+    case BILLING_MODE_VIDEO:
+      return t('modelPlaza.table.perSecond')
+    case BILLING_MODE_PER_REQUEST:
+    default:
+      return t('modelPlaza.table.perRequest')
+  }
 }
 
 /** 价格统一保底 2 位小数,更长的有效小数原样保留。 */
@@ -417,12 +428,19 @@ function usesIndependentImageRate(m: PlazaModel): boolean {
   return billingMode(m) === BILLING_MODE_IMAGE && props.imageRateIndependent === true
 }
 
-/** 按次/按图片行的生效倍率。 */
-function requestRate(m: PlazaModel): number {
-  return usesIndependentImageRate(m) ? (props.imageRateMultiplier ?? 1) : effectiveRate.value
+/** 视频计费模型且分组开启视频独立倍率:实付倍率取独立倍率,与计费口径一致。 */
+function usesIndependentVideoRate(m: PlazaModel): boolean {
+  return billingMode(m) === BILLING_MODE_VIDEO && props.videoRateIndependent === true
 }
 
-/** 按次 / 按图片单价(乘该行生效倍率,不换算 1M)。 */
+/** 按次/按图片/按视频行的生效倍率。 */
+function requestRate(m: PlazaModel): number {
+  if (usesIndependentImageRate(m)) return props.imageRateMultiplier ?? 1
+  if (usesIndependentVideoRate(m)) return props.videoRateMultiplier ?? 1
+  return effectiveRate.value
+}
+
+/** 按次 / 按图片 / 按视频单价(乘该行生效倍率,不换算 1M)。 */
 function paidRequestPrice(m: PlazaModel, value: number | null | undefined): string {
   if (value == null) return '-'
   return formatScaled(value * requestRate(m), 1, MIN_DECIMALS)
@@ -434,11 +452,17 @@ function official(value: number | null | undefined): string {
   return formatScaled(value, PER_MILLION, MIN_DECIMALS)
 }
 
-/** 非 token 计费的单位后缀:按图片 → “/ 张”,按次 → “/ 次”。 */
+/** 非 token 计费的单位后缀:按次 → “/ 次”,按图片 → “/ 张”,按视频 → “/ 秒”。 */
 function perUnitSuffix(m: PlazaModel): string {
-  return billingMode(m) === BILLING_MODE_IMAGE
-    ? t('modelPlaza.table.perUnitImage')
-    : t('modelPlaza.table.perUnitRequest')
+  switch (billingMode(m)) {
+    case BILLING_MODE_IMAGE:
+      return t('modelPlaza.table.perUnitImage')
+    case BILLING_MODE_VIDEO:
+      return t('modelPlaza.table.perUnitSecond')
+    case BILLING_MODE_PER_REQUEST:
+    default:
+      return t('modelPlaza.table.perUnitRequest')
+  }
 }
 
 function hasCachePricing(m: PlazaModel): boolean {
