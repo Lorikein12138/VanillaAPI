@@ -57,34 +57,38 @@ func TestListPlazaGroups_GroupCentricAggregation(t *testing.T) {
 	require.Equal(t, "claude-sonnet", out[0].Models[1].Name)
 }
 
-func TestListPlazaGroups_ModelAllowlistDoesNotFilterChannelPricingModels(t *testing.T) {
+func TestListPlazaGroups_ModelAllowlistFiltersChannelPricingModels(t *testing.T) {
 	channels := []Channel{
 		{
 			ID: 1, Name: "associated-active", Status: StatusActive, GroupIDs: []int64{10},
 			ModelPricing: []ChannelModelPricing{{
-				Platform: PlatformAnthropic,
-				Models:   []string{"model-a", "model-b", "model-c"},
+				Platform:   PlatformAnthropic,
+				Models:     []string{"model-a", "model-b", "model-c"},
+				InputPrice: testPtrFloat64(3e-6),
 			}},
 		},
 		{
 			ID: 2, Name: "associated-inactive", Status: "inactive", GroupIDs: []int64{10},
 			ModelPricing: []ChannelModelPricing{{
-				Platform: PlatformAnthropic,
-				Models:   []string{"model-inactive"},
+				Platform:   PlatformAnthropic,
+				Models:     []string{"model-inactive"},
+				InputPrice: testPtrFloat64(3e-6),
 			}},
 		},
 		{
 			ID: 3, Name: "unassociated-active", Status: StatusActive, GroupIDs: []int64{99},
 			ModelPricing: []ChannelModelPricing{{
-				Platform: PlatformAnthropic,
-				Models:   []string{"model-unassociated"},
+				Platform:   PlatformAnthropic,
+				Models:     []string{"model-unassociated"},
+				InputPrice: testPtrFloat64(3e-6),
 			}},
 		},
 		{
 			ID: 4, Name: "associated-wrong-platform", Status: StatusActive, GroupIDs: []int64{10},
 			ModelPricing: []ChannelModelPricing{{
-				Platform: PlatformOpenAI,
-				Models:   []string{"model-wrong-platform"},
+				Platform:   PlatformOpenAI,
+				Models:     []string{"model-wrong-platform"},
+				InputPrice: testPtrFloat64(3e-6),
 			}},
 		},
 	}
@@ -103,11 +107,117 @@ func TestListPlazaGroups_ModelAllowlistDoesNotFilterChannelPricingModels(t *test
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 1)
+	require.Equal(t, "model-a", out[0].Models[0].Name)
+}
+
+func TestListPlazaGroups_DisabledModelAllowlistKeepsChannelPricingModels(t *testing.T) {
+	channels := []Channel{
+		plazaPricedChannel(1, "associated-active", []int64{10}, PlatformAnthropic,
+			"model-a", "model-b", "model-c"),
+	}
+	groups := []Group{{
+		ID:             10,
+		Name:           "allowlist-disabled",
+		Platform:       PlatformAnthropic,
+		RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{
+			Enabled: false,
+			Models:  []string{"model-a"},
+		},
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
 	require.Equal(t, []string{"model-a", "model-b", "model-c"}, []string{
 		out[0].Models[0].Name,
 		out[0].Models[1].Name,
 		out[0].Models[2].Name,
 	})
+}
+
+func TestListPlazaGroups_ModelAllowlistWildcardUsesGatewayMatching(t *testing.T) {
+	channels := []Channel{
+		{
+			ID: 1, Name: "multi", Status: StatusActive, GroupIDs: []int64{10},
+			ModelPricing: []ChannelModelPricing{
+				{Platform: PlatformOpenAI, Models: []string{
+					"gpt-image-2", "gpt-image-2.5-flare", "gpt-5.6-sol",
+				}},
+				{Platform: PlatformAnthropic, Models: []string{"claude-sonnet-4-thinking"}},
+			},
+		},
+	}
+	allowlist := GroupModelAllowlist{
+		Enabled: true,
+		Models:  []string{"GPT-IMAGE-*", "claude-sonnet-4"},
+	}
+	groups := []Group{{
+		ID:             10,
+		Name:           "gateway-matching",
+		Platform:       PlatformComposite,
+		RateMultiplier: 1,
+		ModelAllowlist: allowlist,
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	got := make(map[string]bool, len(out[0].Models))
+	for _, model := range out[0].Models {
+		got[model.Name] = true
+	}
+	for _, model := range []string{
+		"gpt-image-2", "gpt-image-2.5-flare", "gpt-5.6-sol", "claude-sonnet-4-thinking",
+	} {
+		require.Equal(t, allowlist.Allows(model), got[model], "广场结果必须复用网关白名单匹配语义: %s", model)
+	}
+	require.Len(t, got, 3)
+}
+
+func TestListPlazaGroups_ModelAllowlistKeepsAllowedUnpricedModel(t *testing.T) {
+	channels := []Channel{{
+		ID: 1, Name: "mapping-only", Status: StatusActive, GroupIDs: []int64{10},
+		ModelMapping: map[string]map[string]string{
+			PlatformAnthropic: {"model-unpriced": "model-unpriced"},
+		},
+	}}
+	groups := []Group{{
+		ID:             10,
+		Name:           "allowlisted-unpriced",
+		Platform:       PlatformAnthropic,
+		RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"model-unpriced", "model-not-declared"}},
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 1)
+	require.Equal(t, "model-unpriced", out[0].Models[0].Name)
+	require.Nil(t, out[0].Models[0].Pricing)
+}
+
+func TestListPlazaGroups_ModelAllowlistOmitsGroupWhenNoModelsMatch(t *testing.T) {
+	channels := []Channel{
+		plazaPricedChannel(1, "associated-active", []int64{10}, PlatformAnthropic, "model-a", "model-b"),
+	}
+	groups := []Group{{
+		ID:             10,
+		Name:           "no-allowlist-match",
+		Platform:       PlatformAnthropic,
+		RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"model-x"}},
+	}}
+
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Empty(t, out)
 }
 
 func TestListPlazaGroups_ExposesIndependentVideoRate(t *testing.T) {
