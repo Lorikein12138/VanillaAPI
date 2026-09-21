@@ -69,15 +69,24 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 	for _, id := range agModelIDs {
 		agModels = append(agModels, gemini.FallbackModel(id))
 	}
+	additionalModels := agModels
+	if forcePlatform != service.PlatformAntigravity && h.gatewayService != nil {
+		localModelIDs := h.gatewayService.GetAvailableModels(c.Request.Context(), apiKey.GroupID, service.PlatformGemini)
+		localModels := make([]gemini.Model, 0, len(localModelIDs))
+		for _, id := range localModelIDs {
+			localModels = append(localModels, gemini.FallbackModel(id))
+		}
+		additionalModels = mergeGeminiModelLists(localModels, agModels)
+	}
 	if forcePlatform == service.PlatformAntigravity {
-		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
+		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(additionalModels)})
 		return
 	}
 
 	account, err := h.geminiCompatService.SelectAccountForAIStudioEndpoints(c.Request.Context(), apiKey.GroupID)
 	if err != nil {
-		if len(agModels) > 0 {
-			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
+		if len(additionalModels) > 0 {
+			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(additionalModels)})
 			return
 		}
 		markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -91,11 +100,11 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 	if shouldFallbackGeminiModels(res) {
-		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(mergeGeminiModelLists(gemini.DefaultModels(), agModels))})
+		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(mergeGeminiModelLists(gemini.DefaultModels(), additionalModels))})
 		return
 	}
-	if res.StatusCode == http.StatusOK && len(agModels) > 0 {
-		if merged, ok := appendUpstreamGeminiModels(res.Body, agModels); ok {
+	if res.StatusCode == http.StatusOK && len(additionalModels) > 0 {
+		if merged, ok := appendUpstreamGeminiModels(res.Body, additionalModels); ok {
 			res.Body = merged
 		}
 	}
