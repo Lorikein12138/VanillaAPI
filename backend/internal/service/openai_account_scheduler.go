@@ -30,6 +30,10 @@ const (
 const (
 	openAIAdvancedSchedulerSettingCacheTTL  = 5 * time.Second
 	openAIAdvancedSchedulerSettingDBTimeout = 2 * time.Second
+	openAIAccountHealthMinSamples           = int64(3)
+	openAIAccountHealthStaleAfter           = 10 * time.Minute
+	openAIAccountHealthProbeCooldown        = 30 * time.Second
+	openAIAccountHealthProbeLease           = 30 * time.Second
 	// ponytail: cap probes added when cost ordering expands configured Top-K;
 	// use bulk acquisition if a measured workload needs a higher ceiling.
 	openAIAccountSelectionProbeLimit = 64
@@ -45,6 +49,7 @@ const (
 
 type cachedOpenAIAdvancedSchedulerSetting struct {
 	lowUpstreamRatePriorityEnabled bool
+	smartEnabled                   bool
 	oauthSchedulingRateMultiplier  float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
@@ -56,6 +61,7 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 
 type openAIAdvancedSchedulerRuntimeSettings struct {
 	lowUpstreamRatePriorityEnabled bool
+	smartEnabled                   bool
 	oauthSchedulingRateMultiplier  float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
@@ -68,15 +74,17 @@ var openAIAdvancedSchedulerSettingCache atomic.Value // *cachedOpenAIAdvancedSch
 var openAIAdvancedSchedulerSettingSF singleflight.Group
 
 type OpenAIAccountScheduleRequest struct {
-	GroupID                 *int64
-	Platform                string
-	SessionHash             string
-	StickyAccountID         int64
-	GuardianParentAccountID int64
-	StickyPreviousAccountID int64
-	StickyWeighted          bool
-	SubscriptionPriority    bool
-	PreserveStickyBinding   bool
+	GroupID                   *int64
+	Platform                  string
+	SessionHash               string
+	StickyAccountID           int64
+	GuardianParentAccountID   int64
+	StickyPreviousAccountID   int64
+	StickyWeighted            bool
+	SubscriptionPriority      bool
+	SmartHealthEnabled        bool
+	SmartHealthProbeAccountID int64
+	PreserveStickyBinding     bool
 	// DisableStickyEscape keeps task-owner lookups on their account even when
 	// generic sticky health or concurrency heuristics would prefer another.
 	DisableStickyEscape     bool
@@ -107,17 +115,20 @@ type OpenAIAccountScheduleDecision struct {
 }
 
 type OpenAIAccountSchedulerMetricsSnapshot struct {
-	SelectTotal              int64
-	StickyPreviousHitTotal   int64
-	StickySessionHitTotal    int64
-	LoadBalanceSelectTotal   int64
-	AccountSwitchTotal       int64
-	SchedulerLatencyMsTotal  int64
-	SchedulerLatencyMsAvg    float64
-	StickyHitRatio           float64
-	AccountSwitchRate        float64
-	LoadSkewAvg              float64
-	RuntimeStatsAccountCount int
+	SelectTotal                    int64
+	StickyPreviousHitTotal         int64
+	StickySessionHitTotal          int64
+	LoadBalanceSelectTotal         int64
+	AccountSwitchTotal             int64
+	SchedulerLatencyMsTotal        int64
+	SchedulerLatencyMsAvg          float64
+	StickyHitRatio                 float64
+	AccountSwitchRate              float64
+	LoadSkewAvg                    float64
+	RuntimeStatsAccountCount       int
+	SmartHealthDegradedEscapeTotal int64
+	SmartHealthProbeTotal          int64
+	SmartHealthAllDegradedTotal    int64
 }
 
 type OpenAIAccountScheduler interface {
@@ -128,19 +139,23 @@ type OpenAIAccountScheduler interface {
 }
 
 type openAIAccountSchedulerMetrics struct {
-	selectTotal            atomic.Int64
-	stickyPreviousHitTotal atomic.Int64
-	stickySessionHitTotal  atomic.Int64
-	stickyHitTotal         atomic.Int64
-	loadBalanceSelectTotal atomic.Int64
-	accountSwitchTotal     atomic.Int64
-	latencyMsTotal         atomic.Int64
-	loadSkewMilliTotal     atomic.Int64
+	selectTotal                    atomic.Int64
+	stickyPreviousHitTotal         atomic.Int64
+	stickySessionHitTotal          atomic.Int64
+	stickyHitTotal                 atomic.Int64
+	loadBalanceSelectTotal         atomic.Int64
+	accountSwitchTotal             atomic.Int64
+	latencyMsTotal                 atomic.Int64
+	loadSkewMilliTotal             atomic.Int64
+	smartHealthDegradedEscapeTotal atomic.Int64
+	smartHealthProbeTotal          atomic.Int64
+	smartHealthAllDegradedTotal    atomic.Int64
 }
 
 type openAIAccountLoadPlan struct {
 	allCandidates             []openAIAccountCandidateScore
 	candidates                []openAIAccountCandidateScore
+	probeCandidates           []openAIAccountCandidateScore
 	staleSnapshotCompactRetry []openAIAccountCandidateScore
 	selectionOrder            []openAIAccountCandidateScore
 	candidateCount            int
@@ -188,14 +203,65 @@ func (m *openAIAccountSchedulerMetrics) recordSwitch() {
 	m.accountSwitchTotal.Add(1)
 }
 
+func (m *openAIAccountSchedulerMetrics) recordSmartHealthDegradedEscape() {
+	if m == nil {
+		return
+	}
+	m.smartHealthDegradedEscapeTotal.Add(1)
+}
+
+func (m *openAIAccountSchedulerMetrics) recordSmartHealthProbe() {
+	if m == nil {
+		return
+	}
+	m.smartHealthProbeTotal.Add(1)
+}
+
+func (m *openAIAccountSchedulerMetrics) recordSmartHealthAllDegraded() {
+	if m == nil {
+		return
+	}
+	m.smartHealthAllDegradedTotal.Add(1)
+}
+
 type openAIAccountRuntimeStats struct {
 	accounts     sync.Map
 	accountCount atomic.Int64
 }
 
+type openAIAccountHealthLevel uint32
+
+const (
+	openAIAccountHealthUnknown openAIAccountHealthLevel = iota
+	openAIAccountHealthHealthy
+	openAIAccountHealthDegraded
+)
+
+const (
+	openAIAccountHealthReasonNone uint32 = iota
+	openAIAccountHealthReasonErrorRate
+	openAIAccountHealthReasonTTFT
+)
+
 type openAIAccountRuntimeStat struct {
 	errorRateEWMABits atomic.Uint64
 	ttftEWMABits      atomic.Uint64
+	sampleCount       atomic.Int64
+	lastObservedAt    atomic.Int64
+	healthLevel       atomic.Uint32
+	healthReason      atomic.Uint32
+	nextProbeAt       atomic.Int64
+	probeLeaseUntil   atomic.Int64
+	probeActive       atomic.Bool
+}
+
+type openAIAccountHealthAssessment struct {
+	level     openAIAccountHealthLevel
+	reason    uint32
+	errorRate float64
+	ttft      float64
+	hasTTFT   bool
+	samples   int64
 }
 
 func newOpenAIAccountRuntimeStats() *openAIAccountRuntimeStats {
@@ -235,7 +301,65 @@ func updateEWMAAtomic(target *atomic.Uint64, sample float64, alpha float64) {
 	}
 }
 
+func defaultOpenAIAccountHealthThresholds() openAIStickyEscapeConfig {
+	return openAIStickyEscapeConfig{ttftMs: 15000, errorRate: 0.5}
+}
+
+func classifyOpenAIAccountHealth(
+	errorRate float64,
+	ttft float64,
+	hasTTFT bool,
+	sampleCount int64,
+	thresholds openAIStickyEscapeConfig,
+) (openAIAccountHealthLevel, uint32) {
+	if sampleCount < openAIAccountHealthMinSamples || math.IsNaN(errorRate) || math.IsInf(errorRate, 0) {
+		return openAIAccountHealthUnknown, openAIAccountHealthReasonNone
+	}
+	if errorRate > thresholds.errorRate {
+		return openAIAccountHealthDegraded, openAIAccountHealthReasonErrorRate
+	}
+	if hasTTFT && (math.IsNaN(ttft) || math.IsInf(ttft, 0)) {
+		return openAIAccountHealthUnknown, openAIAccountHealthReasonNone
+	}
+	if hasTTFT && ttft > thresholds.ttftMs {
+		return openAIAccountHealthDegraded, openAIAccountHealthReasonTTFT
+	}
+	return openAIAccountHealthHealthy, openAIAccountHealthReasonNone
+}
+
+func openAIAccountHealthReasonName(reason uint32) string {
+	switch reason {
+	case openAIAccountHealthReasonErrorRate:
+		return "error_rate"
+	case openAIAccountHealthReasonTTFT:
+		return "ttft"
+	default:
+		return ""
+	}
+}
+
 func (s *openAIAccountRuntimeStats) report(accountID int64, success bool, firstTokenMs *int) {
+	s.reportAt(accountID, success, firstTokenMs, time.Now(), defaultOpenAIAccountHealthThresholds(), false)
+}
+
+func (s *openAIAccountRuntimeStats) reportWithHealthConfig(
+	accountID int64,
+	success bool,
+	firstTokenMs *int,
+	thresholds openAIStickyEscapeConfig,
+	logHealth bool,
+) {
+	s.reportAt(accountID, success, firstTokenMs, time.Now(), thresholds, logHealth)
+}
+
+func (s *openAIAccountRuntimeStats) reportAt(
+	accountID int64,
+	success bool,
+	firstTokenMs *int,
+	now time.Time,
+	thresholds openAIStickyEscapeConfig,
+	logHealth bool,
+) {
 	if s == nil || accountID <= 0 {
 		return
 	}
@@ -266,6 +390,53 @@ func (s *openAIAccountRuntimeStats) report(accountID int64, success bool, firstT
 			}
 		}
 	}
+
+	sampleCount := stat.sampleCount.Add(1)
+	stat.lastObservedAt.Store(now.UnixNano())
+	oldLevel := openAIAccountHealthLevel(stat.healthLevel.Load())
+	oldReason := stat.healthReason.Load()
+	isProbe := stat.probeActive.Swap(false)
+	if isProbe {
+		stat.probeLeaseUntil.Store(0)
+	}
+	ttftValue := math.Float64frombits(stat.ttftEWMABits.Load())
+	newLevel, newReason := classifyOpenAIAccountHealth(
+		clamp01(math.Float64frombits(stat.errorRateEWMABits.Load())),
+		ttftValue,
+		!math.IsNaN(ttftValue),
+		sampleCount,
+		thresholds,
+	)
+	if isProbe {
+		if newLevel == openAIAccountHealthHealthy {
+			stat.healthLevel.Store(uint32(openAIAccountHealthHealthy))
+			stat.healthReason.Store(openAIAccountHealthReasonNone)
+		} else {
+			stat.healthLevel.Store(uint32(openAIAccountHealthDegraded))
+			if newReason == openAIAccountHealthReasonNone {
+				newReason = oldReason
+			}
+			stat.healthReason.Store(newReason)
+			stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
+		}
+	} else if oldLevel != openAIAccountHealthDegraded {
+		stat.healthLevel.Store(uint32(newLevel))
+		stat.healthReason.Store(newReason)
+		if newLevel == openAIAccountHealthDegraded {
+			stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
+		}
+	}
+	if logHealth && oldLevel != openAIAccountHealthDegraded && newLevel == openAIAccountHealthDegraded {
+		slog.Info("openai_account_health_changed",
+			"account_id", accountID,
+			"from", openAIAccountHealthLevelName(oldLevel),
+			"to", openAIAccountHealthLevelName(newLevel),
+			"reason", openAIAccountHealthReasonName(newReason),
+			"error_rate", clamp01(math.Float64frombits(stat.errorRateEWMABits.Load())),
+			"ttft_ms", math.Float64frombits(stat.ttftEWMABits.Load()),
+			"sample_count", sampleCount,
+		)
+	}
 }
 
 func (s *openAIAccountRuntimeStats) snapshot(accountID int64) (errorRate float64, ttft float64, hasTTFT bool) {
@@ -286,6 +457,127 @@ func (s *openAIAccountRuntimeStats) snapshot(accountID int64) (errorRate float64
 		return errorRate, 0, false
 	}
 	return errorRate, ttftValue, true
+}
+
+func openAIAccountHealthLevelName(level openAIAccountHealthLevel) string {
+	switch level {
+	case openAIAccountHealthHealthy:
+		return "healthy"
+	case openAIAccountHealthDegraded:
+		return "degraded"
+	default:
+		return "unknown"
+	}
+}
+
+func (s *openAIAccountRuntimeStats) health(accountID int64, now time.Time, thresholds openAIStickyEscapeConfig) openAIAccountHealthAssessment {
+	assessment := openAIAccountHealthAssessment{level: openAIAccountHealthUnknown}
+	if s == nil || accountID <= 0 {
+		return assessment
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return assessment
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return assessment
+	}
+	assessment.errorRate, assessment.ttft, assessment.hasTTFT = s.snapshot(accountID)
+	assessment.samples = stat.sampleCount.Load()
+	level := openAIAccountHealthLevel(stat.healthLevel.Load())
+	assessment.reason = stat.healthReason.Load()
+	if level == openAIAccountHealthDegraded {
+		assessment.level = level
+		return assessment
+	}
+	lastObservedAt := stat.lastObservedAt.Load()
+	if assessment.samples < openAIAccountHealthMinSamples || lastObservedAt <= 0 {
+		return assessment
+	}
+	last := time.Unix(0, lastObservedAt)
+	if !now.Before(last) && now.Sub(last) > openAIAccountHealthStaleAfter {
+		return assessment
+	}
+	classified, reason := classifyOpenAIAccountHealth(assessment.errorRate, assessment.ttft, assessment.hasTTFT, assessment.samples, thresholds)
+	assessment.level = classified
+	assessment.reason = reason
+	return assessment
+}
+
+func (s *openAIAccountRuntimeStats) tryAcquireProbeLease(accountID int64, now time.Time) bool {
+	if s == nil || accountID <= 0 {
+		return false
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return false
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil || openAIAccountHealthLevel(stat.healthLevel.Load()) != openAIAccountHealthDegraded {
+		return false
+	}
+	nowNanos := now.UnixNano()
+	if next := stat.nextProbeAt.Load(); next > nowNanos {
+		return false
+	}
+	if leaseUntil := stat.probeLeaseUntil.Load(); leaseUntil > nowNanos {
+		return false
+	}
+	if stat.probeActive.Load() {
+		if leaseUntil := stat.probeLeaseUntil.Load(); leaseUntil > 0 && leaseUntil <= nowNanos && stat.probeActive.CompareAndSwap(true, false) {
+			stat.probeLeaseUntil.Store(0)
+			stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
+		} else {
+			return false
+		}
+	}
+	newLeaseUntil := now.Add(openAIAccountHealthProbeLease).UnixNano()
+	for {
+		leaseUntil := stat.probeLeaseUntil.Load()
+		if leaseUntil > nowNanos {
+			return false
+		}
+		if stat.probeLeaseUntil.CompareAndSwap(leaseUntil, newLeaseUntil) {
+			break
+		}
+	}
+	stat.probeActive.Store(true)
+	return true
+}
+
+func (s *openAIAccountRuntimeStats) probeEligible(accountID int64, now time.Time) bool {
+	if s == nil || accountID <= 0 {
+		return false
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return false
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil || openAIAccountHealthLevel(stat.healthLevel.Load()) != openAIAccountHealthDegraded {
+		return false
+	}
+	nowNanos := now.UnixNano()
+	return stat.nextProbeAt.Load() <= nowNanos && stat.probeLeaseUntil.Load() <= nowNanos && !stat.probeActive.Load()
+}
+
+func (s *openAIAccountRuntimeStats) cancelProbeLease(accountID int64, now time.Time) {
+	if s == nil || accountID <= 0 {
+		return
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return
+	}
+	if stat.probeActive.Swap(false) {
+		stat.probeLeaseUntil.Store(0)
+		stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
+	}
 }
 
 func (s *openAIAccountRuntimeStats) size() int {
@@ -417,6 +709,23 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			}
 			if !groupCompatible ||
 				!compatible || !s.isAccountTransportCompatible(selection.Account, req.RequiredTransport) {
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				selection = nil
+			}
+		}
+		if selection != nil && selection.Account != nil && req.SmartHealthEnabled && s.stats != nil {
+			assessment := s.stats.health(selection.Account.ID, time.Now(), s.service.openAIStickyEscapeConfig())
+			if assessment.level == openAIAccountHealthDegraded {
+				s.metrics.recordSmartHealthDegradedEscape()
+				slog.Info("openai_account_health_previous_response_escape",
+					"account_id", selection.Account.ID,
+					"reason", openAIAccountHealthReasonName(assessment.reason),
+					"error_rate", assessment.errorRate,
+					"ttft_ms", assessment.ttft,
+					"sample_count", assessment.samples,
+				)
 				if selection.ReleaseFunc != nil {
 					selection.ReleaseFunc()
 				}
@@ -562,7 +871,20 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape && !req.DisableStickyEscape {
+	if req.SmartHealthEnabled && s.stats != nil {
+		assessment := s.stats.health(accountID, now, escapeCfg)
+		if assessment.level == openAIAccountHealthDegraded && !req.DisableStickyEscape {
+			s.metrics.recordSmartHealthDegradedEscape()
+			slog.Info("openai_account_health_sticky_escape",
+				"account_id", accountID,
+				"reason", openAIAccountHealthReasonName(assessment.reason),
+				"error_rate", assessment.errorRate,
+				"ttft_ms", assessment.ttft,
+				"sample_count", assessment.samples,
+			)
+			return nil, true, nil
+		}
+	} else if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape && !req.DisableStickyEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
 			"reason", reason,
@@ -654,14 +976,17 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int6
 }
 
 type openAIAccountCandidateScore struct {
-	account   *Account
-	loadInfo  *AccountLoadInfo
-	loadKnown bool
-	score     float64
-	priority  int
-	errorRate float64
-	ttft      float64
-	hasTTFT   bool
+	account      *Account
+	loadInfo     *AccountLoadInfo
+	loadKnown    bool
+	score        float64
+	priority     int
+	errorRate    float64
+	ttft         float64
+	hasTTFT      bool
+	health       openAIAccountHealthLevel
+	healthReason uint32
+	healthProbe  bool
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore
@@ -873,13 +1198,25 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		if s.stats != nil {
 			errorRate, ttft, hasTTFT = s.stats.snapshot(account.ID)
 		}
+		health := openAIAccountHealthUnknown
+		healthReason := uint32(openAIAccountHealthReasonNone)
+		healthProbe := false
+		if req.SmartHealthEnabled && s.stats != nil {
+			assessment := s.stats.health(account.ID, time.Now(), s.service.openAIStickyEscapeConfig())
+			health = assessment.level
+			healthReason = assessment.reason
+			healthProbe = req.SmartHealthProbeAccountID == account.ID
+		}
 		allCandidates = append(allCandidates, openAIAccountCandidateScore{
-			account:   account,
-			loadInfo:  loadInfo,
-			loadKnown: loadKnown,
-			errorRate: errorRate,
-			ttft:      ttft,
-			hasTTFT:   hasTTFT,
+			account:      account,
+			loadInfo:     loadInfo,
+			loadKnown:    loadKnown,
+			errorRate:    errorRate,
+			ttft:         ttft,
+			hasTTFT:      hasTTFT,
+			health:       health,
+			healthReason: healthReason,
+			healthProbe:  healthProbe,
 		})
 	}
 
@@ -997,8 +1334,13 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		queueFactor := 1 - clamp01(float64(item.loadInfo.WaitingCount)/float64(maxWaiting))
 		errorFactor := 1 - clamp01(item.errorRate)
 		ttftFactor := 0.5
+		if req.SmartHealthEnabled && item.health == openAIAccountHealthUnknown {
+			errorFactor = 0.5
+		}
 		if item.hasTTFT && hasTTFTSample && maxTTFT > minTTFT {
-			ttftFactor = 1 - clamp01((item.ttft-minTTFT)/(maxTTFT-minTTFT))
+			if !req.SmartHealthEnabled || item.health != openAIAccountHealthUnknown {
+				ttftFactor = 1 - clamp01((item.ttft-minTTFT)/(maxTTFT-minTTFT))
+			}
 		}
 		resetFactor := 0.0
 		if weights.Reset > 0 && hasResetSample {
@@ -1037,6 +1379,17 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			}
 		}
 	}
+	if req.SmartHealthEnabled && req.SmartHealthProbeAccountID > 0 {
+		primaryCandidates := make([]openAIAccountCandidateScore, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.healthProbe {
+				plan.probeCandidates = append(plan.probeCandidates, candidate)
+				continue
+			}
+			primaryCandidates = append(primaryCandidates, candidate)
+		}
+		candidates = primaryCandidates
+	}
 	plan.candidates = candidates
 
 	plan.topK = s.service.openAIWSLBTopKForRequest(ctx)
@@ -1048,6 +1401,13 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	}
 
 	plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
+	if len(plan.probeCandidates) > 0 {
+		probePlan := plan
+		probePlan.candidates = plan.probeCandidates
+		probePlan.probeCandidates = nil
+		probePlan.topK = 1
+		plan.selectionOrder = append(plan.selectionOrder, s.buildOpenAISelectionOrder(req, probePlan)...)
+	}
 	return plan
 }
 
@@ -1185,39 +1545,56 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 		if candidate.account == nil {
 			continue
 		}
+		probe := candidate.healthProbe && req.SmartHealthEnabled
+		if probe && !s.stats.tryAcquireProbeLease(candidate.account.ID, time.Now()) {
+			continue
+		}
+		cancelProbe := func() {
+			if probe {
+				s.stats.cancelProbeLease(candidate.account.ID, time.Now())
+			}
+		}
 		if candidate.loadKnown && candidate.account.Concurrency > 0 &&
 			candidate.loadInfo.CurrentConcurrency >= candidate.account.Concurrency {
+			cancelProbe()
 			continue
 		}
 
 		result, attempted, acquireErr := s.tryAcquireOpenAIAccountSlot(ctx, candidate.account.ID, candidate.account.Concurrency, budget)
 		if !attempted {
+			cancelProbe()
 			break
 		}
 		if acquireErr != nil {
+			cancelProbe()
 			return nil, compactBlocked, acquireErr
 		}
 		if result == nil || !result.Acquired {
+			cancelProbe()
 			continue
 		}
 
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 			release(result)
+			cancelProbe()
 			continue
 		}
 		if !s.consumeOpenAISelectionDBRecheck(budget) {
 			release(result)
+			cancelProbe()
 			break
 		}
 		fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 		if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
 			release(result)
+			cancelProbe()
 			continue
 		}
 		if req.RequireCompact && openAICompactSupportTier(fresh) == 0 {
 			compactBlocked = true
 			release(result)
+			cancelProbe()
 			continue
 		}
 
@@ -1225,17 +1602,23 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			release(result)
 			result, attempted, acquireErr = s.tryAcquireOpenAIAccountSlot(ctx, fresh.ID, fresh.Concurrency, budget)
 			if !attempted {
+				cancelProbe()
 				continue
 			}
 			if acquireErr != nil {
+				cancelProbe()
 				return nil, compactBlocked, acquireErr
 			}
 			if result == nil || !result.Acquired {
+				cancelProbe()
 				continue
 			}
 		}
-		if req.SessionHash != "" && !req.PreserveStickyBinding {
+		if req.SessionHash != "" && !req.PreserveStickyBinding && !probe {
 			_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, fresh.ID)
+		}
+		if probe {
+			s.metrics.recordSmartHealthProbe()
 		}
 		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 			Account:     fresh,
@@ -1307,6 +1690,20 @@ func (s *defaultOpenAIAccountScheduler) tryFallbackToWeightedSticky(
 		}
 		if req.RequireCompact && openAICompactSupportTier(account) == 0 {
 			continue
+		}
+		if req.SmartHealthEnabled && s.stats != nil {
+			assessment := s.stats.health(account.ID, time.Now(), s.service.openAIStickyEscapeConfig())
+			if assessment.level == openAIAccountHealthDegraded {
+				s.metrics.recordSmartHealthDegradedEscape()
+				slog.Info("openai_account_health_weighted_sticky_escape",
+					"account_id", account.ID,
+					"reason", openAIAccountHealthReasonName(assessment.reason),
+					"error_rate", assessment.errorRate,
+					"ttft_ms", assessment.ttft,
+					"sample_count", assessment.samples,
+				)
+				continue
+			}
 		}
 		// Keep weighted sticky fallback subject to the same free-tier gate as the
 		// normal and sticky selection paths. Otherwise an over-quota free account
@@ -1486,6 +1883,22 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
 	}
 
+	if req.SmartHealthEnabled {
+		primary, degraded := s.splitSmartHealthCandidates(req, filtered)
+		if len(primary) > 0 {
+			filtered = primary
+			if probe := s.selectSmartHealthProbeCandidate(req, degraded); probe != nil {
+				filtered = append(filtered, probe)
+				req.SmartHealthProbeAccountID = probe.ID
+			}
+		} else if len(degraded) > 0 {
+			filtered = degraded
+			s.metrics.recordSmartHealthAllDegraded()
+			slog.Info("openai_account_health_all_degraded", "candidate_count", len(degraded))
+		}
+		loadReq = buildOpenAIAccountLoadRequest(filtered)
+	}
+
 	loadMap := map[int64]*AccountLoadInfo{}
 	if s.service.concurrencyService != nil {
 		if batchLoad, loadErr := s.service.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); loadErr == nil {
@@ -1495,6 +1908,21 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 
 	if req.SubscriptionPriority {
 		subscriptionAccounts, regularAccounts := partitionOpenAIChatGPTSubscriptionAccounts(filtered)
+		if req.SmartHealthEnabled && req.SmartHealthProbeAccountID > 0 {
+			probeSubscription := false
+			keptSubscriptions := subscriptionAccounts[:0]
+			for _, account := range subscriptionAccounts {
+				if account != nil && account.ID == req.SmartHealthProbeAccountID {
+					probeSubscription = true
+					regularAccounts = append(regularAccounts, account)
+					continue
+				}
+				keptSubscriptions = append(keptSubscriptions, account)
+			}
+			if probeSubscription {
+				subscriptionAccounts = keptSubscriptions
+			}
+		}
 		if len(subscriptionAccounts) > 0 {
 			attempt := s.trySelectByLoadBalancePool(ctx, req, subscriptionAccounts, loadMap, budget)
 			if attempt.err != nil && (!attempt.noCompactCandidates || len(regularAccounts) <= 0) {
@@ -1541,6 +1969,47 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
 	}
 	return s.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, filterStats)
+}
+
+func (s *defaultOpenAIAccountScheduler) splitSmartHealthCandidates(
+	req OpenAIAccountScheduleRequest,
+	accounts []*Account,
+) (primary []*Account, degraded []*Account) {
+	if !req.SmartHealthEnabled || s == nil || s.stats == nil {
+		return accounts, nil
+	}
+	thresholds := s.service.openAIStickyEscapeConfig()
+	for _, account := range accounts {
+		if account == nil {
+			continue
+		}
+		assessment := s.stats.health(account.ID, time.Now(), thresholds)
+		if assessment.level == openAIAccountHealthDegraded {
+			degraded = append(degraded, account)
+			continue
+		}
+		primary = append(primary, account)
+	}
+	return primary, degraded
+}
+
+func (s *defaultOpenAIAccountScheduler) selectSmartHealthProbeCandidate(
+	req OpenAIAccountScheduleRequest,
+	degraded []*Account,
+) *Account {
+	if !req.SmartHealthEnabled || s == nil || s.stats == nil || len(degraded) == 0 {
+		return nil
+	}
+	if req.GuardianParentAccountID > 0 || (!req.StickyWeighted && req.StickyAccountID > 0) {
+		return nil
+	}
+	now := time.Now()
+	for _, account := range degraded {
+		if account != nil && s.stats.probeEligible(account.ID, now) {
+			return account
+		}
+	}
+	return nil
 }
 
 func partitionOpenAIChatGPTSubscriptionAccounts(accounts []*Account) ([]*Account, []*Account) {
@@ -1707,20 +2176,36 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 					continue
 				}
 			}
+			probe := candidate.healthProbe && req.SmartHealthEnabled
+			if probe && !s.stats.tryAcquireProbeLease(candidate.account.ID, time.Now()) {
+				continue
+			}
+			cancelProbe := func() {
+				if probe {
+					s.stats.cancelProbeLease(candidate.account.ID, time.Now())
+				}
+			}
 			fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 			if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
+				cancelProbe()
 				continue
 			}
 			if !s.consumeOpenAISelectionDBRecheck(budget) {
+				cancelProbe()
 				return nil, candidateCount, topK, loadSkew, noAvailableOpenAISelectionError(req.RequestedModel, compactBlocked, filterStats.summary("selection_order_exhausted"))
 			}
 			fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 			if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
+				cancelProbe()
 				continue
 			}
 			if req.RequireCompact && openAICompactSupportTier(fresh) == 0 {
 				compactBlocked = true
+				cancelProbe()
 				continue
+			}
+			if probe {
+				s.metrics.recordSmartHealthProbe()
 			}
 			return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 				Account: fresh,
@@ -1830,7 +2315,12 @@ func (s *defaultOpenAIAccountScheduler) ReportResult(accountID int64, success bo
 	if s == nil || s.stats == nil {
 		return
 	}
-	s.stats.report(accountID, success, firstTokenMs)
+	smartEnabled := s.service != nil && s.service.isSmartSchedulingEnabled(context.Background())
+	thresholds := defaultOpenAIAccountHealthThresholds()
+	if s.service != nil {
+		thresholds = s.service.openAIStickyEscapeConfig()
+	}
+	s.stats.reportWithHealthConfig(accountID, success, firstTokenMs, thresholds, smartEnabled)
 }
 
 func (s *defaultOpenAIAccountScheduler) ReportSwitch() {
@@ -1854,13 +2344,16 @@ func (s *defaultOpenAIAccountScheduler) SnapshotMetrics() OpenAIAccountScheduler
 	loadSkewTotal := s.metrics.loadSkewMilliTotal.Load()
 
 	snapshot := OpenAIAccountSchedulerMetricsSnapshot{
-		SelectTotal:              selectTotal,
-		StickyPreviousHitTotal:   prevHit,
-		StickySessionHitTotal:    sessionHit,
-		LoadBalanceSelectTotal:   s.metrics.loadBalanceSelectTotal.Load(),
-		AccountSwitchTotal:       switchTotal,
-		SchedulerLatencyMsTotal:  latencyTotal,
-		RuntimeStatsAccountCount: s.stats.size(),
+		SelectTotal:                    selectTotal,
+		StickyPreviousHitTotal:         prevHit,
+		StickySessionHitTotal:          sessionHit,
+		LoadBalanceSelectTotal:         s.metrics.loadBalanceSelectTotal.Load(),
+		AccountSwitchTotal:             switchTotal,
+		SchedulerLatencyMsTotal:        latencyTotal,
+		RuntimeStatsAccountCount:       s.stats.size(),
+		SmartHealthDegradedEscapeTotal: s.metrics.smartHealthDegradedEscapeTotal.Load(),
+		SmartHealthProbeTotal:          s.metrics.smartHealthProbeTotal.Load(),
+		SmartHealthAllDegradedTotal:    s.metrics.smartHealthAllDegradedTotal.Load(),
 	}
 	if selectTotal > 0 {
 		snapshot.SchedulerLatencyMsAvg = float64(latencyTotal) / float64(selectTotal)
@@ -1883,6 +2376,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		if time.Now().UnixNano() < cached.expiresAt {
 			return openAIAdvancedSchedulerRuntimeSettings{
 				lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
+				smartEnabled:                   cached.smartEnabled,
 				oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 				enabled:                        cached.enabled,
 				stickyWeightedEnabled:          cached.stickyWeightedEnabled,
@@ -1898,6 +2392,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 			if time.Now().UnixNano() < cached.expiresAt {
 				return openAIAdvancedSchedulerRuntimeSettings{
 					lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
+					smartEnabled:                   cached.smartEnabled,
 					oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 					enabled:                        cached.enabled,
 					stickyWeightedEnabled:          cached.stickyWeightedEnabled,
@@ -1909,6 +2404,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		}
 
 		lowUpstreamRatePriorityEnabled := false
+		smartEnabled := false
 		oauthSchedulingRateMultiplier := defaultOpenAIOAuthSchedulingRateMultiplier
 		enabled := false
 		stickyWeightedEnabled := false
@@ -1921,6 +2417,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 
 			if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
+				smartEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeySmartSchedulingEnabled]), "true")
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values[SettingKeyOpenAIOAuthSchedulingRateMultiplier])
 				enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
 				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
@@ -1938,6 +2435,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 					}
 				}
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
+				smartEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeySmartSchedulingEnabled]), "true")
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues[SettingKeyOpenAIOAuthSchedulingRateMultiplier])
 				enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
 				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
@@ -1949,6 +2447,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 
 		openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
+			smartEnabled:                   smartEnabled,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
 			stickyWeightedEnabled:          stickyWeightedEnabled,
@@ -1959,6 +2458,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		})
 		return openAIAdvancedSchedulerRuntimeSettings{
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
+			smartEnabled:                   smartEnabled,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
 			stickyWeightedEnabled:          stickyWeightedEnabled,
@@ -1976,9 +2476,13 @@ func (s *OpenAIGatewayService) isOpenAIAdvancedSchedulerEnabled(ctx context.Cont
 	return s.openAIAdvancedSchedulerRuntimeSettings(ctx).enabled
 }
 
+func (s *OpenAIGatewayService) isSmartSchedulingEnabled(ctx context.Context) bool {
+	return s.openAIAdvancedSchedulerRuntimeSettings(ctx).smartEnabled
+}
+
 func (s *OpenAIGatewayService) isOpenAILowUpstreamRatePriorityEnabled(ctx context.Context) bool {
 	settings := s.openAIAdvancedSchedulerRuntimeSettings(ctx)
-	return !settings.enabled && settings.lowUpstreamRatePriorityEnabled
+	return !settings.smartEnabled && !settings.enabled && settings.lowUpstreamRatePriorityEnabled
 }
 
 func (s *OpenAIGatewayService) openAIOAuthSchedulingRateMultiplier(ctx context.Context) float64 {
@@ -1998,6 +2502,7 @@ func (s *OpenAIGatewayService) isOpenAIAdvancedSchedulerSubscriptionPriorityEnab
 func openAIAdvancedSchedulerRuntimeSettingKeys() []string {
 	keys := []string{
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled,
+		SettingKeySmartSchedulingEnabled,
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier,
 		openAIAdvancedSchedulerSettingKey,
 		SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled,
@@ -2073,7 +2578,8 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 	if s == nil {
 		return nil
 	}
-	if !s.isOpenAIAdvancedSchedulerEnabled(ctx) {
+	settings := s.openAIAdvancedSchedulerRuntimeSettings(ctx)
+	if !settings.smartEnabled && !settings.enabled {
 		return nil
 	}
 	s.openaiSchedulerOnce.Do(func() {
@@ -2249,6 +2755,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
+	runtimeSettings := s.openAIAdvancedSchedulerRuntimeSettings(ctx)
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {
@@ -2372,6 +2879,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		StickyPreviousAccountID: stickyPreviousAccountID,
 		StickyWeighted:          stickyWeighted,
 		SubscriptionPriority:    subscriptionPriority,
+		SmartHealthEnabled:      runtimeSettings.smartEnabled,
 		PreserveStickyBinding:   preserveGuardianParentBinding,
 		RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
 		PreviousResponseID:      previousResponseID,

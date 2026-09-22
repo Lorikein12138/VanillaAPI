@@ -449,6 +449,45 @@ func TestSettingService_UpdateSettings_PaymentVisibleMethodsAndAdvancedScheduler
 	require.Equal(t, "4", repo.updates[SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky])
 }
 
+func TestSettingService_ParseSettingsDefaultsSmartSchedulingDisabled(t *testing.T) {
+	svc := NewSettingService(&settingUpdateRepoStub{}, &config.Config{})
+
+	require.False(t, svc.parseSettings(map[string]string{}).SmartSchedulingEnabled)
+	require.True(t, svc.parseSettings(map[string]string{SettingKeySmartSchedulingEnabled: "true"}).SmartSchedulingEnabled)
+	require.False(t, svc.parseSettings(map[string]string{SettingKeySmartSchedulingEnabled: "TRUE"}).SmartSchedulingEnabled)
+}
+
+func TestSettingService_UpdateSettings_SmartScheduling(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	repo := &settingUpdateRepoStub{}
+	svc := NewSettingService(repo, &config.Config{})
+
+	err := svc.UpdateSettings(context.Background(), &SystemSettings{
+		SmartSchedulingEnabled:         true,
+		OpenAIAdvancedSchedulerEnabled: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "true", repo.updates[SettingKeySmartSchedulingEnabled])
+	require.Equal(t, "true", repo.updates[openAIAdvancedSchedulerSettingKey])
+	cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.True(t, cached.smartEnabled)
+	require.True(t, cached.enabled)
+
+	err = svc.UpdateSettings(context.Background(), &SystemSettings{
+		SmartSchedulingEnabled:         false,
+		OpenAIAdvancedSchedulerEnabled: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "false", repo.updates[SettingKeySmartSchedulingEnabled])
+	cached, ok = openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.False(t, cached.smartEnabled)
+	require.True(t, cached.enabled)
+}
+
 func TestSettingService_UpdateSettingsRejectsInvalidOpenAIOAuthSchedulingRateMultiplier(t *testing.T) {
 	repo := &settingUpdateRepoStub{}
 	svc := NewSettingService(repo, &config.Config{})
