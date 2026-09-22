@@ -292,6 +292,46 @@ func newOpenAIAdvancedSchedulerRateLimitService(enabled string, values ...string
 	}
 }
 
+func newOpenAISchedulerModeRateLimitService(smartEnabled, advancedEnabled bool) *RateLimitService {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	values := map[string]string{
+		SettingKeySmartSchedulingEnabled:  strconv.FormatBool(smartEnabled),
+		openAIAdvancedSchedulerSettingKey: strconv.FormatBool(advancedEnabled),
+	}
+	repo := &openAIAdvancedSchedulerSettingRepoStub{values: values}
+	return &RateLimitService{settingService: NewSettingService(repo, &config.Config{})}
+}
+
+func newSmartSchedulerTestAccount(id int64, groupID int64, priority int) Account {
+	return Account{
+		ID:          id,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 1,
+		Priority:    priority,
+		GroupIDs:    []int64{groupID},
+	}
+}
+
+func newSmartSchedulerTestService(accounts []Account, concurrency schedulerTestConcurrencyCache) *OpenAIGatewayService {
+	groupID := int64(40101)
+	for i := range accounts {
+		if len(accounts[i].GroupIDs) == 0 {
+			accounts[i].GroupIDs = []int64{groupID}
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.LBTopK = 7
+	return &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
+		cfg:                cfg,
+		rateLimitService:   newOpenAISchedulerModeRateLimitService(true, false),
+		concurrencyService: NewConcurrencyService(concurrency),
+	}
+}
+
 func (s *openAISnapshotCacheStub) GetSnapshot(ctx context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
 	if len(s.snapshotAccounts) == 0 {
 		return nil, false, nil
@@ -3331,6 +3371,286 @@ func TestOpenAIAccountRuntimeStats_ReportConcurrent(t *testing.T) {
 		require.LessOrEqual(t, errorRate, 1.0)
 		require.True(t, hasTTFT)
 		require.Greater(t, ttft, 0.0)
+	}
+}
+
+func TestOpenAIAccountRuntimeStats_ColdStartMaturityAndStaleness(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Unix(1700000000, 0)
+	thresholds := defaultOpenAIAccountHealthThresholds()
+	ttft := 100
+
+	stats.reportAt(5001, true, &ttft, now, thresholds, false)
+	require.Equal(t, openAIAccountHealthUnknown, stats.health(5001, now, thresholds).level)
+	stats.reportAt(5001, true, &ttft, now, thresholds, false)
+	require.Equal(t, openAIAccountHealthUnknown, stats.health(5001, now, thresholds).level)
+	stats.reportAt(5001, true, &ttft, now, thresholds, false)
+	require.Equal(t, openAIAccountHealthHealthy, stats.health(5001, now, thresholds).level)
+
+	stat := stats.loadOrCreate(5001)
+	stat.lastObservedAt.Store(now.Add(-openAIAccountHealthStaleAfter).UnixNano())
+	require.Equal(t, openAIAccountHealthHealthy, stats.health(5001, now, thresholds).level)
+	stat.lastObservedAt.Store(now.Add(-openAIAccountHealthStaleAfter - time.Nanosecond).UnixNano())
+	require.Equal(t, openAIAccountHealthUnknown, stats.health(5001, now, thresholds).level)
+}
+
+func TestOpenAIAccountHealthClassification_ThresholdBoundaries(t *testing.T) {
+	thresholds := openAIStickyEscapeConfig{ttftMs: 15000, errorRate: 0.5}
+
+	level, _ := classifyOpenAIAccountHealth(0.5, 15000, true, openAIAccountHealthMinSamples, thresholds)
+	require.Equal(t, openAIAccountHealthHealthy, level)
+	level, reason := classifyOpenAIAccountHealth(0.500001, 100, true, openAIAccountHealthMinSamples, thresholds)
+	require.Equal(t, openAIAccountHealthDegraded, level)
+	require.Equal(t, "error_rate", openAIAccountHealthReasonName(reason))
+	level, reason = classifyOpenAIAccountHealth(0.1, 15000.001, true, openAIAccountHealthMinSamples, thresholds)
+	require.Equal(t, openAIAccountHealthDegraded, level)
+	require.Equal(t, "ttft", openAIAccountHealthReasonName(reason))
+	level, _ = classifyOpenAIAccountHealth(0.9, 100, true, openAIAccountHealthMinSamples-1, thresholds)
+	require.Equal(t, openAIAccountHealthUnknown, level)
+}
+
+func TestOpenAIAccountRuntimeStats_ConcurrentReportAndProbeLease(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Now()
+	thresholds := defaultOpenAIAccountHealthThresholds()
+	for i := 0; i < 5; i++ {
+		stats.reportAt(5002, false, nil, now, thresholds, false)
+	}
+	stat := stats.loadOrCreate(5002)
+	stat.nextProbeAt.Store(now.Add(-time.Second).UnixNano())
+
+	const workers = 16
+	results := make(chan bool, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			results <- stats.tryAcquireProbeLease(5002, now)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	acquired := 0
+	for result := range results {
+		if result {
+			acquired++
+		}
+	}
+	require.Equal(t, 1, acquired)
+	stats.cancelProbeLease(5002, now)
+
+	var reportWG sync.WaitGroup
+	reportWG.Add(workers)
+	for i := 0; i < workers; i++ {
+		i := i
+		go func() {
+			defer reportWG.Done()
+			stats.report(int64(5100+i%4), i%2 == 0, intPtrForTest(100+i))
+		}()
+	}
+	reportWG.Wait()
+	require.Equal(t, 5, stats.size())
+}
+
+func TestOpenAIGatewayService_SchedulerModeMatrix(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name     string
+		smart    bool
+		advanced bool
+	}{
+		{name: "legacy", smart: false, advanced: false},
+		{name: "experimental", smart: false, advanced: true},
+		{name: "smart", smart: true, advanced: false},
+		{name: "smart_and_experimental", smart: true, advanced: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &OpenAIGatewayService{
+				cfg:              &config.Config{},
+				rateLimitService: newOpenAISchedulerModeRateLimitService(tt.smart, tt.advanced),
+			}
+			scheduler := svc.getOpenAIAccountScheduler(ctx)
+			if !tt.smart && !tt.advanced {
+				require.Nil(t, scheduler)
+				require.Nil(t, svc.openaiAccountStats)
+				return
+			}
+			require.NotNil(t, scheduler)
+			require.NotNil(t, svc.openaiAccountStats)
+			require.Equal(t, tt.smart, svc.isSmartSchedulingEnabled(ctx))
+			require.Equal(t, tt.advanced, svc.isOpenAIAdvancedSchedulerEnabled(ctx))
+		})
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthBeatsPriority(t *testing.T) {
+	groupID := int64(40101)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(5201, groupID, 0),
+		newSmartSchedulerTestAccount(5202, groupID, 10),
+	}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	ctx := context.Background()
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for i := 0; i < 4; i++ {
+		scheduler.stats.report(5201, false, nil)
+	}
+
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(5202), selection.Account.ID)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthWeightedStickyDoesNotBypassPrimary(t *testing.T) {
+	groupID := int64(40101)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(5251, groupID, 0),
+		newSmartSchedulerTestAccount(5252, groupID, 10),
+	}
+	concurrency := schedulerTestConcurrencyCache{acquireResults: map[int64]bool{5252: false}}
+	svc := newSmartSchedulerTestService(accounts, concurrency)
+	cache := &schedulerTestGatewayCache{}
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	svc.rateLimitService = &RateLimitService{
+		settingService: NewSettingService(&openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
+			SettingKeySmartSchedulingEnabled:                             "true",
+			openAIAdvancedSchedulerSettingKey:                            "true",
+			SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled:       "true",
+			SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled: "false",
+		}}, &config.Config{}),
+	}
+	svc.cache = cache
+	ctx := context.Background()
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for i := 0; i < 4; i++ {
+		scheduler.stats.report(5251, false, nil)
+	}
+	require.NoError(t, svc.cache.SetSessionAccountID(ctx, groupID, "smart-weighted-sticky", 5251, time.Hour))
+
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-weighted-sticky", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(5252), selection.Account.ID)
+	require.NotNil(t, selection.WaitPlan)
+	require.Equal(t, int64(5251), cache.sessionBindings["smart-weighted-sticky"])
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthKeepsHealthySticky(t *testing.T) {
+	groupID := int64(40101)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(5301, groupID, 10),
+		newSmartSchedulerTestAccount(5302, groupID, 0),
+	}
+	cache := &schedulerTestGatewayCache{}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	svc.cache = cache
+	ctx := context.Background()
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for i := 0; i < 3; i++ {
+		scheduler.stats.report(5301, true, intPtrForTest(100))
+	}
+	require.NoError(t, cache.SetSessionAccountID(ctx, groupID, "smart-sticky", 5301, time.Hour))
+
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-sticky", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(5301), selection.Account.ID)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthEscapesDegradedSticky(t *testing.T) {
+	groupID := int64(40101)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(5401, groupID, 0),
+		newSmartSchedulerTestAccount(5402, groupID, 10),
+	}
+	cache := &schedulerTestGatewayCache{}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	svc.cache = cache
+	ctx := context.Background()
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for i := 0; i < 4; i++ {
+		scheduler.stats.report(5401, false, nil)
+	}
+	require.NoError(t, cache.SetSessionAccountID(ctx, groupID, "smart-escape", 5401, time.Hour))
+
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-escape", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(5402), selection.Account.ID)
+	require.Equal(t, int64(5401), cache.sessionBindings["smart-escape"])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthSingleHalfOpenProbe(t *testing.T) {
+	groupID := int64(40101)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(5501, groupID, 0),
+		newSmartSchedulerTestAccount(5502, groupID, 10),
+	}
+	concurrency := schedulerTestConcurrencyCache{acquireResults: map[int64]bool{5502: false}}
+	svc := newSmartSchedulerTestService(accounts, concurrency)
+	ctx := context.Background()
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for i := 0; i < 4; i++ {
+		scheduler.stats.report(5501, false, nil)
+	}
+	scheduler.stats.loadOrCreate(5501).nextProbeAt.Store(time.Now().Add(-time.Second).UnixNano())
+
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(5501), selection.Account.ID)
+	require.Equal(t, int64(1), svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthProbeTotal)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+	svc.ReportOpenAIAccountScheduleResult(&accounts[0], "gpt-5.1", true, intPtrForTest(100))
+	require.Equal(t, openAIAccountHealthHealthy, scheduler.stats.health(5501, time.Now(), svc.openAIStickyEscapeConfig()).level)
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthAllDegradedFailsOpen(t *testing.T) {
+	groupID := int64(40101)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(5601, groupID, 0),
+		newSmartSchedulerTestAccount(5602, groupID, 10),
+	}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	ctx := context.Background()
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for _, id := range []int64{5601, 5602} {
+		for i := 0; i < 4; i++ {
+			scheduler.stats.report(id, false, nil)
+		}
+	}
+
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Contains(t, []int64{5601, 5602}, selection.Account.ID)
+	require.Equal(t, int64(1), svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthAllDegradedTotal)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
 	}
 }
 
