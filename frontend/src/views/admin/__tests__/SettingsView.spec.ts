@@ -594,6 +594,16 @@ async function openGatewayTab(wrapper: ReturnType<typeof mountView>) {
   await flushPromises();
 }
 
+async function openFeaturesTab(wrapper: ReturnType<typeof mountView>) {
+  const featuresTabButton = wrapper
+    .findAll("button")
+    .find((node) => node.text().includes("admin.settings.tabs.features"));
+
+  expect(featuresTabButton).toBeDefined();
+  await featuresTabButton?.trigger("click");
+  await flushPromises();
+}
+
 async function openUsersTab(wrapper: ReturnType<typeof mountView>) {
   const usersTabButton = wrapper
     .findAll("button")
@@ -1577,6 +1587,76 @@ describe("admin SettingsView payment visible method controls", () => {
     // supported_types should be normalized to an empty array, not null
     expect(Array.isArray(receivedProviders[0].supported_types)).toBe(true);
     expect(receivedProviders[0].supported_types).toEqual([]);
+  });
+
+  it("keeps smart and experimental scheduling independent across all combinations", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      smart_scheduling_enabled: false,
+      openai_advanced_scheduler_enabled: false,
+    });
+    updateSettings.mockImplementation(async (payload) => ({
+      ...baseSettingsResponse,
+      ...payload,
+    }));
+
+    const wrapper = mountView();
+    await flushPromises();
+    await openFeaturesTab(wrapper);
+
+    const smartToggle = wrapper.find<HTMLInputElement>('[data-testid="smart-scheduling-toggle"]');
+    expect(smartToggle.element.checked).toBe(false);
+    await openGatewayTab(wrapper);
+    expect(wrapper.find('[data-testid="openai-advanced-scheduler-toggle"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(true);
+
+    await smartToggle.setValue(true);
+    await flushPromises();
+    expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="openai-advanced-scheduler-toggle"]').exists()).toBe(true);
+
+    const advancedToggle = wrapper.find<HTMLInputElement>('[data-testid="openai-advanced-scheduler-toggle"]');
+    await advancedToggle.setValue(true);
+    await flushPromises();
+    expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(false);
+
+    await smartToggle.setValue(false);
+    await flushPromises();
+    expect(advancedToggle.element.checked).toBe(true);
+    expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(false);
+  });
+
+  it("defaults a missing smart scheduling response field to false and saves it independently", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      openai_advanced_scheduler_enabled: true,
+    });
+    updateSettings.mockImplementation(async (payload) => ({
+      ...baseSettingsResponse,
+      openai_advanced_scheduler_enabled: true,
+      ...payload,
+    }));
+
+    const wrapper = mountView();
+    await flushPromises();
+    const smartToggle = wrapper.find<HTMLInputElement>('[data-testid="smart-scheduling-toggle"]');
+    expect(smartToggle.element.checked).toBe(false);
+    await smartToggle.setValue(true);
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalled();
+    const payload = updateSettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(payload.smart_scheduling_enabled).toBe(true);
+    expect(payload.openai_advanced_scheduler_enabled).toBe(true);
+    expect(zhSettings.settings.features.smartScheduling).toEqual(
+      expect.objectContaining({ title: expect.any(String), enabled: expect.any(String) }),
+    );
+    expect(enSettings.settings.features.smartScheduling).toEqual(
+      expect.objectContaining({ title: expect.any(String), enabled: expect.any(String) }),
+    );
+    expect(zhSettings.settings.openaiExperimentalScheduler.smartOnlyRelation).toBeTruthy();
+    expect(enSettings.settings.openaiExperimentalScheduler.smartOnlyRelation).toBeTruthy();
   });
 });
 
