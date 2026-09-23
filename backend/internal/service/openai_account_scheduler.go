@@ -107,11 +107,17 @@ type OpenAIAccountScheduleDecision struct {
 	StickyPreviousHit   bool
 	StickySessionHit    bool
 	CandidateCount      int
+	PrimaryCount        int
+	DegradedCount       int
 	TopK                int
 	LatencyMs           int64
 	LoadSkew            float64
 	SelectedAccountID   int64
 	SelectedAccountType string
+	SelectedPriority    int
+	SelectedHealth      string
+	HealthEscape        bool
+	FilterReasons       string
 }
 
 type OpenAIAccountSchedulerMetricsSnapshot struct {
@@ -679,10 +685,26 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		req.RequirePrivacySet = true
 	}
 	start := time.Now()
+	healthEscapeReason := ""
 	// 命名返回值保证 defer 写入的耗时同时返回给调用方。
 	defer func() {
 		decision.LatencyMs = time.Since(start).Milliseconds()
+		decision.HealthEscape = healthEscapeReason != ""
+		if selection != nil && selection.Account != nil {
+			decision.SelectedPriority = openAIAccountSchedulingPriority(selection.Account)
+			if req.SmartHealthEnabled {
+				selectedHealth := openAIAccountHealthUnknown
+				if s.stats != nil {
+					selectedHealth = s.stats.health(selection.Account.ID, time.Now(), s.service.openAIStickyEscapeConfig()).level
+				}
+				decision.SelectedHealth = openAIAccountHealthLevelName(selectedHealth)
+			}
+		}
+		if req.SmartHealthEnabled && decision.SelectedHealth == "" {
+			decision.SelectedHealth = openAIAccountHealthLevelName(openAIAccountHealthUnknown)
+		}
 		s.metrics.recordSelect(decision)
+		s.logOpenAIAccountScheduleDecision(req, selection, decision, err, healthEscapeReason)
 	}()
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
@@ -718,10 +740,11 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if selection != nil && selection.Account != nil && req.SmartHealthEnabled && s.stats != nil {
 			assessment := s.stats.health(selection.Account.ID, time.Now(), s.service.openAIStickyEscapeConfig())
 			if assessment.level == openAIAccountHealthDegraded {
+				healthEscapeReason = openAIAccountHealthReasonName(assessment.reason)
 				s.metrics.recordSmartHealthDegradedEscape()
 				slog.Info("openai_account_health_previous_response_escape",
 					"account_id", selection.Account.ID,
-					"reason", openAIAccountHealthReasonName(assessment.reason),
+					"reason", healthEscapeReason,
 					"error_rate", assessment.errorRate,
 					"ttft_ms", assessment.ttft,
 					"sample_count", assessment.samples,
@@ -762,7 +785,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	}
 
 	if !req.StickyWeighted {
-		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
+		stickyHealthEscapeReason := ""
+		selection, escapedSticky, err := s.selectBySessionHash(ctx, req, &stickyHealthEscapeReason)
 		if err != nil {
 			return nil, decision, err
 		}
@@ -774,11 +798,12 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			return selection, decision, nil
 		}
 		if escapedSticky {
+			healthEscapeReason = stickyHealthEscapeReason
 			req.PreserveStickyBinding = true
 		}
 	}
 
-	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
+	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req, &decision)
 	decision.Layer = openAIAccountScheduleLayerLoadBalance
 	decision.CandidateCount = candidateCount
 	decision.TopK = topK
@@ -801,10 +826,82 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	return selection, decision, nil
 }
 
+func (s *defaultOpenAIAccountScheduler) logOpenAIAccountScheduleDecision(
+	req OpenAIAccountScheduleRequest,
+	selection *AccountSelectionResult,
+	decision OpenAIAccountScheduleDecision,
+	err error,
+	healthEscapeReason string,
+) {
+	if !req.SmartHealthEnabled {
+		return
+	}
+
+	reason := "selected"
+	if healthEscapeReason != "" {
+		reason = healthEscapeReason
+	} else if err != nil {
+		switch {
+		case errors.Is(err, ErrNoAvailableCompactAccounts):
+			reason = "no_compact_candidate"
+		case errors.Is(err, ErrNoAvailableAccounts):
+			reason = "no_available_account"
+		default:
+			reason = "selection_error"
+		}
+	}
+	filterReasons := decision.FilterReasons
+	if filterReasons == "" && err != nil {
+		filterReasons = reason
+	}
+	candidateCount := decision.CandidateCount
+	if total := decision.PrimaryCount + decision.DegradedCount; total > 0 {
+		candidateCount = total
+	}
+	selectedAccountID := decision.SelectedAccountID
+	if selection != nil && selection.Account != nil {
+		selectedAccountID = selection.Account.ID
+	}
+
+	slog.Info("openai_account_schedule_decision",
+		"group_id", derefGroupID(req.GroupID),
+		"platform", NormalizeOpenAICompatiblePlatform(req.Platform),
+		"model", normalizeOpenAISchedulingModelForLog(req.RequestedModel),
+		"candidate_count", candidateCount,
+		"primary_count", decision.PrimaryCount,
+		"degraded_count", decision.DegradedCount,
+		"top_k", decision.TopK,
+		"selection_layer", decision.Layer,
+		"selected_account_id", selectedAccountID,
+		"selected_priority", decision.SelectedPriority,
+		"selected_health", decision.SelectedHealth,
+		"sticky_hit", decision.StickyPreviousHit || decision.StickySessionHit,
+		"health_escape", decision.HealthEscape,
+		"filter_reasons", filterReasons,
+		"reason", reason,
+	)
+}
+
+func normalizeOpenAISchedulingModelForLog(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if len(model) > 128 {
+		return model[:128]
+	}
+	return model
+}
+
 func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
+	healthEscapeReasonOutput ...*string,
 ) (*AccountSelectionResult, bool, error) {
+	var healthEscapeReasonTarget *string
+	if len(healthEscapeReasonOutput) > 0 {
+		healthEscapeReasonTarget = healthEscapeReasonOutput[0]
+		if healthEscapeReasonTarget != nil {
+			*healthEscapeReasonTarget = ""
+		}
+	}
 	sessionHash := strings.TrimSpace(req.SessionHash)
 	if sessionHash == "" || s == nil || s.service == nil || s.service.cache == nil {
 		return nil, false, nil
@@ -874,10 +971,14 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if req.SmartHealthEnabled && s.stats != nil {
 		assessment := s.stats.health(accountID, now, escapeCfg)
 		if assessment.level == openAIAccountHealthDegraded && !req.DisableStickyEscape {
+			healthEscapeReason := openAIAccountHealthReasonName(assessment.reason)
+			if healthEscapeReasonTarget != nil {
+				*healthEscapeReasonTarget = healthEscapeReason
+			}
 			s.metrics.recordSmartHealthDegradedEscape()
 			slog.Info("openai_account_health_sticky_escape",
 				"account_id", accountID,
-				"reason", openAIAccountHealthReasonName(assessment.reason),
+				"reason", healthEscapeReason,
 				"error_rate", assessment.errorRate,
 				"ttft_ms", assessment.ttft,
 				"sample_count", assessment.samples,
@@ -1415,11 +1516,11 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
-	buildSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
-		if len(pool) == 0 || plan.topK <= 0 {
+	buildSelectionOrder := func(pool []openAIAccountCandidateScore, topK int, includeOverflowFallback bool) []openAIAccountCandidateScore {
+		if len(pool) == 0 || topK <= 0 {
 			return nil
 		}
-		groupTopK := plan.topK
+		groupTopK := topK
 		if groupTopK > len(pool) {
 			groupTopK = len(pool)
 		}
@@ -1445,7 +1546,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		if len(primary) == 0 {
 			primary = buildOpenAIWeightedSelectionOrder(ranked, req)
 		}
-		if !plan.includeOverflowFallback || groupTopK >= len(pool) {
+		if !includeOverflowFallback || groupTopK >= len(pool) {
 			return primary
 		}
 
@@ -1464,6 +1565,34 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		})
 		return append(primary, overflow...)
 	}
+	buildPriorityFirstSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
+		if len(pool) == 0 || plan.topK <= 0 {
+			return nil
+		}
+		byPriority := make(map[int][]openAIAccountCandidateScore)
+		priorities := make([]int, 0, len(pool))
+		for _, candidate := range pool {
+			priority := candidate.priority
+			if candidate.account != nil {
+				priority = openAIAccountSchedulingPriority(candidate.account)
+			}
+			if _, exists := byPriority[priority]; !exists {
+				priorities = append(priorities, priority)
+			}
+			byPriority[priority] = append(byPriority[priority], candidate)
+		}
+		sort.Ints(priorities)
+
+		ordered := make([]openAIAccountCandidateScore, 0, len(pool))
+		for _, priority := range priorities {
+			group := byPriority[priority]
+			// TopK and weighted selection remain available as tie-breaking inside
+			// one priority. Every same-priority candidate stays in the retry tail,
+			// so a full slot cannot cause a larger priority to jump the queue.
+			ordered = append(ordered, buildSelectionOrder(group, plan.topK, true)...)
+		}
+		return ordered
+	}
 
 	if req.RequireCompact {
 		supported := make([]openAIAccountCandidateScore, 0, len(plan.candidates))
@@ -1477,15 +1606,23 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			}
 		}
 		selectionOrder := make([]openAIAccountCandidateScore, 0, len(plan.allCandidates))
-		selectionOrder = append(selectionOrder, buildSelectionOrder(supported)...)
-		selectionOrder = append(selectionOrder, buildSelectionOrder(unknown)...)
+		if req.SmartHealthEnabled {
+			selectionOrder = append(selectionOrder, buildPriorityFirstSelectionOrder(supported)...)
+			selectionOrder = append(selectionOrder, buildPriorityFirstSelectionOrder(unknown)...)
+		} else {
+			selectionOrder = append(selectionOrder, buildSelectionOrder(supported, plan.topK, plan.includeOverflowFallback)...)
+			selectionOrder = append(selectionOrder, buildSelectionOrder(unknown, plan.topK, plan.includeOverflowFallback)...)
+		}
 		if len(plan.staleSnapshotCompactRetry) > 0 && s.service.schedulerSnapshot != nil {
 			selectionOrder = append(selectionOrder, sortOpenAICompactRetryCandidates(plan.staleSnapshotCompactRetry)...)
 		}
 		return selectionOrder
 	}
 
-	return buildSelectionOrder(plan.candidates)
+	if req.SmartHealthEnabled {
+		return buildPriorityFirstSelectionOrder(plan.candidates)
+	}
+	return buildSelectionOrder(plan.candidates, plan.topK, plan.includeOverflowFallback)
 }
 
 func sortOpenAICompactRetryCandidates(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
@@ -1797,18 +1934,32 @@ func (s openAISelectionFilterStats) summary(extra string) string {
 func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
+	decisionState ...*OpenAIAccountScheduleDecision,
 ) (*AccountSelectionResult, int, int, float64, error) {
+	var decision *OpenAIAccountScheduleDecision
+	if len(decisionState) > 0 {
+		decision = decisionState[0]
+	}
 	budget := newOpenAISelectionProbeBudget()
 	accounts, err := s.service.listSchedulableAccounts(ctx, req.GroupID, req.Platform)
 	if err != nil {
+		if decision != nil {
+			decision.FilterReasons = "account_list_error"
+		}
 		return nil, 0, 0, 0, err
 	}
 	if len(accounts) == 0 {
+		if decision != nil {
+			decision.FilterReasons = "pool=0, reason=no_schedulable_accounts"
+		}
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, openAISelectionFilterStats{}.summary(""))
 	}
 	// Local free-tier soft gate on the Grok scheduling path only (not admin probe).
 	accounts = s.filterGrokFreeQuotaAccounts(ctx, accounts)
 	if len(accounts) == 0 {
+		if decision != nil {
+			decision.FilterReasons = "pool=0, reason=grok_free_quota_soft_gate"
+		}
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, openAISelectionFilterStats{}.summary("grok_free_quota_soft_gate"))
 	}
 	// Team+model rate-limit cool: siblings of a 429'd team skip the hot model.
@@ -1816,6 +1967,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		now := time.Now()
 		filtered := filterGrokTeamModelRateLimitedAccounts(accounts, req.RequestedModel, now)
 		if len(filtered) == 0 && len(accounts) > 0 {
+			if decision != nil {
+				decision.FilterReasons = "pool=" + strconv.Itoa(len(accounts)) + ", reason=grok_team_model_rate_limit"
+			}
 			return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, openAISelectionFilterStats{}.summary("grok_team_model_rate_limit"))
 		}
 		if filtered != nil {
@@ -1824,6 +1978,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		// Per-account model free-usage soft-block (other models stay eligible).
 		modelFiltered := filterGrokModelQuotaBlockedAccounts(accounts, req.RequestedModel, now)
 		if len(modelFiltered) == 0 && len(accounts) > 0 {
+			if decision != nil {
+				decision.FilterReasons = "pool=" + strconv.Itoa(len(accounts)) + ", reason=grok_model_quota_block"
+			}
 			return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, openAISelectionFilterStats{}.summary("grok_model_quota_block"))
 		}
 		accounts = modelFiltered
@@ -1879,12 +2036,19 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			MaxConcurrency: account.EffectiveLoadFactor(),
 		})
 	}
+	if decision != nil {
+		decision.FilterReasons = filterStats.summary("")
+	}
 	if len(filtered) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
 	}
 
 	if req.SmartHealthEnabled {
 		primary, degraded := s.splitSmartHealthCandidates(req, filtered)
+		if decision != nil {
+			decision.PrimaryCount = len(primary)
+			decision.DegradedCount = len(degraded)
+		}
 		if len(primary) > 0 {
 			filtered = primary
 			if probe := s.selectSmartHealthProbeCandidate(req, degraded); probe != nil {
@@ -1906,7 +2070,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 	}
 
-	if req.SubscriptionPriority {
+	if req.SubscriptionPriority && !req.SmartHealthEnabled {
 		subscriptionAccounts, regularAccounts := partitionOpenAIChatGPTSubscriptionAccounts(filtered)
 		if req.SmartHealthEnabled && req.SmartHealthProbeAccountID > 0 {
 			probeSubscription := false
