@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"sync"
@@ -23,6 +24,48 @@ type openAISnapshotCacheStub struct {
 type schedulerTestOpenAIAccountRepo struct {
 	AccountRepository
 	accounts []Account
+}
+
+type schedulerTestLogRecord struct {
+	message string
+	attrs   map[string]any
+}
+
+type schedulerTestLogHandler struct {
+	mu      sync.Mutex
+	records []schedulerTestLogRecord
+}
+
+func (h *schedulerTestLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *schedulerTestLogHandler) Handle(_ context.Context, record slog.Record) error {
+	attrs := make(map[string]any)
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs[attr.Key] = attr.Value.Resolve().Any()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, schedulerTestLogRecord{message: record.Message, attrs: attrs})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *schedulerTestLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *schedulerTestLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *schedulerTestLogHandler) snapshot() []schedulerTestLogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	result := make([]schedulerTestLogRecord, len(h.records))
+	copy(result, h.records)
+	return result
 }
 
 func (r schedulerTestOpenAIAccountRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
@@ -3561,7 +3604,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthKeepsHealthy
 	for i := 0; i < 3; i++ {
 		scheduler.stats.report(5301, true, intPtrForTest(100))
 	}
-	require.NoError(t, cache.SetSessionAccountID(ctx, groupID, "smart-sticky", 5301, time.Hour))
+	require.NoError(t, cache.SetSessionAccountID(ctx, groupID, "openai:smart-sticky", 5301, time.Hour))
 
 	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-sticky", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
 	require.NoError(t, err)
@@ -3651,6 +3694,341 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthAllDegradedF
 	require.Equal(t, int64(1), svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthAllDegradedTotal)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartOnlyUsesPriorityOrder(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("N=1", func(t *testing.T) {
+		groupID := int64(60101)
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(6011, groupID, 90),
+		}, schedulerTestConcurrencyCache{})
+
+		selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-n1", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.Equal(t, int64(6011), selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	})
+
+	t.Run("all_degraded_priority_first", func(t *testing.T) {
+		groupID := int64(60104)
+		accounts := []Account{
+			newSmartSchedulerTestAccount(6041, groupID, 90),
+			newSmartSchedulerTestAccount(6042, groupID, 10),
+		}
+		svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+		svc.cfg.Gateway.OpenAIWS.LBTopK = 1
+		scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		require.NotNil(t, scheduler)
+		for _, accountID := range []int64{6041, 6042} {
+			for i := 0; i < 4; i++ {
+				scheduler.stats.report(accountID, false, nil)
+			}
+		}
+
+		selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-all-degraded", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.Equal(t, int64(6042), selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	})
+
+	t.Run("non_contiguous_priority_N_gt_3", func(t *testing.T) {
+		groupID := int64(60102)
+		accounts := []Account{
+			newSmartSchedulerTestAccount(6021, groupID, 10),
+			newSmartSchedulerTestAccount(6022, groupID, 30),
+			newSmartSchedulerTestAccount(6023, groupID, 30),
+			newSmartSchedulerTestAccount(6024, groupID, 90),
+		}
+		svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+
+		selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-priority-first", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.Equal(t, int64(6021), selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+
+		acquired := make([]int64, 0, len(accounts))
+		concurrency := schedulerTestConcurrencyCache{
+			acquireResults: map[int64]bool{6021: false, 6022: false, 6023: true, 6024: true},
+			acquiredIDs:    &acquired,
+		}
+		svc = newSmartSchedulerTestService(accounts, concurrency)
+		selection, _, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-priority-fallback", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.Equal(t, 30, selection.Account.Priority)
+		require.NotEmpty(t, acquired)
+		require.Equal(t, int64(6021), acquired[0])
+		for _, accountID := range acquired {
+			require.NotEqual(t, int64(6024), accountID, "priority=90 must not be attempted before priority=30 succeeds")
+			if accountID == selection.Account.ID {
+				break
+			}
+		}
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	})
+
+	t.Run("same_priority_uses_existing_spread", func(t *testing.T) {
+		groupID := int64(60103)
+		accounts := []Account{
+			newSmartSchedulerTestAccount(6031, groupID, 30),
+			newSmartSchedulerTestAccount(6032, groupID, 30),
+			newSmartSchedulerTestAccount(6033, groupID, 30),
+			newSmartSchedulerTestAccount(6034, groupID, 30),
+		}
+		svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+		selected := make(map[int64]struct{})
+		for i := 0; i < 24; i++ {
+			selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", fmt.Sprintf("smart-same-priority-%d", i), "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			selected[selection.Account.ID] = struct{}{}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+		}
+		require.GreaterOrEqual(t, len(selected), 2)
+	})
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartPrimaryBeatsDegradedRegardlessOfPriority(t *testing.T) {
+	ctx := context.Background()
+	for _, degradedPriority := range []int{1, 3, 90} {
+		t.Run(fmt.Sprintf("degraded_priority_%d", degradedPriority), func(t *testing.T) {
+			groupID := int64(60200 + degradedPriority)
+			accounts := []Account{
+				newSmartSchedulerTestAccount(6101, groupID, 3),
+				newSmartSchedulerTestAccount(6102, groupID, degradedPriority),
+			}
+			svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+			svc.cfg.Gateway.OpenAIWS.LBTopK = 1
+			svc.rateLimitService = newOpenAISchedulerModeRateLimitService(true, true)
+			scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+			require.True(t, ok)
+			require.NotNil(t, scheduler)
+			for i := 0; i < 4; i++ {
+				scheduler.stats.report(6102, false, nil)
+			}
+
+			selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-primary-degraded", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			require.Equal(t, int64(6101), selection.Account.ID)
+			require.Equal(t, 1, decision.PrimaryCount)
+			require.Equal(t, 1, decision.DegradedCount)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+		})
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartStickyAndNewSession(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(60301)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(6201, groupID, 10),
+		newSmartSchedulerTestAccount(6202, groupID, 30),
+	}
+	cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{
+		"openai:smart-healthy-sticky": 6202,
+	}}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	svc.cache = cache
+
+	selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-healthy-sticky", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(6202), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+
+	for _, sessionHash := range []string{"smart-new-session-a", "smart-new-session-b"} {
+		selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", sessionHash, "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.Equal(t, int64(6201), selection.Account.ID)
+		require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	}
+
+	selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-same-hash", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(6201), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+	selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-same-hash", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(6201), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+	require.True(t, decision.StickySessionHit)
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+
+	scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	require.NotNil(t, scheduler)
+	for i := 0; i < 4; i++ {
+		scheduler.stats.report(6201, false, nil)
+	}
+	require.Equal(t, openAIAccountHealthDegraded, scheduler.stats.health(6201, time.Now(), svc.openAIStickyEscapeConfig()).level)
+	cache.sessionBindings["openai:smart-degraded-sticky"] = 6201
+	selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "smart-degraded-sticky", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(6202), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	require.True(t, decision.HealthEscape)
+	require.Equal(t, int64(6201), cache.sessionBindings["openai:smart-degraded-sticky"])
+	if selection.ReleaseFunc != nil {
+		selection.ReleaseFunc()
+	}
+}
+
+func TestOpenAIGatewayService_SelectAccountWithScheduler_LogsDecisionWithoutSensitiveFields(t *testing.T) {
+	previousLogger := slog.Default()
+	logHandler := &schedulerTestLogHandler{}
+	slog.SetDefault(slog.New(logHandler))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+	})
+
+	ctx := context.Background()
+	for index, tt := range []struct {
+		name                string
+		healthReason        string
+		concurrencyEscape   bool
+		wantHealthEscape    bool
+		wantDecisionReason  string
+		wantFallbackAccount bool
+	}{
+		{name: "error_rate_escape", healthReason: "error_rate", wantHealthEscape: true, wantDecisionReason: "error_rate", wantFallbackAccount: true},
+		{name: "ttft_escape", healthReason: "ttft", wantHealthEscape: true, wantDecisionReason: "ttft", wantFallbackAccount: true},
+		{name: "ordinary_success", wantDecisionReason: "selected"},
+		{name: "concurrency_escape", concurrencyEscape: true, wantDecisionReason: "selected", wantFallbackAccount: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			groupID := int64(60410 + index)
+			stickyID := int64(6301 + index*2)
+			fallbackID := stickyID + 1
+			sessionHash := "log-" + tt.name
+			cache := &schedulerTestGatewayCache{}
+			if tt.healthReason != "" || tt.concurrencyEscape {
+				cache.sessionBindings = map[string]int64{"openai:" + sessionHash: stickyID}
+			}
+
+			concurrency := schedulerTestConcurrencyCache{}
+			if tt.concurrencyEscape {
+				concurrency.acquireResults = map[int64]bool{stickyID: false, fallbackID: true}
+			}
+			svc := newSmartSchedulerTestService([]Account{
+				newSmartSchedulerTestAccount(stickyID, groupID, 10),
+				newSmartSchedulerTestAccount(fallbackID, groupID, 30),
+			}, concurrency)
+			svc.cache = cache
+			scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+			require.True(t, ok)
+			require.NotNil(t, scheduler)
+			switch tt.healthReason {
+			case "error_rate":
+				for i := 0; i < 4; i++ {
+					scheduler.stats.report(stickyID, false, nil)
+				}
+			case "ttft":
+				ttftMs := 20000
+				for i := 0; i < 3; i++ {
+					scheduler.stats.report(stickyID, true, &ttftMs)
+				}
+			}
+
+			selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", sessionHash, "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			wantSelectedID := stickyID
+			if tt.wantFallbackAccount {
+				wantSelectedID = fallbackID
+			}
+			require.Equal(t, wantSelectedID, selection.Account.ID)
+			require.Equal(t, tt.wantHealthEscape, decision.HealthEscape)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+
+			records := logHandler.snapshot()
+			var decisionRecord *schedulerTestLogRecord
+			for i := range records {
+				if records[i].message == "openai_account_schedule_decision" && records[i].attrs["group_id"] == groupID {
+					decisionRecord = &records[i]
+				}
+			}
+			require.NotNil(t, decisionRecord)
+			require.Equal(t, tt.wantHealthEscape, decisionRecord.attrs["health_escape"])
+			require.Equal(t, tt.wantDecisionReason, decisionRecord.attrs["reason"])
+			if tt.wantHealthEscape {
+				require.Equal(t, int64(2), decisionRecord.attrs["candidate_count"])
+				require.Equal(t, int64(1), decisionRecord.attrs["primary_count"])
+				require.Equal(t, int64(1), decisionRecord.attrs["degraded_count"])
+				require.Equal(t, fallbackID, decisionRecord.attrs["selected_account_id"])
+				require.Equal(t, int64(30), decisionRecord.attrs["selected_priority"])
+				require.Equal(t, "unknown", decisionRecord.attrs["selected_health"])
+				require.Equal(t, "load_balance", decisionRecord.attrs["selection_layer"])
+				require.Equal(t, PlatformOpenAI, decisionRecord.attrs["platform"])
+				require.Equal(t, "gpt-5.1", decisionRecord.attrs["model"])
+			}
+		})
+	}
+
+	groupID := int64(60499)
+	accounts := []Account{
+		newSmartSchedulerTestAccount(6399, groupID, 10),
+		newSmartSchedulerTestAccount(6400, groupID, 30),
+	}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	svc.cache = &schedulerTestGatewayCache{}
+	excluded := map[int64]struct{}{6399: {}, 6400: {}}
+	_, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "log-filtered", "gpt-5.1", excluded, OpenAIUpstreamTransportAny, false)
+	require.Error(t, err)
+	records := logHandler.snapshot()
+	var filteredRecord *schedulerTestLogRecord
+	for i := range records {
+		if records[i].message == "openai_account_schedule_decision" && records[i].attrs["group_id"] == groupID {
+			filteredRecord = &records[i]
+			break
+		}
+	}
+	require.NotNil(t, filteredRecord)
+	require.Equal(t, "no_available_account", filteredRecord.attrs["reason"])
+	require.Contains(t, filteredRecord.attrs["filter_reasons"], "excluded=2")
+
+	for _, record := range records {
+		for _, sensitiveKey := range []string{"api_key", "credential", "prompt", "body", "session_hash", "previous_response_id", "response_id"} {
+			_, present := record.attrs[sensitiveKey]
+			require.False(t, present, "sensitive field %q in %s", sensitiveKey, record.message)
+		}
 	}
 }
 
