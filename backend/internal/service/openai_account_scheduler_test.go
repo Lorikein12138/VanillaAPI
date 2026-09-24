@@ -271,6 +271,173 @@ type openAIAdvancedSchedulerSettingRepoStub struct {
 	values map[string]string
 }
 
+type schedulerCacheTestSettingsRepo struct {
+	mu sync.Mutex
+
+	values           map[string]string
+	getMultipleErr   error
+	getMultipleCalls int
+	blockBatchCall   int
+	batchStarted     chan struct{}
+	releaseBatch     <-chan struct{}
+	batchBlocked     bool
+	blockValueKey    string
+	valueStarted     chan string
+	releaseValue     <-chan struct{}
+	valueBlocked     bool
+	getAllErr        error
+	setMultipleErr   error
+	setCalls         int
+	firstSetStarted  chan struct{}
+	releaseFirstSet  <-chan struct{}
+	secondSetStarted chan struct{}
+}
+
+func (s *schedulerCacheTestSettingsRepo) Get(ctx context.Context, key string) (*Setting, error) {
+	value, err := s.GetValue(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return &Setting{Key: key, Value: value}, nil
+}
+
+func (s *schedulerCacheTestSettingsRepo) GetValue(_ context.Context, key string) (string, error) {
+	s.mu.Lock()
+	value, ok := s.values[key]
+	block := key == s.blockValueKey && !s.valueBlocked && s.valueStarted != nil
+	if block {
+		s.valueBlocked = true
+	}
+	started, release := s.valueStarted, s.releaseValue
+	s.mu.Unlock()
+	if block {
+		started <- key
+		<-release
+	}
+	if !ok {
+		return "", ErrSettingNotFound
+	}
+	return value, nil
+}
+
+func (s *schedulerCacheTestSettingsRepo) Set(context.Context, string, string) error {
+	panic("unexpected call to Set")
+}
+
+func (s *schedulerCacheTestSettingsRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	s.mu.Lock()
+	s.getMultipleCalls++
+	call := s.getMultipleCalls
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value, ok := s.values[key]; ok {
+			values[key] = value
+		}
+	}
+	err := s.getMultipleErr
+	block := call == s.blockBatchCall && !s.batchBlocked && s.batchStarted != nil
+	if block {
+		s.batchBlocked = true
+	}
+	started, release := s.batchStarted, s.releaseBatch
+	s.mu.Unlock()
+	if block {
+		close(started)
+		<-release
+	}
+	return values, err
+}
+
+func (s *schedulerCacheTestSettingsRepo) SetMultiple(_ context.Context, updates map[string]string) error {
+	s.mu.Lock()
+	s.setCalls++
+	call := s.setCalls
+	if s.setMultipleErr != nil {
+		err := s.setMultipleErr
+		s.mu.Unlock()
+		return err
+	}
+	for key, value := range updates {
+		s.values[key] = value
+	}
+	var started chan struct{}
+	var release <-chan struct{}
+	if call == 1 && s.firstSetStarted != nil {
+		started, release = s.firstSetStarted, s.releaseFirstSet
+	} else if call == 2 && s.secondSetStarted != nil {
+		started = s.secondSetStarted
+	}
+	s.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	if release != nil {
+		<-release
+	}
+	return nil
+}
+
+func (s *schedulerCacheTestSettingsRepo) GetAll(context.Context) (map[string]string, error) {
+	s.mu.Lock()
+	values := make(map[string]string, len(s.values))
+	for key, value := range s.values {
+		values[key] = value
+	}
+	err := s.getAllErr
+	s.mu.Unlock()
+	return values, err
+}
+
+func (s *schedulerCacheTestSettingsRepo) Delete(context.Context, string) error {
+	panic("unexpected call to Delete")
+}
+
+func schedulerCacheTestSettingsValues(smartEnabled, advancedEnabled bool, topK, rateMultiplier, priorityWeight string) map[string]string {
+	return map[string]string{
+		SettingKeyOpenAILowUpstreamRatePriorityEnabled:               "false",
+		SettingKeySmartSchedulingEnabled:                             strconv.FormatBool(smartEnabled),
+		SettingKeyOpenAIOAuthSchedulingRateMultiplier:                rateMultiplier,
+		openAIAdvancedSchedulerSettingKey:                            strconv.FormatBool(advancedEnabled),
+		SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled:       "false",
+		SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled: "false",
+		SettingKeyOpenAIAdvancedSchedulerLBTopK:                      topK,
+		SettingKeyOpenAIAdvancedSchedulerWeightPriority:              priorityWeight,
+		SettingKeyOpenAIAdvancedSchedulerWeightLoad:                  "0",
+		SettingKeyOpenAIAdvancedSchedulerWeightQueue:                 "0.75",
+		SettingKeyOpenAIAdvancedSchedulerWeightErrorRate:             "1.25",
+		SettingKeyOpenAIAdvancedSchedulerWeightTTFT:                  "0.5",
+		SettingKeyOpenAIAdvancedSchedulerWeightReset:                 "",
+		SettingKeyOpenAIAdvancedSchedulerWeightQuotaHeadroom:         "0.2",
+		SettingKeyOpenAIAdvancedSchedulerWeightUpstreamCost:          "1.5",
+		SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse:      "8",
+		SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky:         "4",
+	}
+}
+
+func schedulerCacheTestSystemSettings(smartEnabled, advancedEnabled, lowRatePriority bool, topK, rateMultiplier, priorityWeight string) *SystemSettings {
+	rate, err := strconv.ParseFloat(rateMultiplier, 64)
+	if err != nil {
+		panic(err)
+	}
+	return &SystemSettings{
+		SmartSchedulingEnabled:                        smartEnabled,
+		OpenAIAdvancedSchedulerEnabled:                advancedEnabled,
+		OpenAILowUpstreamRatePriorityEnabled:          lowRatePriority,
+		OpenAIOAuthSchedulingRateMultiplier:           &rate,
+		OpenAIAdvancedSchedulerLBTopK:                 topK,
+		OpenAIAdvancedSchedulerWeightPriority:         priorityWeight,
+		OpenAIAdvancedSchedulerWeightLoad:             "0",
+		OpenAIAdvancedSchedulerWeightQueue:            "0.75",
+		OpenAIAdvancedSchedulerWeightErrorRate:        "1.25",
+		OpenAIAdvancedSchedulerWeightTTFT:             "0.5",
+		OpenAIAdvancedSchedulerWeightReset:            "",
+		OpenAIAdvancedSchedulerWeightQuotaHeadroom:    "0.2",
+		OpenAIAdvancedSchedulerWeightUpstreamCost:     "1.5",
+		OpenAIAdvancedSchedulerWeightPreviousResponse: "8",
+		OpenAIAdvancedSchedulerWeightSessionSticky:    "4",
+	}
+}
+
 func (s *openAIAdvancedSchedulerSettingRepoStub) Get(ctx context.Context, key string) (*Setting, error) {
 	value, err := s.GetValue(ctx, key)
 	if err != nil {
@@ -4356,6 +4523,182 @@ func TestOpenAIGatewayService_SchedulerModeMatrix(t *testing.T) {
 			require.NotNil(t, svc.openaiAccountStats)
 			require.Equal(t, tt.smart, svc.isSmartSchedulingEnabled(ctx))
 			require.Equal(t, tt.advanced, svc.isOpenAIAdvancedSchedulerEnabled(ctx))
+		})
+	}
+}
+
+func TestOpenAIAdvancedSchedulerSettingsCache_StaleFlightCannotOverrideSave(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	releaseBatch := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseBatch) })
+	repo := &schedulerCacheTestSettingsRepo{
+		values:         schedulerCacheTestSettingsValues(false, true, "2", "0.4", "0.25"),
+		blockBatchCall: 1,
+		batchStarted:   make(chan struct{}),
+		releaseBatch:   releaseBatch,
+	}
+	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: NewSettingService(repo, &config.Config{})}}
+	readResult := make(chan openAIAdvancedSchedulerRuntimeSettings, 1)
+	go func() { readResult <- svc.openAIAdvancedSchedulerRuntimeSettings(context.Background()) }()
+	<-repo.batchStarted
+
+	updated := schedulerCacheTestSystemSettings(true, false, true, "9", "1.75", "2.5")
+	require.NoError(t, svc.rateLimitService.settingService.UpdateSettings(context.Background(), updated))
+	releaseOnce.Do(func() { close(releaseBatch) })
+	settings := <-readResult
+	require.True(t, settings.smartEnabled)
+	require.True(t, settings.smartEnabledKnown)
+	require.False(t, settings.enabled)
+	require.True(t, settings.lowUpstreamRatePriorityEnabled)
+	require.Equal(t, 9, settings.lbTopKOverride)
+	require.NotNil(t, settings.oauthSchedulingRateMultiplier)
+	require.InDelta(t, 1.75, *settings.oauthSchedulingRateMultiplier, 1e-9)
+	require.InDelta(t, 2.5, settings.weightOverrides["priority"], 1e-9)
+
+	cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.Equal(t, openAIAdvancedSchedulerSettingGeneration.Load(), cached.generation)
+	require.True(t, cached.smartEnabled)
+	require.False(t, cached.enabled)
+	repo.mu.Lock()
+	require.Equal(t, 1, repo.getMultipleCalls, "the blocked old read is discarded instead of starting a second DB read after the save snapshot is published")
+	repo.mu.Unlock()
+}
+
+func TestOpenAIAdvancedSchedulerSettingsCache_StaleWaiterCannotUseOldResult(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	releaseBatch := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseBatch) })
+	repo := &schedulerCacheTestSettingsRepo{
+		values:         schedulerCacheTestSettingsValues(true, false, "3", "0.6", "0.5"),
+		blockBatchCall: 1,
+		batchStarted:   make(chan struct{}),
+		releaseBatch:   releaseBatch,
+	}
+	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: NewSettingService(repo, &config.Config{})}}
+	leaderResult := make(chan openAIAdvancedSchedulerRuntimeSettings, 1)
+	go func() { leaderResult <- svc.openAIAdvancedSchedulerRuntimeSettings(context.Background()) }()
+	<-repo.batchStarted
+
+	waiterJoined := make(chan struct{})
+	var joinedOnce sync.Once
+	waiterResult := make(chan openAIAdvancedSchedulerRuntimeSettings, 1)
+	go func() {
+		waiterResult <- svc.openAIAdvancedSchedulerRuntimeSettingsWithFlightRegistered(context.Background(), func() {
+			joinedOnce.Do(func() { close(waiterJoined) })
+		})
+	}()
+	<-waiterJoined
+
+	updated := schedulerCacheTestSystemSettings(false, true, false, "11", "0.8", "3.5")
+	require.NoError(t, svc.rateLimitService.settingService.UpdateSettings(context.Background(), updated))
+	releaseOnce.Do(func() { close(releaseBatch) })
+	for _, result := range []<-chan openAIAdvancedSchedulerRuntimeSettings{leaderResult, waiterResult} {
+		settings := <-result
+		require.False(t, settings.smartEnabled, "the old true result must not reach the reader after the save")
+		require.True(t, settings.smartEnabledKnown)
+		require.True(t, settings.enabled, "the newly saved independent A switch is preserved")
+		require.Equal(t, 11, settings.lbTopKOverride)
+		require.InDelta(t, 3.5, settings.weightOverrides["priority"], 1e-9)
+	}
+	repo.mu.Lock()
+	require.Equal(t, 1, repo.getMultipleCalls, "both old-flight consumers reuse the published current snapshot")
+	repo.mu.Unlock()
+}
+
+func TestOpenAIAdvancedSchedulerSettingsCache_FallbackHonorsGeneration(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	releaseValue := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseValue) })
+	repo := &schedulerCacheTestSettingsRepo{
+		values:         schedulerCacheTestSettingsValues(false, true, "4", "0.7", "0.75"),
+		getMultipleErr: errors.New("batch unavailable"),
+		blockValueKey:  SettingKeySmartSchedulingEnabled,
+		valueStarted:   make(chan string, 1),
+		releaseValue:   releaseValue,
+	}
+	svc := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: NewSettingService(repo, &config.Config{})}}
+	readResult := make(chan openAIAdvancedSchedulerRuntimeSettings, 1)
+	go func() { readResult <- svc.openAIAdvancedSchedulerRuntimeSettings(context.Background()) }()
+	require.Equal(t, SettingKeySmartSchedulingEnabled, <-repo.valueStarted)
+
+	updated := schedulerCacheTestSystemSettings(true, false, true, "13", "1.9", "4.5")
+	require.NoError(t, svc.rateLimitService.settingService.UpdateSettings(context.Background(), updated))
+	releaseOnce.Do(func() { close(releaseValue) })
+	settings := <-readResult
+	require.True(t, settings.smartEnabled)
+	require.True(t, settings.smartEnabledKnown)
+	require.False(t, settings.enabled)
+	require.True(t, settings.lowUpstreamRatePriorityEnabled)
+	require.Equal(t, 13, settings.lbTopKOverride)
+	require.NotNil(t, settings.oauthSchedulingRateMultiplier)
+	require.InDelta(t, 1.9, *settings.oauthSchedulingRateMultiplier, 1e-9)
+	require.InDelta(t, 4.5, settings.weightOverrides["priority"], 1e-9)
+	repo.mu.Lock()
+	require.Equal(t, 1, repo.getMultipleCalls)
+	repo.mu.Unlock()
+}
+
+func TestOpenAIGatewayService_SchedulerModeAfterSettingsSave(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(81201)
+	for _, mode := range []struct {
+		name     string
+		smart    bool
+		advanced bool
+		wantID   int64
+	}{
+		{name: "legacy", smart: false, advanced: false, wantID: 81211},
+		{name: "experimental", smart: false, advanced: true},
+		{name: "smart", smart: true, advanced: false, wantID: 81212},
+		{name: "smart_and_experimental", smart: true, advanced: true, wantID: 81212},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			resetOpenAIAdvancedSchedulerSettingCacheForTest()
+			defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+			accounts := []Account{
+				newSmartSchedulerTestAccount(81211, groupID, 0),
+				newSmartSchedulerTestAccount(81212, groupID, 10),
+			}
+			svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+			repo := &schedulerCacheTestSettingsRepo{values: schedulerCacheTestSettingsValues(false, false, "7", "1", "1")}
+			settingService := NewSettingService(repo, &config.Config{})
+			svc.rateLimitService = &RateLimitService{settingService: settingService}
+			settings := schedulerCacheTestSystemSettings(mode.smart, mode.advanced, false, "7", "1", "1")
+			require.NoError(t, settingService.UpdateSettings(ctx, settings))
+			if mode.smart {
+				scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
+				require.True(t, ok)
+				seedSmartDegradedAccount(t, scheduler.stats, 81211, "error_rate", time.Now().Add(-time.Minute))
+				scheduler.stats.loadOrCreate(81211).nextProbeAt.Store(time.Now().Add(time.Hour).UnixNano())
+			}
+
+			selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			require.NotNil(t, selection.Account)
+			if mode.wantID != 0 {
+				require.Equal(t, mode.wantID, selection.Account.ID, "the request is routed by the just-published S/A mode")
+			} else {
+				require.Contains(t, []int64{81211, 81212}, selection.Account.ID, "the A-only route selects from the live candidate set")
+			}
+			require.Equal(t, mode.smart, svc.isSmartSchedulingEnabled(ctx))
+			require.Equal(t, mode.advanced, svc.isOpenAIAdvancedSchedulerEnabled(ctx))
+			require.Equal(t, mode.smart || mode.advanced, svc.openaiScheduler != nil)
+			require.Zero(t, selection.Account.smartHealthProbeID)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
 		})
 	}
 }
