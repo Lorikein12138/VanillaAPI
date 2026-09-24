@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -70,14 +71,9 @@ type Account struct {
 	GroupIDs      []int64
 	Groups        []*Group
 
-	// model_mapping 热路径缓存（非持久化字段）
-	modelMappingCache               map[string]string
-	modelMappingCacheReady          bool
-	modelMappingCacheCredentialsPtr uintptr
-	modelMappingCacheRawPtr         uintptr
-	modelMappingCacheRawLen         int
-	modelMappingCacheRawSig         uint64
-	modelMappingCacheRuntimeVersion uint64
+	// model_mapping 热路径缓存（非持久化字段）；以不可变快照原子发布，允许并发读取同一账号。
+	// 使用 atomic.Value（无 noCopy），Account 仍可按值拷贝，副本共享同一不可变快照。
+	modelMappingCache atomic.Value // *accountModelMappingCache
 
 	// header_overrides 热路径缓存（非持久化字段，同 model_mapping 缓存先例）
 	headerOverrideCache               map[string]string
@@ -599,15 +595,15 @@ func (a *Account) GetModelMapping() map[string]string {
 	rawSig := uint64(0)
 	rawSigReady := false
 
-	if a.modelMappingCacheReady &&
-		a.modelMappingCacheCredentialsPtr == credentialsPtr &&
-		a.modelMappingCacheRawPtr == rawPtr &&
-		a.modelMappingCacheRawLen == rawLen &&
-		a.modelMappingCacheRuntimeVersion == runtimeVersion {
+	if cached, _ := a.modelMappingCache.Load().(*accountModelMappingCache); cached != nil &&
+		cached.credentialsPtr == credentialsPtr &&
+		cached.rawPtr == rawPtr &&
+		cached.rawLen == rawLen &&
+		cached.runtimeVersion == runtimeVersion {
 		rawSig = modelMappingSignature(rawMapping)
 		rawSigReady = true
-		if a.modelMappingCacheRawSig == rawSig {
-			return a.modelMappingCache
+		if cached.rawSig == rawSig {
+			return cached.mapping
 		}
 	}
 
@@ -616,14 +612,25 @@ func (a *Account) GetModelMapping() map[string]string {
 		rawSig = modelMappingSignature(rawMapping)
 	}
 
-	a.modelMappingCache = mapping
-	a.modelMappingCacheReady = true
-	a.modelMappingCacheCredentialsPtr = credentialsPtr
-	a.modelMappingCacheRawPtr = rawPtr
-	a.modelMappingCacheRawLen = rawLen
-	a.modelMappingCacheRawSig = rawSig
-	a.modelMappingCacheRuntimeVersion = runtimeVersion
+	a.modelMappingCache.Store(&accountModelMappingCache{
+		mapping:        mapping,
+		credentialsPtr: credentialsPtr,
+		rawPtr:         rawPtr,
+		rawLen:         rawLen,
+		rawSig:         rawSig,
+		runtimeVersion: runtimeVersion,
+	})
 	return mapping
+}
+
+// accountModelMappingCache 是 GetModelMapping 的不可变缓存快照，发布后不再修改。
+type accountModelMappingCache struct {
+	mapping        map[string]string
+	credentialsPtr uintptr
+	rawPtr         uintptr
+	rawLen         int
+	rawSig         uint64
+	runtimeVersion uint64
 }
 
 func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]string {

@@ -72,6 +72,7 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 	subscriptionPriorityEnabled    bool
 	lbTopKOverride                 int
 	weightOverrides                map[string]float64
+	generation                     uint64
 	expiresAt                      int64
 }
 
@@ -89,6 +90,81 @@ type openAIAdvancedSchedulerRuntimeSettings struct {
 
 var openAIAdvancedSchedulerSettingCache atomic.Value // *cachedOpenAIAdvancedSchedulerSetting
 var openAIAdvancedSchedulerSettingSF singleflight.Group
+var openAIAdvancedSchedulerSettingCachePublishMu sync.Mutex
+var openAIAdvancedSchedulerSettingGeneration atomic.Uint64
+var openAIAdvancedSchedulerSettingWriteMu sync.Mutex
+
+type openAIAdvancedSchedulerSettingsReadResult struct {
+	generation uint64
+	settings   openAIAdvancedSchedulerRuntimeSettings
+}
+
+func cachedOpenAIAdvancedSchedulerRuntimeSettings(cached *cachedOpenAIAdvancedSchedulerSetting) openAIAdvancedSchedulerRuntimeSettings {
+	return openAIAdvancedSchedulerRuntimeSettings{
+		lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
+		smartEnabled:                   cached.smartEnabled,
+		smartEnabledKnown:              cached.smartEnabledKnown,
+		oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
+		enabled:                        cached.enabled,
+		stickyWeightedEnabled:          cached.stickyWeightedEnabled,
+		subscriptionPriorityEnabled:    cached.subscriptionPriorityEnabled,
+		lbTopKOverride:                 cached.lbTopKOverride,
+		weightOverrides:                cloneOpenAIAdvancedSchedulerWeightOverrides(cached.weightOverrides),
+	}
+}
+
+func loadCurrentOpenAIAdvancedSchedulerSettingsCache() (*cachedOpenAIAdvancedSchedulerSetting, bool) {
+	cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	if !ok || cached == nil || cached.generation != openAIAdvancedSchedulerSettingGeneration.Load() || time.Now().UnixNano() >= cached.expiresAt {
+		return nil, false
+	}
+	return cached, true
+}
+
+// invalidateOpenAIAdvancedSchedulerSettingsAfterWrite advances the local
+// generation only after persistence succeeds, and makes every prior snapshot
+// unusable before the writer rebuilds the complete post-write value.
+func invalidateOpenAIAdvancedSchedulerSettingsAfterWrite() uint64 {
+	openAIAdvancedSchedulerSettingCachePublishMu.Lock()
+	generation := openAIAdvancedSchedulerSettingGeneration.Add(1)
+	openAIAdvancedSchedulerSettingSF.Forget(openAIAdvancedSchedulerSettingKey)
+	openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{generation: generation})
+	openAIAdvancedSchedulerSettingCachePublishMu.Unlock()
+	return generation
+}
+
+func publishOpenAIAdvancedSchedulerSettingsAfterWrite(settings *SystemSettings) {
+	if settings == nil {
+		return
+	}
+	openAIAdvancedSchedulerSettingCachePublishMu.Lock()
+	generation := openAIAdvancedSchedulerSettingGeneration.Load()
+	openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
+		lowUpstreamRatePriorityEnabled: settings.OpenAILowUpstreamRatePriorityEnabled,
+		smartEnabled:                   settings.SmartSchedulingEnabled,
+		smartEnabledKnown:              true,
+		oauthSchedulingRateMultiplier:  settings.OpenAIOAuthSchedulingRateMultiplier,
+		enabled:                        settings.OpenAIAdvancedSchedulerEnabled,
+		stickyWeightedEnabled:          settings.OpenAIAdvancedSchedulerStickyWeightedEnabled,
+		subscriptionPriorityEnabled:    settings.OpenAIAdvancedSchedulerSubscriptionPriorityEnabled,
+		lbTopKOverride:                 parsePositiveIntOverride(settings.OpenAIAdvancedSchedulerLBTopK),
+		weightOverrides: cloneOpenAIAdvancedSchedulerWeightOverrides(parseOpenAIAdvancedSchedulerWeightOverrides(map[string]string{
+			SettingKeyOpenAIAdvancedSchedulerWeightPriority:         settings.OpenAIAdvancedSchedulerWeightPriority,
+			SettingKeyOpenAIAdvancedSchedulerWeightLoad:             settings.OpenAIAdvancedSchedulerWeightLoad,
+			SettingKeyOpenAIAdvancedSchedulerWeightQueue:            settings.OpenAIAdvancedSchedulerWeightQueue,
+			SettingKeyOpenAIAdvancedSchedulerWeightErrorRate:        settings.OpenAIAdvancedSchedulerWeightErrorRate,
+			SettingKeyOpenAIAdvancedSchedulerWeightTTFT:             settings.OpenAIAdvancedSchedulerWeightTTFT,
+			SettingKeyOpenAIAdvancedSchedulerWeightReset:            settings.OpenAIAdvancedSchedulerWeightReset,
+			SettingKeyOpenAIAdvancedSchedulerWeightQuotaHeadroom:    settings.OpenAIAdvancedSchedulerWeightQuotaHeadroom,
+			SettingKeyOpenAIAdvancedSchedulerWeightUpstreamCost:     settings.OpenAIAdvancedSchedulerWeightUpstreamCost,
+			SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse: settings.OpenAIAdvancedSchedulerWeightPreviousResponse,
+			SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky:    settings.OpenAIAdvancedSchedulerWeightSessionSticky,
+		})),
+		generation: generation,
+		expiresAt:  time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
+	})
+	openAIAdvancedSchedulerSettingCachePublishMu.Unlock()
+}
 
 type OpenAIAccountScheduleRequest struct {
 	GroupID                   *int64
@@ -3030,113 +3106,128 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerSettingRepo() SettingRepos
 }
 
 func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx context.Context) openAIAdvancedSchedulerRuntimeSettings {
-	if cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting); ok && cached != nil {
-		if time.Now().UnixNano() < cached.expiresAt {
-			return openAIAdvancedSchedulerRuntimeSettings{
-				lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
-				smartEnabled:                   cached.smartEnabled,
-				smartEnabledKnown:              cached.smartEnabledKnown,
-				oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
-				enabled:                        cached.enabled,
-				stickyWeightedEnabled:          cached.stickyWeightedEnabled,
-				subscriptionPriorityEnabled:    cached.subscriptionPriorityEnabled,
-				lbTopKOverride:                 cached.lbTopKOverride,
-				weightOverrides:                cloneOpenAIAdvancedSchedulerWeightOverrides(cached.weightOverrides),
-			}
-		}
-	}
+	return s.openAIAdvancedSchedulerRuntimeSettingsWithFlightRegistered(ctx, nil)
+}
 
-	result, _, _ := openAIAdvancedSchedulerSettingSF.Do(openAIAdvancedSchedulerSettingKey, func() (any, error) {
-		if cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting); ok && cached != nil {
-			if time.Now().UnixNano() < cached.expiresAt {
-				return openAIAdvancedSchedulerRuntimeSettings{
-					lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
-					smartEnabled:                   cached.smartEnabled,
-					smartEnabledKnown:              cached.smartEnabledKnown,
-					oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
-					enabled:                        cached.enabled,
-					stickyWeightedEnabled:          cached.stickyWeightedEnabled,
-					subscriptionPriorityEnabled:    cached.subscriptionPriorityEnabled,
-					lbTopKOverride:                 cached.lbTopKOverride,
-					weightOverrides:                cloneOpenAIAdvancedSchedulerWeightOverrides(cached.weightOverrides),
+// openAIAdvancedSchedulerRuntimeSettingsWithFlightRegistered lets tests
+// synchronize after a caller has registered with singleflight. Production
+// callers pass no callback and follow the same cache/read path.
+func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettingsWithFlightRegistered(
+	ctx context.Context,
+	flightRegistered func(),
+) openAIAdvancedSchedulerRuntimeSettings {
+	for {
+		if cached, ok := loadCurrentOpenAIAdvancedSchedulerSettingsCache(); ok {
+			return cachedOpenAIAdvancedSchedulerRuntimeSettings(cached)
+		}
+
+		resultCh := openAIAdvancedSchedulerSettingSF.DoChan(openAIAdvancedSchedulerSettingKey, func() (any, error) {
+			if cached, ok := loadCurrentOpenAIAdvancedSchedulerSettingsCache(); ok {
+				return openAIAdvancedSchedulerSettingsReadResult{
+					generation: cached.generation,
+					settings:   cachedOpenAIAdvancedSchedulerRuntimeSettings(cached),
 				}, nil
 			}
-		}
 
-		lowUpstreamRatePriorityEnabled := false
-		smartEnabled := false
-		oauthSchedulingRateMultiplier := parseOpenAIOAuthSchedulingRateMultiplier(nil)
-		enabled := false
-		stickyWeightedEnabled := false
-		subscriptionPriorityEnabled := false
-		lbTopKOverride := 0
-		weightOverrides := map[string]float64{}
-		smartEnabledKnown := false
-		if repo := s.openAIAdvancedSchedulerSettingRepo(); repo != nil {
-			dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIAdvancedSchedulerSettingDBTimeout)
-			defer cancel()
+			generation := openAIAdvancedSchedulerSettingGeneration.Load()
+			lowUpstreamRatePriorityEnabled := false
+			smartEnabled := false
+			oauthSchedulingRateMultiplier := parseOpenAIOAuthSchedulingRateMultiplier(nil)
+			enabled := false
+			stickyWeightedEnabled := false
+			subscriptionPriorityEnabled := false
+			lbTopKOverride := 0
+			weightOverrides := map[string]float64{}
+			smartEnabledKnown := false
+			if repo := s.openAIAdvancedSchedulerSettingRepo(); repo != nil {
+				dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIAdvancedSchedulerSettingDBTimeout)
+				defer cancel()
 
-			if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
-				smartEnabledKnown = true
-				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
-				smartEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeySmartSchedulingEnabled]), "true")
-				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
-				enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
-				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
-				subscriptionPriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled]), "true")
-				lbTopKOverride = parsePositiveIntOverride(values[SettingKeyOpenAIAdvancedSchedulerLBTopK])
-				weightOverrides = parseOpenAIAdvancedSchedulerWeightOverrides(values)
-			} else {
-				// 批量读取失败时逐键降级，覆盖全部键（含 TopK/权重），避免只加载布尔开关
-				// 而静默丢弃管理员配置的覆盖值；降级状态会被缓存一个 TTL，必须留痕。
-				slog.Warn("openai_advanced_scheduler_settings_batch_load_failed", "error", err)
-				fallbackValues := make(map[string]string)
-				for _, key := range openAIAdvancedSchedulerRuntimeSettingKeys() {
-					if value, valueErr := repo.GetValue(dbCtx, key); valueErr == nil {
-						fallbackValues[key] = value
-						if key == SettingKeySmartSchedulingEnabled {
-							smartEnabledKnown = true
+				if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
+					smartEnabledKnown = true
+					lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
+					smartEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeySmartSchedulingEnabled]), "true")
+					oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
+					enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
+					stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
+					subscriptionPriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled]), "true")
+					lbTopKOverride = parsePositiveIntOverride(values[SettingKeyOpenAIAdvancedSchedulerLBTopK])
+					weightOverrides = parseOpenAIAdvancedSchedulerWeightOverrides(values)
+				} else {
+					// 批量读取失败时逐键降级，覆盖全部键（含 TopK/权重），避免只加载布尔开关
+					// 而静默丢弃管理员配置的覆盖值；降级状态会被缓存一个 TTL，必须留痕。
+					slog.Warn("openai_advanced_scheduler_settings_batch_load_failed", "error", err)
+					fallbackValues := make(map[string]string)
+					for _, key := range openAIAdvancedSchedulerRuntimeSettingKeys() {
+						if value, valueErr := repo.GetValue(dbCtx, key); valueErr == nil {
+							fallbackValues[key] = value
+							if key == SettingKeySmartSchedulingEnabled {
+								smartEnabledKnown = true
+							}
 						}
 					}
+					lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
+					smartEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeySmartSchedulingEnabled]), "true")
+					oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues)
+					enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
+					stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
+					subscriptionPriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled]), "true")
+					lbTopKOverride = parsePositiveIntOverride(fallbackValues[SettingKeyOpenAIAdvancedSchedulerLBTopK])
+					weightOverrides = parseOpenAIAdvancedSchedulerWeightOverrides(fallbackValues)
 				}
-				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
-				smartEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeySmartSchedulingEnabled]), "true")
-				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues)
-				enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
-				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
-				subscriptionPriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled]), "true")
-				lbTopKOverride = parsePositiveIntOverride(fallbackValues[SettingKeyOpenAIAdvancedSchedulerLBTopK])
-				weightOverrides = parseOpenAIAdvancedSchedulerWeightOverrides(fallbackValues)
 			}
-		}
 
-		openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
-			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
-			smartEnabled:                   smartEnabled,
-			smartEnabledKnown:              smartEnabledKnown,
-			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
-			enabled:                        enabled,
-			stickyWeightedEnabled:          stickyWeightedEnabled,
-			subscriptionPriorityEnabled:    subscriptionPriorityEnabled,
-			lbTopKOverride:                 lbTopKOverride,
-			weightOverrides:                cloneOpenAIAdvancedSchedulerWeightOverrides(weightOverrides),
-			expiresAt:                      time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
+			cached := &cachedOpenAIAdvancedSchedulerSetting{
+				lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
+				smartEnabled:                   smartEnabled,
+				smartEnabledKnown:              smartEnabledKnown,
+				oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
+				enabled:                        enabled,
+				stickyWeightedEnabled:          stickyWeightedEnabled,
+				subscriptionPriorityEnabled:    subscriptionPriorityEnabled,
+				lbTopKOverride:                 lbTopKOverride,
+				weightOverrides:                cloneOpenAIAdvancedSchedulerWeightOverrides(weightOverrides),
+				generation:                     generation,
+				expiresAt:                      time.Now().Add(openAIAdvancedSchedulerSettingCacheTTL).UnixNano(),
+			}
+
+			openAIAdvancedSchedulerSettingCachePublishMu.Lock()
+			currentGeneration := openAIAdvancedSchedulerSettingGeneration.Load()
+			if generation == currentGeneration {
+				openAIAdvancedSchedulerSettingCache.Store(cached)
+				openAIAdvancedSchedulerSettingCachePublishMu.Unlock()
+				return openAIAdvancedSchedulerSettingsReadResult{
+					generation: generation,
+					settings:   cachedOpenAIAdvancedSchedulerRuntimeSettings(cached),
+				}, nil
+			}
+			if current, ok := loadCurrentOpenAIAdvancedSchedulerSettingsCache(); ok {
+				openAIAdvancedSchedulerSettingCachePublishMu.Unlock()
+				return openAIAdvancedSchedulerSettingsReadResult{
+					generation: current.generation,
+					settings:   cachedOpenAIAdvancedSchedulerRuntimeSettings(current),
+				}, nil
+			}
+			openAIAdvancedSchedulerSettingCachePublishMu.Unlock()
+			return openAIAdvancedSchedulerSettingsReadResult{
+				generation: generation,
+				settings:   cachedOpenAIAdvancedSchedulerRuntimeSettings(cached),
+			}, nil
 		})
-		return openAIAdvancedSchedulerRuntimeSettings{
-			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
-			smartEnabled:                   smartEnabled,
-			smartEnabledKnown:              smartEnabledKnown,
-			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
-			enabled:                        enabled,
-			stickyWeightedEnabled:          stickyWeightedEnabled,
-			subscriptionPriorityEnabled:    subscriptionPriorityEnabled,
-			lbTopKOverride:                 lbTopKOverride,
-			weightOverrides:                weightOverrides,
-		}, nil
-	})
 
-	settings, _ := result.(openAIAdvancedSchedulerRuntimeSettings)
-	return settings
+		if flightRegistered != nil {
+			flightRegistered()
+		}
+		result := <-resultCh
+		readResult, ok := result.Val.(openAIAdvancedSchedulerSettingsReadResult)
+		if !ok {
+			return openAIAdvancedSchedulerRuntimeSettings{}
+		}
+		if readResult.generation != openAIAdvancedSchedulerSettingGeneration.Load() {
+			continue
+		}
+		return readResult.settings
+	}
 }
 
 func (s *OpenAIGatewayService) isOpenAIAdvancedSchedulerEnabled(ctx context.Context) bool {
@@ -3262,8 +3353,7 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 }
 
 func resetOpenAIAdvancedSchedulerSettingCacheForTest() {
-	openAIAdvancedSchedulerSettingCache = atomic.Value{}
-	openAIAdvancedSchedulerSettingSF = singleflight.Group{}
+	invalidateOpenAIAdvancedSchedulerSettingsAfterWrite()
 }
 
 func (s *OpenAIGatewayService) SelectAccountWithScheduler(
