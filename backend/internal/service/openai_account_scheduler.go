@@ -28,19 +28,23 @@ const (
 )
 
 const (
-	openAIAdvancedSchedulerSettingCacheTTL  = 5 * time.Second
-	openAIAdvancedSchedulerSettingDBTimeout = 2 * time.Second
-	openAIAccountHealthMinSamples           = int64(10)
-	openAIAccountLegacyHealthMinSamples     = int64(3)
-	openAIAccountHealthStaleAfter           = 10 * time.Minute
-	openAIAccountLegacyProbeCooldown        = 30 * time.Second
-	openAIAccountHealthProbeLease           = 30 * time.Second
-	openAIAccountSmartTTFTThreshold         = 10 * time.Second
-	openAIAccountSmartErrorRateThreshold    = 0.10
-	openAIAccountSmartWindowSize            = 10
-	openAIAccountSmartWindowDuration        = 10 * time.Minute
-	openAIAccountSmartProbeBatchLimit       = 10
-	openAIAccountSmartProbeBatchTimeout     = 10 * time.Minute
+	openAIAdvancedSchedulerSettingCacheTTL    = 5 * time.Second
+	openAIAdvancedSchedulerSettingDBTimeout   = 2 * time.Second
+	openAIAccountHealthMinSamples             = int64(10)
+	openAIAccountLegacyHealthMinSamples       = int64(3)
+	openAIAccountHealthStaleAfter             = 10 * time.Minute
+	openAIAccountLegacyProbeCooldown          = 30 * time.Second
+	openAIAccountHealthProbeLease             = 30 * time.Second
+	openAIAccountSmartTTFTThreshold           = 10 * time.Second
+	openAIAccountSmartErrorRateThreshold      = 0.10
+	openAIAccountSmartWindowSize              = 10
+	openAIAccountSmartWindowDuration          = 10 * time.Minute
+	openAIAccountSmartProbeBatchLimit         = 10
+	openAIAccountSmartProbeBatchTimeout       = 10 * time.Minute
+	openAIAccountRuntimeStatsReclaimInterval  = 15 * time.Minute
+	openAIAccountRuntimeStatsReclaimIdle      = 30 * time.Minute
+	openAIAccountRuntimeStatsReclaimBatchSize = 100
+	openAIAccountRuntimeStatsReclaimTimeout   = 2 * time.Second
 	// ponytail: cap probes added when cost ordering expands configured Top-K;
 	// use bulk acquisition if a measured workload needs a higher ceiling.
 	openAIAccountSelectionProbeLimit = 64
@@ -325,9 +329,15 @@ func (m *openAIAccountSchedulerMetrics) recordSmartHealthAllDegraded() {
 }
 
 type openAIAccountRuntimeStats struct {
-	accounts      sync.Map
-	accountCount  atomic.Int64
-	probeSequence atomic.Uint64
+	accounts           sync.Map
+	accountCount       atomic.Int64
+	probeSequence      atomic.Uint64
+	reclaimCursor      atomic.Int64
+	maintenanceMu      sync.Mutex
+	maintenanceStarted bool
+	maintenanceStopped bool
+	maintenanceCancel  context.CancelFunc
+	maintenanceDone    chan struct{}
 }
 
 type openAIAccountHealthLevel uint32
@@ -346,6 +356,10 @@ const (
 
 type openAIAccountRuntimeStat struct {
 	mu                sync.Mutex
+	lifecycleMu       sync.Mutex
+	activeRefs        int64
+	retiring          bool
+	lastActivityAt    atomic.Int64
 	errorRateEWMABits atomic.Uint64
 	ttftEWMABits      atomic.Uint64
 	sampleCount       atomic.Int64
@@ -400,26 +414,311 @@ func newOpenAIAccountRuntimeStats() *openAIAccountRuntimeStats {
 	return &openAIAccountRuntimeStats{}
 }
 
-func (s *openAIAccountRuntimeStats) loadOrCreate(accountID int64) *openAIAccountRuntimeStat {
-	if value, ok := s.accounts.Load(accountID); ok {
-		stat, _ := value.(*openAIAccountRuntimeStat)
-		if stat != nil {
-			return stat
-		}
+// acquire pins a stat while a caller reads or mutates it so reclamation cannot
+// detach an entry that still has an active user. Creating callers publish the
+// first pin together with the map entry; read-only callers never create state.
+func (s *openAIAccountRuntimeStats) acquire(
+	accountID int64,
+	create bool,
+	refreshActivity bool,
+) (*openAIAccountRuntimeStat, func(), bool) {
+	if s == nil || accountID <= 0 {
+		return nil, nil, false
 	}
 
-	stat := &openAIAccountRuntimeStat{}
-	stat.ttftEWMABits.Store(math.Float64bits(math.NaN()))
-	actual, loaded := s.accounts.LoadOrStore(accountID, stat)
-	if !loaded {
-		s.accountCount.Add(1)
-		return stat
+	for {
+		value, exists := s.accounts.Load(accountID)
+		if !exists {
+			if !create {
+				return nil, nil, false
+			}
+
+			now := time.Now().UnixNano()
+			stat := &openAIAccountRuntimeStat{activeRefs: 1}
+			stat.lastActivityAt.Store(now)
+			stat.ttftEWMABits.Store(math.Float64bits(math.NaN()))
+			actual, loaded := s.accounts.LoadOrStore(accountID, stat)
+			if !loaded {
+				s.accountCount.Add(1)
+				return stat, func() { s.release(stat) }, true
+			}
+			value = actual
+		}
+
+		stat, ok := value.(*openAIAccountRuntimeStat)
+		if !ok || stat == nil {
+			return nil, nil, false
+		}
+
+		stat.lifecycleMu.Lock()
+		if stat.retiring {
+			stat.lifecycleMu.Unlock()
+			if !create {
+				return nil, nil, false
+			}
+			continue
+		}
+		current, mapped := s.accounts.Load(accountID)
+		if !mapped || current != stat {
+			stat.lifecycleMu.Unlock()
+			if !create {
+				return nil, nil, false
+			}
+			continue
+		}
+		stat.activeRefs++
+		if refreshActivity {
+			stat.lastActivityAt.Store(time.Now().UnixNano())
+		}
+		stat.lifecycleMu.Unlock()
+		return stat, func() { s.release(stat) }, true
 	}
-	existing, _ := actual.(*openAIAccountRuntimeStat)
-	if existing != nil {
-		return existing
+}
+
+func (s *openAIAccountRuntimeStats) release(stat *openAIAccountRuntimeStat) {
+	if s == nil || stat == nil {
+		return
 	}
-	return stat
+	stat.lifecycleMu.Lock()
+	if stat.activeRefs <= 0 {
+		stat.lifecycleMu.Unlock()
+		panic("openai account runtime stat reference count underflow")
+	}
+	stat.activeRefs--
+	stat.lifecycleMu.Unlock()
+}
+
+type openAIAccountRuntimeStatReclaimCandidate struct {
+	accountID int64
+	stat      *openAIAccountRuntimeStat
+}
+
+func isOpenAIAccountRuntimeStatIdle(stat *openAIAccountRuntimeStat, now time.Time) bool {
+	if stat == nil {
+		return false
+	}
+	stat.lifecycleMu.Lock()
+	defer stat.lifecycleMu.Unlock()
+	if stat.retiring || stat.activeRefs != 0 {
+		return false
+	}
+	lastActivity := stat.lastActivityAt.Load()
+	return lastActivity > 0 && now.Sub(time.Unix(0, lastActivity)) >= openAIAccountRuntimeStatsReclaimIdle
+}
+
+func appendLowestOpenAIAccountRuntimeStatCandidate(
+	candidates []openAIAccountRuntimeStatReclaimCandidate,
+	candidate openAIAccountRuntimeStatReclaimCandidate,
+) []openAIAccountRuntimeStatReclaimCandidate {
+	if len(candidates) < openAIAccountRuntimeStatsReclaimBatchSize {
+		return append(candidates, candidate)
+	}
+	largest := 0
+	for index := 1; index < len(candidates); index++ {
+		if candidates[index].accountID > candidates[largest].accountID {
+			largest = index
+		}
+	}
+	if candidate.accountID < candidates[largest].accountID {
+		candidates[largest] = candidate
+	}
+	return candidates
+}
+
+func (s *openAIAccountRuntimeStats) reclaimCandidates(now time.Time) []openAIAccountRuntimeStatReclaimCandidate {
+	if s == nil {
+		return nil
+	}
+	cursor := s.reclaimCursor.Load()
+	afterCursor := make([]openAIAccountRuntimeStatReclaimCandidate, 0, openAIAccountRuntimeStatsReclaimBatchSize)
+	wrapped := make([]openAIAccountRuntimeStatReclaimCandidate, 0, openAIAccountRuntimeStatsReclaimBatchSize)
+	s.accounts.Range(func(key, value any) bool {
+		accountID, ok := key.(int64)
+		if !ok || accountID <= 0 {
+			return true
+		}
+		stat, ok := value.(*openAIAccountRuntimeStat)
+		if !ok || !isOpenAIAccountRuntimeStatIdle(stat, now) {
+			return true
+		}
+		candidate := openAIAccountRuntimeStatReclaimCandidate{accountID: accountID, stat: stat}
+		wrapped = appendLowestOpenAIAccountRuntimeStatCandidate(wrapped, candidate)
+		if accountID > cursor {
+			afterCursor = appendLowestOpenAIAccountRuntimeStatCandidate(afterCursor, candidate)
+		}
+		return true
+	})
+
+	selected := afterCursor
+	if len(selected) == 0 {
+		selected = wrapped
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].accountID < selected[j].accountID })
+	if len(selected) == 0 {
+		s.reclaimCursor.Store(0)
+		return nil
+	}
+	return selected
+}
+
+func (s *openAIAccountRuntimeStats) retireReclaimCandidate(
+	candidate openAIAccountRuntimeStatReclaimCandidate,
+	exists bool,
+	now time.Time,
+) bool {
+	stat := candidate.stat
+	if stat == nil {
+		return false
+	}
+	stat.lifecycleMu.Lock()
+	defer stat.lifecycleMu.Unlock()
+	if stat.retiring || stat.activeRefs != 0 {
+		return false
+	}
+	mapped, ok := s.accounts.Load(candidate.accountID)
+	if !ok || mapped != stat {
+		return false
+	}
+	lastActivity := stat.lastActivityAt.Load()
+	if lastActivity <= 0 || now.Sub(time.Unix(0, lastActivity)) < openAIAccountRuntimeStatsReclaimIdle {
+		return false
+	}
+
+	stat.retiring = true
+	stat.mu.Lock()
+	probeInFlight := stat.probeID != 0 || stat.probeActive.Load() || stat.probeLeaseUntil.Load() != 0
+	probeBatchInFlight := !stat.probeBatchStarted.IsZero() || len(stat.probeBatchSamples) != 0
+	degraded := openAIAccountHealthLevel(stat.healthLevel.Load()) == openAIAccountHealthDegraded ||
+		stat.smartLevel == openAIAccountHealthDegraded
+	stat.mu.Unlock()
+	if probeInFlight || probeBatchInFlight || (exists && degraded) {
+		stat.retiring = false
+		return false
+	}
+	if !s.accounts.CompareAndDelete(candidate.accountID, stat) {
+		stat.retiring = false
+		return false
+	}
+	s.accountCount.Add(-1)
+	return true
+}
+
+// reclaimIdleBatch verifies a bounded batch against the account repository.
+// Repository failures and malformed results keep the complete batch for retry.
+func (s *openAIAccountRuntimeStats) reclaimIdleBatch(ctx context.Context, repo AccountRepository, now time.Time) int {
+	if s == nil || repo == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	candidates := s.reclaimCandidates(now)
+	if len(candidates) == 0 {
+		return 0
+	}
+	ids := make([]int64, 0, len(candidates))
+	requested := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.accountID)
+		requested[candidate.accountID] = struct{}{}
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, openAIAccountRuntimeStatsReclaimTimeout)
+	accounts, err := repo.GetByIDs(queryCtx, ids)
+	cancel()
+	if err != nil {
+		slog.Warn("openai_account_runtime_stats_reclaim_skipped",
+			"operation", "get_by_ids",
+			"candidate_count", len(ids),
+		)
+		return 0
+	}
+	existing := make(map[int64]struct{}, len(accounts))
+	for _, account := range accounts {
+		if account == nil {
+			slog.Warn("openai_account_runtime_stats_reclaim_skipped",
+				"operation", "validate_get_by_ids_result",
+				"candidate_count", len(ids),
+				"returned_count", len(accounts),
+			)
+			return 0
+		}
+		if _, ok := requested[account.ID]; !ok {
+			slog.Warn("openai_account_runtime_stats_reclaim_skipped",
+				"operation", "validate_get_by_ids_result",
+				"candidate_count", len(ids),
+				"returned_count", len(accounts),
+			)
+			return 0
+		}
+		if _, duplicate := existing[account.ID]; duplicate {
+			slog.Warn("openai_account_runtime_stats_reclaim_skipped",
+				"operation", "validate_get_by_ids_result",
+				"candidate_count", len(ids),
+				"returned_count", len(accounts),
+			)
+			return 0
+		}
+		existing[account.ID] = struct{}{}
+	}
+	s.reclaimCursor.Store(candidates[len(candidates)-1].accountID)
+
+	deleted := 0
+	for _, candidate := range candidates {
+		_, accountExists := existing[candidate.accountID]
+		if s.retireReclaimCandidate(candidate, accountExists, now) {
+			deleted++
+		}
+	}
+	return deleted
+}
+
+func (s *openAIAccountRuntimeStats) startReclamation(parent context.Context, repo AccountRepository) {
+	if s == nil || parent == nil || repo == nil || parent.Err() != nil {
+		return
+	}
+	s.maintenanceMu.Lock()
+	if s.maintenanceStarted || s.maintenanceStopped || parent.Err() != nil {
+		s.maintenanceMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	s.maintenanceStarted = true
+	s.maintenanceCancel = cancel
+	s.maintenanceDone = done
+	s.maintenanceMu.Unlock()
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(openAIAccountRuntimeStatsReclaimInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.reclaimIdleBatch(ctx, repo, now)
+			}
+		}
+	}()
+}
+
+func (s *openAIAccountRuntimeStats) stopReclamation() {
+	if s == nil {
+		return
+	}
+	s.maintenanceMu.Lock()
+	s.maintenanceStopped = true
+	cancel := s.maintenanceCancel
+	done := s.maintenanceDone
+	s.maintenanceMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func updateEWMAAtomic(target *atomic.Uint64, sample float64, alpha float64) {
@@ -500,7 +799,11 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 		return
 	}
 	const alpha = 0.2
-	stat := s.loadOrCreate(accountID)
+	stat, release, ok := s.acquire(accountID, true, true)
+	if !ok {
+		return
+	}
+	defer release()
 
 	errorSample := 1.0
 	if success {
@@ -774,14 +1077,11 @@ func (s *openAIAccountRuntimeStats) rescheduleSmartProbeBatchLocked(stat *openAI
 }
 
 func (s *openAIAccountRuntimeStats) smartHealthWindowValues(accountID int64, now time.Time) (float64, float64, bool) {
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return 0, 0, false
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return 0, 0, false
-	}
+	defer release()
 	stat.mu.Lock()
 	defer stat.mu.Unlock()
 	s.pruneSmartHealthWindowsLocked(stat, now)
@@ -797,17 +1097,11 @@ func (s *openAIAccountRuntimeStats) smartHealthWindowValues(accountID int64, now
 }
 
 func (s *openAIAccountRuntimeStats) snapshot(accountID int64) (errorRate float64, ttft float64, hasTTFT bool) {
-	if s == nil || accountID <= 0 {
-		return 0, 0, false
-	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return 0, 0, false
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return 0, 0, false
-	}
+	defer release()
 	errorRate = clamp01(math.Float64frombits(stat.errorRateEWMABits.Load()))
 	ttftValue := math.Float64frombits(stat.ttftEWMABits.Load())
 	if math.IsNaN(ttftValue) {
@@ -829,17 +1123,11 @@ func openAIAccountHealthLevelName(level openAIAccountHealthLevel) string {
 
 func (s *openAIAccountRuntimeStats) health(accountID int64, now time.Time, thresholds openAIStickyEscapeConfig) openAIAccountHealthAssessment {
 	assessment := openAIAccountHealthAssessment{level: openAIAccountHealthUnknown}
-	if s == nil || accountID <= 0 {
-		return assessment
-	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return assessment
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return assessment
-	}
+	defer release()
 	stat.mu.Lock()
 	if stat.smartMode {
 		s.recomputeSmartHealthLocked(stat, now, stat.smartLevel)
@@ -891,17 +1179,11 @@ func (s *openAIAccountRuntimeStats) tryAcquireProbeLease(accountID int64, now ti
 }
 
 func (s *openAIAccountRuntimeStats) tryAcquireProbeLeaseWithID(accountID int64, now time.Time, probeID uint64) bool {
-	if s == nil || accountID <= 0 {
-		return false
-	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return false
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return false
-	}
+	defer release()
 	stat.mu.Lock()
 	defer stat.mu.Unlock()
 	level := openAIAccountHealthLevel(stat.healthLevel.Load())
@@ -932,17 +1214,14 @@ func (s *openAIAccountRuntimeStats) tryAcquireProbeLeaseWithID(accountID int64, 
 }
 
 func (s *openAIAccountRuntimeStats) markProbeSlotAcquired(accountID int64, probeID uint64, now time.Time) {
-	if s == nil || accountID <= 0 || probeID == 0 {
+	if probeID == 0 {
 		return
 	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return
-	}
+	defer release()
 	stat.mu.Lock()
 	if stat.probeID == probeID && stat.probeBatchStarted.IsZero() {
 		stat.probeBatchStarted = now
@@ -951,17 +1230,11 @@ func (s *openAIAccountRuntimeStats) markProbeSlotAcquired(accountID int64, probe
 }
 
 func (s *openAIAccountRuntimeStats) probeEligible(accountID int64, now time.Time) bool {
-	if s == nil || accountID <= 0 {
-		return false
-	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return false
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return false
-	}
+	defer release()
 	stat.mu.Lock()
 	defer stat.mu.Unlock()
 	level := openAIAccountHealthLevel(stat.healthLevel.Load())
@@ -984,17 +1257,11 @@ func (s *openAIAccountRuntimeStats) probeEligible(accountID int64, now time.Time
 }
 
 func (s *openAIAccountRuntimeStats) probeOpportunityOrder(accountID int64, now time.Time) (continuing bool, nextAt int64) {
-	if s == nil || accountID <= 0 {
-		return false, 0
-	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return false, 0
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return false, 0
-	}
+	defer release()
 	stat.mu.Lock()
 	defer stat.mu.Unlock()
 	if stat.smartMode && stat.probeID == 0 && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
@@ -1006,14 +1273,11 @@ func (s *openAIAccountRuntimeStats) probeOpportunityOrder(accountID int64, now t
 }
 
 func (s *openAIAccountRuntimeStats) cancelProbeLease(accountID int64, now time.Time) {
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return
-	}
+	defer release()
 	stat.mu.Lock()
 	probeID := stat.probeID
 	stat.mu.Unlock()
@@ -1021,17 +1285,11 @@ func (s *openAIAccountRuntimeStats) cancelProbeLease(accountID int64, now time.T
 }
 
 func (s *openAIAccountRuntimeStats) cancelProbeLeaseForID(accountID int64, probeID uint64, now time.Time) {
-	if s == nil || accountID <= 0 {
-		return
-	}
-	value, ok := s.accounts.Load(accountID)
+	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return
 	}
-	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil {
-		return
-	}
+	defer release()
 	stat.mu.Lock()
 	defer stat.mu.Unlock()
 	if probeID != 0 && stat.probeID == probeID {
@@ -1051,38 +1309,36 @@ func (s *openAIAccountRuntimeStats) smartHealthSnapshots(accountIDs []int64, now
 	}
 	result := make(map[int64]OpenAISmartHealthSnapshot)
 	for _, accountID := range accountIDs {
-		value, ok := s.accounts.Load(accountID)
+		stat, release, ok := s.acquire(accountID, false, false)
 		if !ok {
 			continue
 		}
-		stat, _ := value.(*openAIAccountRuntimeStat)
-		if stat == nil {
-			continue
-		}
-		stat.mu.Lock()
-		if stat.probeID == 0 && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
-			s.rescheduleSmartProbeBatchLocked(stat, now, false)
-		}
-		if !stat.smartMode || stat.smartLevel != openAIAccountHealthDegraded {
-			stat.mu.Unlock()
-			continue
-		}
-		snapshot := OpenAISmartHealthSnapshot{
-			Reason:      openAIAccountHealthReasonName(stat.smartReason),
-			BackoffStep: stat.backoffIndex + 1,
-		}
-		switch {
-		case stat.probeID != 0:
-			snapshot.State = "probing"
-		case (!stat.probeBatchStarted.IsZero() && len(stat.probeBatchSamples) > 0 && now.Sub(stat.probeBatchStarted) <= openAIAccountSmartProbeBatchTimeout) || stat.nextProbeAt.Load() <= now.UnixNano():
-			snapshot.State = "ready"
-		default:
-			snapshot.State = "cooldown"
-			nextProbeAt := time.Unix(0, stat.nextProbeAt.Load()).UTC()
-			snapshot.NextProbeAt = &nextProbeAt
-		}
-		stat.mu.Unlock()
-		result[accountID] = snapshot
+		func() {
+			defer release()
+			stat.mu.Lock()
+			defer stat.mu.Unlock()
+			if stat.probeID == 0 && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+				s.rescheduleSmartProbeBatchLocked(stat, now, false)
+			}
+			if !stat.smartMode || stat.smartLevel != openAIAccountHealthDegraded {
+				return
+			}
+			snapshot := OpenAISmartHealthSnapshot{
+				Reason:      openAIAccountHealthReasonName(stat.smartReason),
+				BackoffStep: stat.backoffIndex + 1,
+			}
+			switch {
+			case stat.probeID != 0:
+				snapshot.State = "probing"
+			case (!stat.probeBatchStarted.IsZero() && len(stat.probeBatchSamples) > 0 && now.Sub(stat.probeBatchStarted) <= openAIAccountSmartProbeBatchTimeout) || stat.nextProbeAt.Load() <= now.UnixNano():
+				snapshot.State = "ready"
+			default:
+				snapshot.State = "cooldown"
+				nextProbeAt := time.Unix(0, stat.nextProbeAt.Load()).UTC()
+				snapshot.NextProbeAt = &nextProbeAt
+			}
+			result[accountID] = snapshot
+		}()
 	}
 	return result
 }
@@ -3348,6 +3604,7 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 			s.openaiScheduler = newDefaultOpenAIAccountScheduler(s, s.openaiAccountStats)
 		}
 		s.openaiAccountStatsPublished.Store(s.openaiAccountStats)
+		s.openaiAccountStats.startReclamation(s.openaiAccountStatsMaintenanceCtx, s.accountRepo)
 	})
 	return s.openaiScheduler
 }
