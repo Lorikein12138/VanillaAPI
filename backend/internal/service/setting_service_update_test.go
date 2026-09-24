@@ -8,7 +8,9 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
@@ -474,7 +476,14 @@ func TestSettingService_UpdateSettings_SmartScheduling(t *testing.T) {
 	cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
 	require.True(t, ok)
 	require.True(t, cached.smartEnabled)
+	require.True(t, cached.smartEnabledKnown)
 	require.True(t, cached.enabled)
+	require.False(t, cached.lowUpstreamRatePriorityEnabled)
+	require.Nil(t, cached.oauthSchedulingRateMultiplier)
+	require.Zero(t, cached.lbTopKOverride)
+	require.Empty(t, cached.weightOverrides)
+	require.Equal(t, openAIAdvancedSchedulerSettingGeneration.Load(), cached.generation)
+	require.Greater(t, cached.expiresAt, time.Now().UnixNano())
 
 	err = svc.UpdateSettings(context.Background(), &SystemSettings{
 		SmartSchedulingEnabled:         false,
@@ -485,7 +494,150 @@ func TestSettingService_UpdateSettings_SmartScheduling(t *testing.T) {
 	cached, ok = openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
 	require.True(t, ok)
 	require.False(t, cached.smartEnabled)
+	require.True(t, cached.smartEnabledKnown)
 	require.True(t, cached.enabled)
+	require.False(t, cached.lowUpstreamRatePriorityEnabled)
+	require.Nil(t, cached.oauthSchedulingRateMultiplier)
+	require.Zero(t, cached.lbTopKOverride)
+	require.Empty(t, cached.weightOverrides)
+	require.Equal(t, openAIAdvancedSchedulerSettingGeneration.Load(), cached.generation)
+	require.Greater(t, cached.expiresAt, time.Now().UnixNano())
+}
+
+func (s *schedulerCacheTestSettingsRepo) settingsSnapshot() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values := make(map[string]string, len(s.values))
+	for key, value := range s.values {
+		values[key] = value
+	}
+	return values
+}
+
+func TestSettingService_UpdateSettings_SchedulerCacheWriteOrdering(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	releaseFirstSet := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseFirstSet) })
+	repo := &schedulerCacheTestSettingsRepo{
+		values:           schedulerCacheTestSettingsValues(false, false, "7", "1", "1"),
+		firstSetStarted:  make(chan struct{}),
+		releaseFirstSet:  releaseFirstSet,
+		secondSetStarted: make(chan struct{}),
+	}
+	svc := NewSettingService(repo, &config.Config{})
+	ctx := context.Background()
+	firstSettings := schedulerCacheTestSystemSettings(true, false, true, "9", "1.7", "2.5")
+	secondSettings := schedulerCacheTestSystemSettings(false, true, false, "11", "2.1", "4.5")
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- svc.UpdateSettingsOmitting(ctx, firstSettings, nil) }()
+	<-repo.firstSetStarted
+
+	secondAttempted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondAttempted)
+		secondDone <- svc.UpdateSettingsWithAuthSourceDefaultsOmitting(ctx, secondSettings, nil, nil)
+	}()
+	<-secondAttempted
+	secondEnteredBeforeFirstRefresh := false
+	select {
+	case <-repo.secondSetStarted:
+		secondEnteredBeforeFirstRefresh = true
+	case <-time.After(500 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(releaseFirstSet) })
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
+	require.False(t, secondEnteredBeforeFirstRefresh, "the second entry point must wait until the first write and cache refresh complete")
+
+	persisted := repo.settingsSnapshot()
+	require.Equal(t, "false", persisted[SettingKeySmartSchedulingEnabled])
+	require.Equal(t, "true", persisted[openAIAdvancedSchedulerSettingKey])
+	require.Equal(t, "11", persisted[SettingKeyOpenAIAdvancedSchedulerLBTopK])
+	require.Equal(t, "2.1", persisted[SettingKeyOpenAIOAuthSchedulingRateMultiplier])
+	cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.Equal(t, openAIAdvancedSchedulerSettingGeneration.Load(), cached.generation)
+	require.False(t, cached.smartEnabled)
+	require.True(t, cached.smartEnabledKnown)
+	require.True(t, cached.enabled)
+	require.Equal(t, 11, cached.lbTopKOverride)
+	require.InDelta(t, 2.1, *cached.oauthSchedulingRateMultiplier, 1e-9)
+	require.InDelta(t, 4.5, cached.weightOverrides["priority"], 1e-9)
+	repo.mu.Lock()
+	require.Equal(t, 2, repo.setCalls)
+	repo.mu.Unlock()
+}
+
+func TestSettingService_UpdateSettings_SchedulerCacheOmittedAndRefreshFailure(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	repo := &schedulerCacheTestSettingsRepo{
+		values:    schedulerCacheTestSettingsValues(true, true, "4", "0.7", "0.75"),
+		getAllErr: errors.New("readback unavailable"),
+	}
+	settingService := NewSettingService(repo, &config.Config{})
+	gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: settingService}}
+	initial := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+	require.True(t, initial.smartEnabled)
+	require.True(t, initial.enabled)
+	require.Equal(t, 1, repo.getMultipleCalls)
+	oldCached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	oldGeneration := openAIAdvancedSchedulerSettingGeneration.Load()
+
+	partial := schedulerCacheTestSystemSettings(false, false, false, "13", "1.9", "4.5")
+	err := settingService.UpdateSettingsOmitting(context.Background(), partial, OmittedSettingKeys{
+		SettingKeySmartSchedulingEnabled: {},
+	})
+	require.NoError(t, err)
+	require.Greater(t, openAIAdvancedSchedulerSettingGeneration.Load(), oldGeneration)
+	invalidated, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.NotSame(t, oldCached, invalidated)
+	require.LessOrEqual(t, invalidated.expiresAt, time.Now().UnixNano(), "failed omitted-value refresh must leave the prior snapshot expired")
+
+	settings := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+	require.True(t, settings.smartEnabled, "omitted S remains at its persisted true value, not the request zero value")
+	require.True(t, settings.smartEnabledKnown)
+	require.False(t, settings.enabled)
+	require.Equal(t, 13, settings.lbTopKOverride)
+	require.InDelta(t, 4.5, settings.weightOverrides["priority"], 1e-9)
+	repo.mu.Lock()
+	require.Equal(t, 2, repo.getMultipleCalls, "the next gateway read reloads rather than consuming the expired old snapshot")
+	repo.mu.Unlock()
+}
+
+func TestSettingService_UpdateSettings_SchedulerCacheFailedWriteUnchanged(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	repo := &schedulerCacheTestSettingsRepo{
+		values:         schedulerCacheTestSettingsValues(true, false, "6", "1.2", "1.5"),
+		setMultipleErr: errors.New("write unavailable"),
+	}
+	settingService := NewSettingService(repo, &config.Config{})
+	gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: settingService}}
+	before := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+	require.True(t, before.smartEnabled)
+	beforeGeneration := openAIAdvancedSchedulerSettingGeneration.Load()
+	beforeCache, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+
+	err := settingService.UpdateSettings(context.Background(), schedulerCacheTestSystemSettings(false, true, false, "12", "2.4", "3.5"))
+	require.ErrorContains(t, err, "write unavailable")
+	require.Equal(t, beforeGeneration, openAIAdvancedSchedulerSettingGeneration.Load())
+	afterCache, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.Same(t, beforeCache, afterCache)
+	after := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+	require.True(t, after.smartEnabled)
+	require.False(t, after.enabled)
+	require.Equal(t, beforeGeneration, afterCache.generation)
 }
 
 func TestSettingService_UpdateSettingsRejectsInvalidOpenAIOAuthSchedulingRateMultiplier(t *testing.T) {
