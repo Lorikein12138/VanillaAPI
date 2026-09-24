@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type smartHealthSnapshotProviderStub map[int64]service.OpenAISmartHealthSnapshot
+
+func (p smartHealthSnapshotProviderStub) SmartHealthSnapshot(_ context.Context, accounts []*service.Account) map[int64]service.OpenAISmartHealthSnapshot {
+	result := make(map[int64]service.OpenAISmartHealthSnapshot)
+	for _, account := range accounts {
+		if account == nil || !account.IsOpenAICompatible() {
+			continue
+		}
+		if snapshot, ok := p[account.ID]; ok {
+			result[account.ID] = snapshot
+		}
+	}
+	return result
+}
 
 func TestAccountHandlerListLiteUsesCompactDTOAndETag(t *testing.T) {
 	router, adminSvc := setupAccountListRouter()
@@ -78,6 +94,118 @@ func TestAccountHandlerListLiteUsesCompactDTOAndETag(t *testing.T) {
 	require.Contains(t, fullPayload.Data.Items[0], "groups")
 	require.Contains(t, fullPayload.Data.Items[0], "account_groups")
 }
+
+func TestAccountHandlerListSmartHealthSnapshotAndETag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	adminSvc := newStubAdminService()
+	handler := NewAccountHandler(adminSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	provider := smartHealthSnapshotProviderStub{
+		8011: {State: "cooldown", Reason: "error_rate", NextProbeAt: timePtrForAdminTest(time.Now().UTC().Add(15 * time.Minute)), BackoffStep: 2},
+		8012: {State: "ready", Reason: "ttft", BackoffStep: 1},
+		8013: {State: "probing", Reason: "error_rate", BackoffStep: 5},
+	}
+	handler.SetSmartHealthSnapshotProvider(provider)
+	router.GET("/api/v1/admin/accounts", handler.List)
+
+	updatedAt := time.Date(2026, 9, 23, 8, 30, 0, 0, time.UTC)
+	fullGroup := &service.Group{ID: 8801, Name: "test-group", Platform: service.PlatformOpenAI, Status: service.StatusActive}
+	adminSvc.accounts = []service.Account{
+		{ID: 8011, Name: "cooldown", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, CreatedAt: updatedAt, UpdatedAt: updatedAt, AccountGroups: []service.AccountGroup{{AccountID: 8011, GroupID: fullGroup.ID, CreatedAt: updatedAt, Group: fullGroup}}, Groups: []*service.Group{fullGroup}},
+		{ID: 8012, Name: "ready", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, CreatedAt: updatedAt, UpdatedAt: updatedAt},
+		{ID: 8013, Name: "probing", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, CreatedAt: updatedAt, UpdatedAt: updatedAt},
+		{ID: 8014, Name: "healthy", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, CreatedAt: updatedAt, UpdatedAt: updatedAt},
+		{ID: 8015, Name: "unknown", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, CreatedAt: updatedAt, UpdatedAt: updatedAt},
+		{ID: 8016, Name: "other-platform", Platform: service.PlatformAnthropic, Type: service.AccountTypeAPIKey, Status: service.StatusActive, Schedulable: true, Concurrency: 1, CreatedAt: updatedAt, UpdatedAt: updatedAt},
+	}
+
+	request := func(path string, etag string) (*httptest.ResponseRecorder, []map[string]any) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		router.ServeHTTP(recorder, req)
+		var payload struct {
+			Data struct {
+				Items []map[string]any `json:"items"`
+			} `json:"data"`
+		}
+		if recorder.Code == http.StatusOK {
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &payload))
+		}
+		return recorder, payload.Data.Items
+	}
+
+	full, fullItems := request("/api/v1/admin/accounts?page=1&page_size=20", "")
+	require.Equal(t, http.StatusOK, full.Code)
+	require.NotEmpty(t, full.Header().Get("ETag"))
+	require.Len(t, fullItems, len(adminSvc.accounts))
+	byID := make(map[float64]map[string]any, len(fullItems))
+	for _, item := range fullItems {
+		id, ok := item["id"].(float64)
+		require.True(t, ok, "full account list item has a numeric id")
+		byID[id] = item
+	}
+	for id, state := range map[int64]string{8011: "cooldown", 8012: "ready", 8013: "probing"} {
+		item := byID[float64(id)]
+		require.Contains(t, item, "smart_health")
+		snapshot, ok := item["smart_health"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, state, snapshot["state"])
+	}
+	require.Contains(t, byID[8011.0], "groups", "full response retains its existing shape")
+	for _, id := range []int64{8014, 8015, 8016} {
+		require.NotContains(t, byID[float64(id)], "smart_health")
+	}
+	cooldownSnapshotValue, ok := byID[8011.0]["smart_health"].(map[string]any)
+	require.True(t, ok, "cooldown smart health is an object")
+	cooldownSnapshot := cooldownSnapshotValue
+	nextProbeAtValue, ok := cooldownSnapshot["next_probe_at"].(string)
+	require.True(t, ok, "cooldown next_probe_at is a string")
+	nextProbeAt, err := time.Parse(time.RFC3339Nano, nextProbeAtValue)
+	require.NoError(t, err)
+	_, offset := nextProbeAt.Zone()
+	require.Equal(t, 0, offset)
+	require.Equal(t, float64(2), cooldownSnapshot["backoff_step"])
+
+	// Runtime-only state changes without UpdatedAt changes must invalidate the previous ETag.
+	oldETag := full.Header().Get("ETag")
+	provider[8011] = service.OpenAISmartHealthSnapshot{State: "ready", Reason: "error_rate", BackoffStep: 2}
+	changed, changedItems := request("/api/v1/admin/accounts?page=1&page_size=20", oldETag)
+	require.Equal(t, http.StatusOK, changed.Code)
+	require.NotEqual(t, oldETag, changed.Header().Get("ETag"))
+	var changedSnapshot map[string]any
+	for _, item := range changedItems {
+		if item["id"] == float64(8011) {
+			snapshot, ok := item["smart_health"].(map[string]any)
+			require.True(t, ok, "changed smart health is an object")
+			changedSnapshot = snapshot
+			break
+		}
+	}
+	require.NotNil(t, changedSnapshot)
+	require.Equal(t, "ready", changedSnapshot["state"])
+	for _, account := range adminSvc.accounts {
+		require.Equal(t, updatedAt, account.UpdatedAt)
+	}
+
+	lite, liteItems := request("/api/v1/admin/accounts?page=1&page_size=20&lite=1", "")
+	require.Equal(t, http.StatusOK, lite.Code)
+	require.Len(t, liteItems, len(adminSvc.accounts))
+	for _, item := range liteItems {
+		if item["id"] == float64(8011) {
+			snapshot, ok := item["smart_health"].(map[string]any)
+			require.True(t, ok, "lite smart health is an object")
+			require.Equal(t, "ready", snapshot["state"])
+			require.NotContains(t, item, "groups")
+			require.NotContains(t, item, "account_groups")
+		}
+	}
+}
+
+func timePtrForAdminTest(value time.Time) *time.Time { return &value }
 
 func TestAccountHandlerListLiteStaysBelowResponseBudget(t *testing.T) {
 	router, adminSvc := setupAccountListRouter()

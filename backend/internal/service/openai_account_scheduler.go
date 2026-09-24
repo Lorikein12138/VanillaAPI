@@ -30,14 +30,29 @@ const (
 const (
 	openAIAdvancedSchedulerSettingCacheTTL  = 5 * time.Second
 	openAIAdvancedSchedulerSettingDBTimeout = 2 * time.Second
-	openAIAccountHealthMinSamples           = int64(3)
+	openAIAccountHealthMinSamples           = int64(10)
+	openAIAccountLegacyHealthMinSamples     = int64(3)
 	openAIAccountHealthStaleAfter           = 10 * time.Minute
-	openAIAccountHealthProbeCooldown        = 30 * time.Second
+	openAIAccountLegacyProbeCooldown        = 30 * time.Second
 	openAIAccountHealthProbeLease           = 30 * time.Second
+	openAIAccountSmartTTFTThreshold         = 10 * time.Second
+	openAIAccountSmartErrorRateThreshold    = 0.10
+	openAIAccountSmartWindowSize            = 10
+	openAIAccountSmartWindowDuration        = 10 * time.Minute
+	openAIAccountSmartProbeBatchLimit       = 10
+	openAIAccountSmartProbeBatchTimeout     = 10 * time.Minute
 	// ponytail: cap probes added when cost ordering expands configured Top-K;
 	// use bulk acquisition if a measured workload needs a higher ceiling.
 	openAIAccountSelectionProbeLimit = 64
 )
+
+var openAIAccountHealthProbeCooldowns = [...]time.Duration{
+	time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	30 * time.Minute,
+	time.Hour,
+}
 
 const (
 	openAIQuotaHeadroomNeutralFactor           = 0.5
@@ -50,6 +65,7 @@ const (
 type cachedOpenAIAdvancedSchedulerSetting struct {
 	lowUpstreamRatePriorityEnabled bool
 	smartEnabled                   bool
+	smartEnabledKnown              bool
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
@@ -62,6 +78,7 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 type openAIAdvancedSchedulerRuntimeSettings struct {
 	lowUpstreamRatePriorityEnabled bool
 	smartEnabled                   bool
+	smartEnabledKnown              bool
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
@@ -84,6 +101,7 @@ type OpenAIAccountScheduleRequest struct {
 	SubscriptionPriority      bool
 	SmartHealthEnabled        bool
 	SmartHealthProbeAccountID int64
+	SmartHealthStickyEscaped  bool
 	PreserveStickyBinding     bool
 	// DisableStickyEscape keeps task-owner lookups on their account even when
 	// generic sticky health or concurrency heuristics would prefer another.
@@ -231,8 +249,9 @@ func (m *openAIAccountSchedulerMetrics) recordSmartHealthAllDegraded() {
 }
 
 type openAIAccountRuntimeStats struct {
-	accounts     sync.Map
-	accountCount atomic.Int64
+	accounts      sync.Map
+	accountCount  atomic.Int64
+	probeSequence atomic.Uint64
 }
 
 type openAIAccountHealthLevel uint32
@@ -250,6 +269,7 @@ const (
 )
 
 type openAIAccountRuntimeStat struct {
+	mu                sync.Mutex
 	errorRateEWMABits atomic.Uint64
 	ttftEWMABits      atomic.Uint64
 	sampleCount       atomic.Int64
@@ -259,6 +279,36 @@ type openAIAccountRuntimeStat struct {
 	nextProbeAt       atomic.Int64
 	probeLeaseUntil   atomic.Int64
 	probeActive       atomic.Bool
+	smartMode         bool
+	smartLevel        openAIAccountHealthLevel
+	smartReason       uint32
+	smartErrorWindow  []openAISmartTimedSample
+	smartTTFTWindow   []openAISmartTimedSample
+	smartLastObserved time.Time
+	probeID           uint64
+	probeStartedAt    time.Time
+	probeBatchStarted time.Time
+	probeBatchSamples []openAISmartProbeSample
+	backoffIndex      int
+}
+
+type openAISmartTimedSample struct {
+	at    time.Time
+	value float64
+}
+
+type openAISmartProbeSample struct {
+	success  bool
+	ttftMs   int
+	hasTTFT  bool
+	observed time.Time
+}
+
+type OpenAISmartHealthSnapshot struct {
+	State       string     `json:"state"`
+	Reason      string     `json:"reason"`
+	NextProbeAt *time.Time `json:"next_probe_at"`
+	BackoffStep int        `json:"backoff_step"`
 }
 
 type openAIAccountHealthAssessment struct {
@@ -318,7 +368,7 @@ func classifyOpenAIAccountHealth(
 	sampleCount int64,
 	thresholds openAIStickyEscapeConfig,
 ) (openAIAccountHealthLevel, uint32) {
-	if sampleCount < openAIAccountHealthMinSamples || math.IsNaN(errorRate) || math.IsInf(errorRate, 0) {
+	if sampleCount < openAIAccountLegacyHealthMinSamples || math.IsNaN(errorRate) || math.IsInf(errorRate, 0) {
 		return openAIAccountHealthUnknown, openAIAccountHealthReasonNone
 	}
 	if errorRate > thresholds.errorRate {
@@ -348,16 +398,6 @@ func (s *openAIAccountRuntimeStats) report(accountID int64, success bool, firstT
 	s.reportAt(accountID, success, firstTokenMs, time.Now(), defaultOpenAIAccountHealthThresholds(), false)
 }
 
-func (s *openAIAccountRuntimeStats) reportWithHealthConfig(
-	accountID int64,
-	success bool,
-	firstTokenMs *int,
-	thresholds openAIStickyEscapeConfig,
-	logHealth bool,
-) {
-	s.reportAt(accountID, success, firstTokenMs, time.Now(), thresholds, logHealth)
-}
-
 func (s *openAIAccountRuntimeStats) reportAt(
 	accountID int64,
 	success bool,
@@ -365,6 +405,20 @@ func (s *openAIAccountRuntimeStats) reportAt(
 	now time.Time,
 	thresholds openAIStickyEscapeConfig,
 	logHealth bool,
+) {
+	s.reportAtForRequest(accountID, success, firstTokenMs, now, thresholds, logHealth, false, 0, success)
+}
+
+func (s *openAIAccountRuntimeStats) reportAtForRequest(
+	accountID int64,
+	success bool,
+	firstTokenMs *int,
+	now time.Time,
+	thresholds openAIStickyEscapeConfig,
+	logHealth bool,
+	smartEnabled bool,
+	probeID uint64,
+	attributable bool,
 ) {
 	if s == nil || accountID <= 0 {
 		return
@@ -399,12 +453,52 @@ func (s *openAIAccountRuntimeStats) reportAt(
 
 	sampleCount := stat.sampleCount.Add(1)
 	stat.lastObservedAt.Store(now.UnixNano())
-	oldLevel := openAIAccountHealthLevel(stat.healthLevel.Load())
-	oldReason := stat.healthReason.Load()
-	isProbe := stat.probeActive.Swap(false)
-	if isProbe {
-		stat.probeLeaseUntil.Store(0)
+	if smartEnabled {
+		stat.mu.Lock()
+		oldLevel := stat.smartLevel
+		stat.smartMode = true
+		if attributable {
+			s.appendSmartHealthObservationLocked(stat, success, firstTokenMs, now)
+		}
+		matchedProbe := probeID != 0 && stat.probeID == probeID
+		if matchedProbe {
+			stat.probeID = 0
+			stat.probeLeaseUntil.Store(0)
+			stat.probeActive.Store(false)
+			stat.probeStartedAt = time.Time{}
+			if attributable {
+				s.finishSmartProbeSampleLocked(stat, success, firstTokenMs, now)
+			}
+		} else if !success && attributable && stat.smartLevel == openAIAccountHealthDegraded && len(stat.probeBatchSamples) > 0 {
+			// A normal attributable failure during a recovery batch invalidates the
+			// cached recovery evidence, but does not advance the backoff ladder.
+			s.rescheduleSmartProbeBatchLocked(stat, now, false)
+		}
+		s.recomputeSmartHealthLocked(stat, now, oldLevel)
+		newLevel := stat.smartLevel
+		newReason := stat.smartReason
+		stat.mu.Unlock()
+		if logHealth && oldLevel != openAIAccountHealthDegraded && newLevel == openAIAccountHealthDegraded {
+			errorRate, ttft, hasTTFT := s.smartHealthWindowValues(accountID, now)
+			if !hasTTFT {
+				ttft = math.NaN()
+			}
+			slog.Info("openai_account_health_changed",
+				"account_id", accountID,
+				"from", openAIAccountHealthLevelName(oldLevel),
+				"to", openAIAccountHealthLevelName(newLevel),
+				"reason", openAIAccountHealthReasonName(newReason),
+				"error_rate", errorRate,
+				"ttft_ms", ttft,
+				"sample_count", sampleCount,
+			)
+		}
+		return
 	}
+
+	stat.mu.Lock()
+	oldLevel := openAIAccountHealthLevel(stat.healthLevel.Load())
+	// The legacy S=false path intentionally preserves its historical EWMA behavior.
 	ttftValue := math.Float64frombits(stat.ttftEWMABits.Load())
 	newLevel, newReason := classifyOpenAIAccountHealth(
 		clamp01(math.Float64frombits(stat.errorRateEWMABits.Load())),
@@ -413,25 +507,14 @@ func (s *openAIAccountRuntimeStats) reportAt(
 		sampleCount,
 		thresholds,
 	)
-	if isProbe {
-		if newLevel == openAIAccountHealthHealthy {
-			stat.healthLevel.Store(uint32(openAIAccountHealthHealthy))
-			stat.healthReason.Store(openAIAccountHealthReasonNone)
-		} else {
-			stat.healthLevel.Store(uint32(openAIAccountHealthDegraded))
-			if newReason == openAIAccountHealthReasonNone {
-				newReason = oldReason
-			}
-			stat.healthReason.Store(newReason)
-			stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
-		}
-	} else if oldLevel != openAIAccountHealthDegraded {
+	if oldLevel != openAIAccountHealthDegraded {
 		stat.healthLevel.Store(uint32(newLevel))
 		stat.healthReason.Store(newReason)
 		if newLevel == openAIAccountHealthDegraded {
-			stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
+			stat.nextProbeAt.Store(now.Add(openAIAccountLegacyProbeCooldown).UnixNano())
 		}
 	}
+	stat.mu.Unlock()
 	if logHealth && oldLevel != openAIAccountHealthDegraded && newLevel == openAIAccountHealthDegraded {
 		slog.Info("openai_account_health_changed",
 			"account_id", accountID,
@@ -443,6 +526,198 @@ func (s *openAIAccountRuntimeStats) reportAt(
 			"sample_count", sampleCount,
 		)
 	}
+}
+
+func (s *openAIAccountRuntimeStats) appendSmartHealthObservationLocked(stat *openAIAccountRuntimeStat, success bool, firstTokenMs *int, now time.Time) {
+	s.pruneSmartHealthWindowsLocked(stat, now)
+	errorValue := 0.0
+	if !success {
+		errorValue = 1
+	}
+	stat.smartErrorWindow = appendBoundedSmartSample(stat.smartErrorWindow, openAISmartTimedSample{at: now, value: errorValue})
+	if success && firstTokenMs != nil && *firstTokenMs > 0 {
+		stat.smartTTFTWindow = appendBoundedSmartSample(stat.smartTTFTWindow, openAISmartTimedSample{at: now, value: float64(*firstTokenMs)})
+	}
+	stat.smartLastObserved = now
+}
+
+func appendBoundedSmartSample(samples []openAISmartTimedSample, sample openAISmartTimedSample) []openAISmartTimedSample {
+	samples = append(samples, sample)
+	if len(samples) > openAIAccountSmartWindowSize {
+		samples = append([]openAISmartTimedSample(nil), samples[len(samples)-openAIAccountSmartWindowSize:]...)
+	}
+	return samples
+}
+
+func (s *openAIAccountRuntimeStats) pruneSmartHealthWindowsLocked(stat *openAIAccountRuntimeStat, now time.Time) {
+	cutoff := now.Add(-openAIAccountSmartWindowDuration)
+	keepFresh := func(samples []openAISmartTimedSample) []openAISmartTimedSample {
+		first := 0
+		for first < len(samples) && samples[first].at.Before(cutoff) {
+			first++
+		}
+		return append([]openAISmartTimedSample(nil), samples[first:]...)
+	}
+	stat.smartErrorWindow = keepFresh(stat.smartErrorWindow)
+	stat.smartTTFTWindow = keepFresh(stat.smartTTFTWindow)
+}
+
+func smartTTFTEWMA(samples []openAISmartTimedSample) float64 {
+	if len(samples) == 0 {
+		return math.NaN()
+	}
+	value := samples[0].value
+	for _, sample := range samples[1:] {
+		value = 0.2*sample.value + 0.8*value
+	}
+	return value
+}
+
+func (s *openAIAccountRuntimeStats) recomputeSmartHealthLocked(stat *openAIAccountRuntimeStat, now time.Time, previous openAIAccountHealthLevel) {
+	s.pruneSmartHealthWindowsLocked(stat, now)
+	if stat.smartLevel == openAIAccountHealthDegraded {
+		return
+	}
+	if stat.smartLastObserved.IsZero() || now.Sub(stat.smartLastObserved) > openAIAccountSmartWindowDuration {
+		stat.smartLevel = openAIAccountHealthUnknown
+		stat.smartReason = openAIAccountHealthReasonNone
+		return
+	}
+	errorsMature := len(stat.smartErrorWindow) >= openAIAccountSmartWindowSize
+	ttftMature := len(stat.smartTTFTWindow) >= openAIAccountSmartWindowSize
+	errorRate := 0.0
+	if errorsMature {
+		for _, sample := range stat.smartErrorWindow {
+			errorRate += sample.value
+		}
+		errorRate /= float64(len(stat.smartErrorWindow))
+		if errorRate > openAIAccountSmartErrorRateThreshold {
+			stat.smartLevel = openAIAccountHealthDegraded
+			stat.smartReason = openAIAccountHealthReasonErrorRate
+		}
+	}
+	ttft := smartTTFTEWMA(stat.smartTTFTWindow)
+	if stat.smartLevel != openAIAccountHealthDegraded && ttftMature && ttft > float64(openAIAccountSmartTTFTThreshold.Milliseconds()) {
+		stat.smartLevel = openAIAccountHealthDegraded
+		stat.smartReason = openAIAccountHealthReasonTTFT
+	}
+	if stat.smartLevel == openAIAccountHealthDegraded && previous != openAIAccountHealthDegraded {
+		stat.backoffIndex = 0
+		stat.probeBatchStarted = time.Time{}
+		stat.probeBatchSamples = nil
+		stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldowns[0]).UnixNano())
+		return
+	}
+	if errorsMature && ttftMature && stat.smartLevel != openAIAccountHealthDegraded {
+		stat.smartLevel = openAIAccountHealthHealthy
+		stat.smartReason = openAIAccountHealthReasonNone
+		return
+	}
+	stat.smartLevel = openAIAccountHealthUnknown
+	stat.smartReason = openAIAccountHealthReasonNone
+}
+
+func (s *openAIAccountRuntimeStats) finishSmartProbeSampleLocked(stat *openAIAccountRuntimeStat, success bool, firstTokenMs *int, now time.Time) {
+	if stat.probeBatchStarted.IsZero() {
+		stat.probeBatchStarted = now
+	}
+	if now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+		s.rescheduleSmartProbeBatchLocked(stat, now, false)
+		return
+	}
+	probeSample := openAISmartProbeSample{success: success, observed: now}
+	if success && firstTokenMs != nil && *firstTokenMs > 0 {
+		probeSample.ttftMs = *firstTokenMs
+		probeSample.hasTTFT = true
+	}
+	if success && stat.smartReason == openAIAccountHealthReasonTTFT && !probeSample.hasTTFT {
+		s.rescheduleSmartProbeBatchLocked(stat, now, false)
+		return
+	}
+	stat.probeBatchSamples = append(stat.probeBatchSamples, probeSample)
+	failures, successes, ttftCount := 0, 0, 0
+	ttftSum := 0
+	for _, sample := range stat.probeBatchSamples {
+		if sample.success {
+			successes++
+			if sample.hasTTFT {
+				ttftSum += sample.ttftMs
+				ttftCount++
+			}
+		} else {
+			failures++
+		}
+	}
+	if failures >= 2 || (ttftCount > 0 && ttftSum > int(openAIAccountSmartTTFTThreshold.Milliseconds())*openAIAccountSmartProbeBatchLimit) {
+		s.rescheduleSmartProbeBatchLocked(stat, now, true)
+		return
+	}
+	if len(stat.probeBatchSamples) < openAIAccountSmartProbeBatchLimit {
+		return
+	}
+	passed := failures <= 1
+	if ttftCount > 0 && float64(ttftSum)/float64(ttftCount) > float64(openAIAccountSmartTTFTThreshold.Milliseconds()) {
+		passed = false
+	}
+	if stat.smartReason == openAIAccountHealthReasonTTFT && ttftCount != successes {
+		passed = false
+	}
+	if !passed {
+		s.rescheduleSmartProbeBatchLocked(stat, now, true)
+		return
+	}
+	stat.smartErrorWindow = nil
+	stat.smartTTFTWindow = nil
+	for _, sample := range stat.probeBatchSamples {
+		errorValue := 0.0
+		if !sample.success {
+			errorValue = 1
+		}
+		stat.smartErrorWindow = appendBoundedSmartSample(stat.smartErrorWindow, openAISmartTimedSample{at: sample.observed, value: errorValue})
+		if sample.success && sample.hasTTFT {
+			stat.smartTTFTWindow = appendBoundedSmartSample(stat.smartTTFTWindow, openAISmartTimedSample{at: sample.observed, value: float64(sample.ttftMs)})
+		}
+	}
+	stat.smartLastObserved = now
+	stat.smartLevel = openAIAccountHealthUnknown
+	stat.smartReason = openAIAccountHealthReasonNone
+	stat.backoffIndex = 0
+	stat.nextProbeAt.Store(0)
+	stat.probeBatchStarted = time.Time{}
+	stat.probeBatchSamples = nil
+	s.recomputeSmartHealthLocked(stat, now, openAIAccountHealthDegraded)
+}
+
+func (s *openAIAccountRuntimeStats) rescheduleSmartProbeBatchLocked(stat *openAIAccountRuntimeStat, now time.Time, advance bool) {
+	stat.probeBatchStarted = time.Time{}
+	stat.probeBatchSamples = nil
+	if advance && stat.backoffIndex < len(openAIAccountHealthProbeCooldowns)-1 {
+		stat.backoffIndex++
+	}
+	stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldowns[stat.backoffIndex]).UnixNano())
+}
+
+func (s *openAIAccountRuntimeStats) smartHealthWindowValues(accountID int64, now time.Time) (float64, float64, bool) {
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return 0, 0, false
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return 0, 0, false
+	}
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	s.pruneSmartHealthWindowsLocked(stat, now)
+	errorRate := 0.0
+	if len(stat.smartErrorWindow) >= openAIAccountSmartWindowSize {
+		for _, sample := range stat.smartErrorWindow {
+			errorRate += sample.value
+		}
+		errorRate /= float64(len(stat.smartErrorWindow))
+	}
+	ttft := smartTTFTEWMA(stat.smartTTFTWindow)
+	return errorRate, ttft, len(stat.smartTTFTWindow) >= openAIAccountSmartWindowSize
 }
 
 func (s *openAIAccountRuntimeStats) snapshot(accountID int64) (errorRate float64, ttft float64, hasTTFT bool) {
@@ -489,6 +764,27 @@ func (s *openAIAccountRuntimeStats) health(accountID int64, now time.Time, thres
 	if stat == nil {
 		return assessment
 	}
+	stat.mu.Lock()
+	if stat.smartMode {
+		s.recomputeSmartHealthLocked(stat, now, stat.smartLevel)
+		assessment.level = stat.smartLevel
+		assessment.reason = stat.smartReason
+		assessment.samples = int64(len(stat.smartErrorWindow))
+		if len(stat.smartErrorWindow) >= openAIAccountSmartWindowSize {
+			for _, sample := range stat.smartErrorWindow {
+				assessment.errorRate += sample.value
+			}
+			assessment.errorRate /= float64(len(stat.smartErrorWindow))
+		}
+		assessment.hasTTFT = len(stat.smartTTFTWindow) >= openAIAccountSmartWindowSize
+		assessment.ttft = smartTTFTEWMA(stat.smartTTFTWindow)
+		if !assessment.hasTTFT {
+			assessment.ttft = 0
+		}
+		stat.mu.Unlock()
+		return assessment
+	}
+	stat.mu.Unlock()
 	assessment.errorRate, assessment.ttft, assessment.hasTTFT = s.snapshot(accountID)
 	assessment.samples = stat.sampleCount.Load()
 	level := openAIAccountHealthLevel(stat.healthLevel.Load())
@@ -498,7 +794,7 @@ func (s *openAIAccountRuntimeStats) health(accountID int64, now time.Time, thres
 		return assessment
 	}
 	lastObservedAt := stat.lastObservedAt.Load()
-	if assessment.samples < openAIAccountHealthMinSamples || lastObservedAt <= 0 {
+	if assessment.samples < openAIAccountLegacyHealthMinSamples || lastObservedAt <= 0 {
 		return assessment
 	}
 	last := time.Unix(0, lastObservedAt)
@@ -512,6 +808,13 @@ func (s *openAIAccountRuntimeStats) health(accountID int64, now time.Time, thres
 }
 
 func (s *openAIAccountRuntimeStats) tryAcquireProbeLease(accountID int64, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	return s.tryAcquireProbeLeaseWithID(accountID, now, s.probeSequence.Add(1))
+}
+
+func (s *openAIAccountRuntimeStats) tryAcquireProbeLeaseWithID(accountID int64, now time.Time, probeID uint64) bool {
 	if s == nil || accountID <= 0 {
 		return false
 	}
@@ -520,36 +823,55 @@ func (s *openAIAccountRuntimeStats) tryAcquireProbeLease(accountID int64, now ti
 		return false
 	}
 	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil || openAIAccountHealthLevel(stat.healthLevel.Load()) != openAIAccountHealthDegraded {
+	if stat == nil {
+		return false
+	}
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	level := openAIAccountHealthLevel(stat.healthLevel.Load())
+	if stat.smartMode {
+		level = stat.smartLevel
+	}
+	if level != openAIAccountHealthDegraded || stat.probeID != 0 {
 		return false
 	}
 	nowNanos := now.UnixNano()
-	if next := stat.nextProbeAt.Load(); next > nowNanos {
-		return false
+	if stat.smartMode && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+		s.rescheduleSmartProbeBatchLocked(stat, now, false)
 	}
-	if leaseUntil := stat.probeLeaseUntil.Load(); leaseUntil > nowNanos {
-		return false
-	}
-	if stat.probeActive.Load() {
-		if leaseUntil := stat.probeLeaseUntil.Load(); leaseUntil > 0 && leaseUntil <= nowNanos && stat.probeActive.CompareAndSwap(true, false) {
-			stat.probeLeaseUntil.Store(0)
-			stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
-		} else {
+	continuingBatch := stat.smartMode && !stat.probeBatchStarted.IsZero() &&
+		len(stat.probeBatchSamples) > 0 && now.Sub(stat.probeBatchStarted) <= openAIAccountSmartProbeBatchTimeout
+	if !continuingBatch {
+		if next := stat.nextProbeAt.Load(); next > nowNanos {
 			return false
 		}
 	}
-	newLeaseUntil := now.Add(openAIAccountHealthProbeLease).UnixNano()
-	for {
-		leaseUntil := stat.probeLeaseUntil.Load()
-		if leaseUntil > nowNanos {
-			return false
-		}
-		if stat.probeLeaseUntil.CompareAndSwap(leaseUntil, newLeaseUntil) {
-			break
-		}
-	}
+	// The 30 second lease deadline remains observable for compatibility, but an
+	// in-flight request owns the lease until its result or ReleaseFunc arrives.
+	stat.probeLeaseUntil.Store(now.Add(openAIAccountHealthProbeLease).UnixNano())
+	stat.probeID = probeID
+	stat.probeStartedAt = now
 	stat.probeActive.Store(true)
 	return true
+}
+
+func (s *openAIAccountRuntimeStats) markProbeSlotAcquired(accountID int64, probeID uint64, now time.Time) {
+	if s == nil || accountID <= 0 || probeID == 0 {
+		return
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return
+	}
+	stat.mu.Lock()
+	if stat.probeID == probeID && stat.probeBatchStarted.IsZero() {
+		stat.probeBatchStarted = now
+	}
+	stat.mu.Unlock()
 }
 
 func (s *openAIAccountRuntimeStats) probeEligible(accountID int64, now time.Time) bool {
@@ -561,14 +883,68 @@ func (s *openAIAccountRuntimeStats) probeEligible(accountID int64, now time.Time
 		return false
 	}
 	stat, _ := value.(*openAIAccountRuntimeStat)
-	if stat == nil || openAIAccountHealthLevel(stat.healthLevel.Load()) != openAIAccountHealthDegraded {
+	if stat == nil {
+		return false
+	}
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	level := openAIAccountHealthLevel(stat.healthLevel.Load())
+	if stat.smartMode {
+		level = stat.smartLevel
+		if !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+			s.rescheduleSmartProbeBatchLocked(stat, now, false)
+		}
+		if level == openAIAccountHealthDegraded && stat.probeID == 0 &&
+			!stat.probeBatchStarted.IsZero() && len(stat.probeBatchSamples) > 0 &&
+			now.Sub(stat.probeBatchStarted) <= openAIAccountSmartProbeBatchTimeout {
+			return true
+		}
+	}
+	if level != openAIAccountHealthDegraded || stat.probeID != 0 {
 		return false
 	}
 	nowNanos := now.UnixNano()
-	return stat.nextProbeAt.Load() <= nowNanos && stat.probeLeaseUntil.Load() <= nowNanos && !stat.probeActive.Load()
+	return stat.nextProbeAt.Load() <= nowNanos
+}
+
+func (s *openAIAccountRuntimeStats) probeOpportunityOrder(accountID int64, now time.Time) (continuing bool, nextAt int64) {
+	if s == nil || accountID <= 0 {
+		return false, 0
+	}
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return false, 0
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return false, 0
+	}
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	if stat.smartMode && stat.probeID == 0 && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+		s.rescheduleSmartProbeBatchLocked(stat, now, false)
+	}
+	continuing = stat.smartMode && stat.probeID == 0 && !stat.probeBatchStarted.IsZero() &&
+		len(stat.probeBatchSamples) > 0 && now.Sub(stat.probeBatchStarted) <= openAIAccountSmartProbeBatchTimeout
+	return continuing, stat.nextProbeAt.Load()
 }
 
 func (s *openAIAccountRuntimeStats) cancelProbeLease(accountID int64, now time.Time) {
+	value, ok := s.accounts.Load(accountID)
+	if !ok {
+		return
+	}
+	stat, _ := value.(*openAIAccountRuntimeStat)
+	if stat == nil {
+		return
+	}
+	stat.mu.Lock()
+	probeID := stat.probeID
+	stat.mu.Unlock()
+	s.cancelProbeLeaseForID(accountID, probeID, now)
+}
+
+func (s *openAIAccountRuntimeStats) cancelProbeLeaseForID(accountID int64, probeID uint64, now time.Time) {
 	if s == nil || accountID <= 0 {
 		return
 	}
@@ -580,10 +956,59 @@ func (s *openAIAccountRuntimeStats) cancelProbeLease(accountID int64, now time.T
 	if stat == nil {
 		return
 	}
-	if stat.probeActive.Swap(false) {
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	if probeID != 0 && stat.probeID == probeID {
+		stat.probeID = 0
+		stat.probeStartedAt = time.Time{}
+		stat.probeActive.Store(false)
 		stat.probeLeaseUntil.Store(0)
-		stat.nextProbeAt.Store(now.Add(openAIAccountHealthProbeCooldown).UnixNano())
+		if stat.smartMode && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+			s.rescheduleSmartProbeBatchLocked(stat, now, false)
+		}
 	}
+}
+
+func (s *openAIAccountRuntimeStats) smartHealthSnapshots(accountIDs []int64, now time.Time) map[int64]OpenAISmartHealthSnapshot {
+	if s == nil || len(accountIDs) == 0 {
+		return nil
+	}
+	result := make(map[int64]OpenAISmartHealthSnapshot)
+	for _, accountID := range accountIDs {
+		value, ok := s.accounts.Load(accountID)
+		if !ok {
+			continue
+		}
+		stat, _ := value.(*openAIAccountRuntimeStat)
+		if stat == nil {
+			continue
+		}
+		stat.mu.Lock()
+		if stat.probeID == 0 && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+			s.rescheduleSmartProbeBatchLocked(stat, now, false)
+		}
+		if !stat.smartMode || stat.smartLevel != openAIAccountHealthDegraded {
+			stat.mu.Unlock()
+			continue
+		}
+		snapshot := OpenAISmartHealthSnapshot{
+			Reason:      openAIAccountHealthReasonName(stat.smartReason),
+			BackoffStep: stat.backoffIndex + 1,
+		}
+		switch {
+		case stat.probeID != 0:
+			snapshot.State = "probing"
+		case (!stat.probeBatchStarted.IsZero() && len(stat.probeBatchSamples) > 0 && now.Sub(stat.probeBatchStarted) <= openAIAccountSmartProbeBatchTimeout) || stat.nextProbeAt.Load() <= now.UnixNano():
+			snapshot.State = "ready"
+		default:
+			snapshot.State = "cooldown"
+			nextProbeAt := time.Unix(0, stat.nextProbeAt.Load()).UTC()
+			snapshot.NextProbeAt = &nextProbeAt
+		}
+		stat.mu.Unlock()
+		result[accountID] = snapshot
+	}
+	return result
 }
 
 func (s *openAIAccountRuntimeStats) size() int {
@@ -800,6 +1225,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if escapedSticky {
 			healthEscapeReason = stickyHealthEscapeReason
 			req.PreserveStickyBinding = true
+			req.SmartHealthStickyEscaped = true
 		}
 	}
 
@@ -970,7 +1396,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	escapeCfg := s.service.openAIStickyEscapeConfig()
 	if req.SmartHealthEnabled && s.stats != nil {
 		assessment := s.stats.health(accountID, now, escapeCfg)
-		if assessment.level == openAIAccountHealthDegraded && !req.DisableStickyEscape {
+		if assessment.level == openAIAccountHealthDegraded && escapeCfg.enabled && !req.DisableStickyEscape {
 			healthEscapeReason := openAIAccountHealthReasonName(assessment.reason)
 			if healthEscapeReasonTarget != nil {
 				*healthEscapeReasonTarget = healthEscapeReason
@@ -1507,7 +1933,30 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		probePlan.candidates = plan.probeCandidates
 		probePlan.probeCandidates = nil
 		probePlan.topK = 1
-		plan.selectionOrder = append(plan.selectionOrder, s.buildOpenAISelectionOrder(req, probePlan)...)
+		probeOrder := s.buildOpenAISelectionOrder(req, probePlan)
+		seen := make(map[int64]struct{}, len(probeOrder)+len(plan.selectionOrder))
+		ordered := make([]openAIAccountCandidateScore, 0, len(probeOrder)+len(plan.selectionOrder))
+		for _, candidate := range probeOrder {
+			if candidate.account == nil {
+				continue
+			}
+			if _, exists := seen[candidate.account.ID]; exists {
+				continue
+			}
+			seen[candidate.account.ID] = struct{}{}
+			ordered = append(ordered, candidate)
+		}
+		for _, candidate := range plan.selectionOrder {
+			if candidate.account == nil {
+				continue
+			}
+			if _, exists := seen[candidate.account.ID]; exists {
+				continue
+			}
+			seen[candidate.account.ID] = struct{}{}
+			ordered = append(ordered, candidate)
+		}
+		plan.selectionOrder = ordered
 	}
 	return plan
 }
@@ -1683,12 +2132,16 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			continue
 		}
 		probe := candidate.healthProbe && req.SmartHealthEnabled
-		if probe && !s.stats.tryAcquireProbeLease(candidate.account.ID, time.Now()) {
-			continue
+		probeID := uint64(0)
+		if probe {
+			probeID = s.stats.probeSequence.Add(1)
+			if !s.stats.tryAcquireProbeLeaseWithID(candidate.account.ID, time.Now(), probeID) {
+				continue
+			}
 		}
 		cancelProbe := func() {
 			if probe {
-				s.stats.cancelProbeLease(candidate.account.ID, time.Now())
+				s.stats.cancelProbeLeaseForID(candidate.account.ID, probeID, time.Now())
 			}
 		}
 		if candidate.loadKnown && candidate.account.Concurrency > 0 &&
@@ -1704,6 +2157,9 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 		}
 		if acquireErr != nil {
 			cancelProbe()
+			if probe {
+				continue
+			}
 			return nil, compactBlocked, acquireErr
 		}
 		if result == nil || !result.Acquired {
@@ -1744,6 +2200,9 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			}
 			if acquireErr != nil {
 				cancelProbe()
+				if probe {
+					continue
+				}
 				return nil, compactBlocked, acquireErr
 			}
 			if result == nil || !result.Acquired {
@@ -1755,12 +2214,29 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, fresh.ID)
 		}
 		if probe {
+			freshCopy := *fresh
+			freshCopy.smartHealthProbeID = probeID
+			fresh = &freshCopy
+			s.stats.markProbeSlotAcquired(fresh.ID, probeID, time.Now())
 			s.metrics.recordSmartHealthProbe()
+		}
+		releaseFunc := result.ReleaseFunc
+		if probe {
+			baseRelease := releaseFunc
+			var releaseOnce sync.Once
+			releaseFunc = func() {
+				releaseOnce.Do(func() {
+					if baseRelease != nil {
+						baseRelease()
+					}
+					s.stats.cancelProbeLeaseForID(fresh.ID, probeID, time.Now())
+				})
+			}
 		}
 		return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 			Account:     fresh,
 			Acquired:    true,
-			ReleaseFunc: result.ReleaseFunc,
+			ReleaseFunc: releaseFunc,
 		}), compactBlocked, nil
 	}
 	return nil, compactBlocked, nil
@@ -2043,30 +2519,32 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, filterStats.summary(""))
 	}
 
+	loadMap := map[int64]*AccountLoadInfo{}
+	if s.service.concurrencyService != nil {
+		if batchLoad, loadErr := s.service.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); loadErr == nil {
+			loadMap = batchLoad
+		}
+	}
+
 	if req.SmartHealthEnabled {
 		primary, degraded := s.splitSmartHealthCandidates(req, filtered)
 		if decision != nil {
 			decision.PrimaryCount = len(primary)
 			decision.DegradedCount = len(degraded)
 		}
-		if len(primary) > 0 {
+		hasPrimary := len(primary) > 0
+		if hasPrimary {
 			filtered = primary
-			if probe := s.selectSmartHealthProbeCandidate(req, degraded); probe != nil {
-				filtered = append(filtered, probe)
-				req.SmartHealthProbeAccountID = probe.ID
-			}
 		} else if len(degraded) > 0 {
 			filtered = degraded
 			s.metrics.recordSmartHealthAllDegraded()
 			slog.Info("openai_account_health_all_degraded", "candidate_count", len(degraded))
 		}
-		loadReq = buildOpenAIAccountLoadRequest(filtered)
-	}
-
-	loadMap := map[int64]*AccountLoadInfo{}
-	if s.service.concurrencyService != nil {
-		if batchLoad, loadErr := s.service.concurrencyService.GetAccountsLoadBatch(ctx, loadReq); loadErr == nil {
-			loadMap = batchLoad
+		if probe := s.selectSmartHealthProbeCandidate(req, degraded, loadMap); probe != nil {
+			if hasPrimary {
+				filtered = append(filtered, probe)
+			}
+			req.SmartHealthProbeAccountID = probe.ID
 		}
 	}
 
@@ -2160,20 +2638,44 @@ func (s *defaultOpenAIAccountScheduler) splitSmartHealthCandidates(
 func (s *defaultOpenAIAccountScheduler) selectSmartHealthProbeCandidate(
 	req OpenAIAccountScheduleRequest,
 	degraded []*Account,
+	loadMap map[int64]*AccountLoadInfo,
 ) *Account {
 	if !req.SmartHealthEnabled || s == nil || s.stats == nil || len(degraded) == 0 {
 		return nil
 	}
-	if req.GuardianParentAccountID > 0 || (!req.StickyWeighted && req.StickyAccountID > 0) {
+	if req.GuardianParentAccountID > 0 || (!req.StickyWeighted && req.StickyAccountID > 0 && !req.SmartHealthStickyEscaped) {
 		return nil
 	}
 	now := time.Now()
-	for _, account := range degraded {
-		if account != nil && s.stats.probeEligible(account.ID, now) {
-			return account
-		}
+	type opportunity struct {
+		account    *Account
+		continuing bool
+		nextAt     int64
 	}
-	return nil
+	opportunities := make([]opportunity, 0, len(degraded))
+	for _, account := range degraded {
+		if account == nil || !s.stats.probeEligible(account.ID, now) {
+			continue
+		}
+		if load, known := loadMap[account.ID]; known && load != nil && account.Concurrency > 0 && load.CurrentConcurrency >= account.Concurrency {
+			continue
+		}
+		continuing, nextAt := s.stats.probeOpportunityOrder(account.ID, now)
+		opportunities = append(opportunities, opportunity{account: account, continuing: continuing, nextAt: nextAt})
+	}
+	sort.Slice(opportunities, func(i, j int) bool {
+		if opportunities[i].continuing != opportunities[j].continuing {
+			return opportunities[i].continuing
+		}
+		if opportunities[i].nextAt != opportunities[j].nextAt {
+			return opportunities[i].nextAt < opportunities[j].nextAt
+		}
+		return opportunities[i].account.ID < opportunities[j].account.ID
+	})
+	if len(opportunities) == 0 {
+		return nil
+	}
+	return opportunities[0].account
 }
 
 func partitionOpenAIChatGPTSubscriptionAccounts(accounts []*Account) ([]*Account, []*Account) {
@@ -2340,36 +2842,20 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 					continue
 				}
 			}
-			probe := candidate.healthProbe && req.SmartHealthEnabled
-			if probe && !s.stats.tryAcquireProbeLease(candidate.account.ID, time.Now()) {
-				continue
-			}
-			cancelProbe := func() {
-				if probe {
-					s.stats.cancelProbeLease(candidate.account.ID, time.Now())
-				}
-			}
 			fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 			if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
-				cancelProbe()
 				continue
 			}
 			if !s.consumeOpenAISelectionDBRecheck(budget) {
-				cancelProbe()
 				return nil, candidateCount, topK, loadSkew, noAvailableOpenAISelectionError(req.RequestedModel, compactBlocked, filterStats.summary("selection_order_exhausted"))
 			}
 			fresh = s.service.recheckSelectedOpenAIAccountFromDB(ctx, fresh, req.GroupID, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 			if fresh == nil || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) || !s.isAccountRequestCompatible(ctx, fresh, req) {
-				cancelProbe()
 				continue
 			}
 			if req.RequireCompact && openAICompactSupportTier(fresh) == 0 {
 				compactBlocked = true
-				cancelProbe()
 				continue
-			}
-			if probe {
-				s.metrics.recordSmartHealthProbe()
 			}
 			return attachSelectionProfitGate(ctx, &AccountSelectionResult{
 				Account: fresh,
@@ -2476,15 +2962,23 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 }
 
 func (s *defaultOpenAIAccountScheduler) ReportResult(accountID int64, success bool, firstTokenMs *int) {
-	if s == nil || s.stats == nil {
+	s.reportAccountResult(&Account{ID: accountID}, success, firstTokenMs, success || !success)
+}
+
+func (s *defaultOpenAIAccountScheduler) reportAccountResult(account *Account, success bool, firstTokenMs *int, attributable bool) {
+	if s == nil || s.stats == nil || account == nil || account.ID <= 0 {
 		return
 	}
 	smartEnabled := s.service != nil && s.service.isSmartSchedulingEnabled(context.Background())
+	if !smartEnabled && account.smartHealthProbeID != 0 {
+		s.stats.cancelProbeLeaseForID(account.ID, account.smartHealthProbeID, time.Now())
+		return
+	}
 	thresholds := defaultOpenAIAccountHealthThresholds()
 	if s.service != nil {
 		thresholds = s.service.openAIStickyEscapeConfig()
 	}
-	s.stats.reportWithHealthConfig(accountID, success, firstTokenMs, thresholds, smartEnabled)
+	s.stats.reportAtForRequest(account.ID, success, firstTokenMs, time.Now(), thresholds, smartEnabled, smartEnabled, account.smartHealthProbeID, attributable)
 }
 
 func (s *defaultOpenAIAccountScheduler) ReportSwitch() {
@@ -2541,6 +3035,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 			return openAIAdvancedSchedulerRuntimeSettings{
 				lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 				smartEnabled:                   cached.smartEnabled,
+				smartEnabledKnown:              cached.smartEnabledKnown,
 				oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 				enabled:                        cached.enabled,
 				stickyWeightedEnabled:          cached.stickyWeightedEnabled,
@@ -2557,6 +3052,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 				return openAIAdvancedSchedulerRuntimeSettings{
 					lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 					smartEnabled:                   cached.smartEnabled,
+					smartEnabledKnown:              cached.smartEnabledKnown,
 					oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 					enabled:                        cached.enabled,
 					stickyWeightedEnabled:          cached.stickyWeightedEnabled,
@@ -2575,11 +3071,13 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		subscriptionPriorityEnabled := false
 		lbTopKOverride := 0
 		weightOverrides := map[string]float64{}
+		smartEnabledKnown := false
 		if repo := s.openAIAdvancedSchedulerSettingRepo(); repo != nil {
 			dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openAIAdvancedSchedulerSettingDBTimeout)
 			defer cancel()
 
 			if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
+				smartEnabledKnown = true
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
 				smartEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeySmartSchedulingEnabled]), "true")
 				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
@@ -2596,6 +3094,9 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 				for _, key := range openAIAdvancedSchedulerRuntimeSettingKeys() {
 					if value, valueErr := repo.GetValue(dbCtx, key); valueErr == nil {
 						fallbackValues[key] = value
+						if key == SettingKeySmartSchedulingEnabled {
+							smartEnabledKnown = true
+						}
 					}
 				}
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
@@ -2612,6 +3113,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 			smartEnabled:                   smartEnabled,
+			smartEnabledKnown:              smartEnabledKnown,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
 			stickyWeightedEnabled:          stickyWeightedEnabled,
@@ -2623,6 +3125,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		return openAIAdvancedSchedulerRuntimeSettings{
 			lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 			smartEnabled:                   smartEnabled,
+			smartEnabledKnown:              smartEnabledKnown,
 			oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 			enabled:                        enabled,
 			stickyWeightedEnabled:          stickyWeightedEnabled,
@@ -2753,6 +3256,7 @@ func (s *OpenAIGatewayService) getOpenAIAccountScheduler(ctx context.Context) Op
 		if s.openaiScheduler == nil {
 			s.openaiScheduler = newDefaultOpenAIAccountScheduler(s, s.openaiAccountStats)
 		}
+		s.openaiAccountStatsPublished.Store(s.openaiAccountStats)
 	})
 	return s.openaiScheduler
 }
@@ -3198,9 +3702,30 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	}
 	scheduler := s.getOpenAIAccountScheduler(context.Background())
 	if scheduler == nil {
+		if account.smartHealthProbeID != 0 {
+			if stats := s.openaiAccountStatsPublished.Load(); stats != nil {
+				stats.cancelProbeLeaseForID(accountID, account.smartHealthProbeID, time.Now())
+			}
+		}
 		return healthTripped
 	}
-	scheduler.ReportResult(accountID, success, firstTokenMs)
+	attributable := success
+	if !success {
+		attributable = false
+		if len(observedErr) > 0 && observedErr[0] != nil {
+			var failoverErr *UpstreamFailoverError
+			if errors.As(observedErr[0], &failoverErr) {
+				attributable = failoverErr.ShouldReportAccountScheduleFailure()
+			} else {
+				attributable = true
+			}
+		}
+	}
+	if reporter, ok := scheduler.(*defaultOpenAIAccountScheduler); ok {
+		reporter.reportAccountResult(account, success, firstTokenMs, attributable)
+	} else if account.smartHealthProbeID == 0 {
+		scheduler.ReportResult(accountID, success, firstTokenMs)
+	}
 	return healthTripped
 }
 
@@ -3210,7 +3735,28 @@ func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Con
 	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil {
 		return false
 	}
-	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
+	healthTripped := s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
+	if account.smartHealthProbeID == 0 {
+		return healthTripped
+	}
+	stats := s.openaiAccountStatsPublished.Load()
+	if !s.isSmartSchedulingEnabled(ctx) {
+		if stats != nil {
+			stats.cancelProbeLeaseForID(account.ID, account.smartHealthProbeID, time.Now())
+		}
+		return healthTripped
+	}
+	attributable := observedErr != nil && ctx.Err() == nil
+	var failoverErr *UpstreamFailoverError
+	if errors.As(observedErr, &failoverErr) {
+		attributable = failoverErr.ShouldReportAccountScheduleFailure() && ctx.Err() == nil
+	}
+	if stats == nil {
+		return healthTripped
+	}
+	thresholds := s.openAIStickyEscapeConfig()
+	stats.reportAtForRequest(account.ID, false, nil, time.Now(), thresholds, true, true, account.smartHealthProbeID, attributable)
+	return healthTripped
 }
 
 func (s *OpenAIGatewayService) RecordOpenAIAccountSwitch() {
@@ -3227,6 +3773,30 @@ func (s *OpenAIGatewayService) SnapshotOpenAIAccountSchedulerMetrics() OpenAIAcc
 		return OpenAIAccountSchedulerMetricsSnapshot{}
 	}
 	return scheduler.SnapshotMetrics()
+}
+
+// SmartHealthSnapshot returns read-only in-process health state for applicable
+// accounts on the current page. It never initializes the scheduler or runtime
+// statistics; an unavailable/disabled setting intentionally yields no fields.
+func (s *OpenAIGatewayService) SmartHealthSnapshot(ctx context.Context, accounts []*Account) map[int64]OpenAISmartHealthSnapshot {
+	if s == nil || len(accounts) == 0 {
+		return nil
+	}
+	settings := s.openAIAdvancedSchedulerRuntimeSettings(ctx)
+	if !settings.smartEnabledKnown || !settings.smartEnabled {
+		return nil
+	}
+	stats := s.openaiAccountStatsPublished.Load()
+	if stats == nil {
+		return nil
+	}
+	accountIDs := make([]int64, 0, len(accounts))
+	for _, account := range accounts {
+		if account != nil && account.IsOpenAICompatible() {
+			accountIDs = append(accountIDs, account.ID)
+		}
+	}
+	return stats.smartHealthSnapshots(accountIDs, time.Now())
 }
 
 func (s *OpenAIGatewayService) openAIWSSessionStickyTTL() time.Duration {

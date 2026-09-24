@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountStatusIndicator from '../AccountStatusIndicator.vue'
 import type { Account } from '@/types'
@@ -17,7 +17,8 @@ vi.mock('@/utils/format', async () => {
   const actual = await vi.importActual<typeof import('@/utils/format')>('@/utils/format')
   return {
     ...actual,
-    formatCountdown: () => '1h'
+    formatCountdown: () => '1h',
+    formatDateTime: (value: string | null | undefined) => value ? `local:${new Date(value).toLocaleString()}` : ''
   }
 })
 
@@ -51,6 +52,9 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
   it('Claude 5 模型限流时显示 Opus 和 Sonnet 的短别名', () => {
     const wrapper = mount(AccountStatusIndicator, {
       props: {
@@ -79,6 +83,80 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.text()).toContain('COpus5')
     expect(wrapper.text()).toContain('CSon5')
     expect(wrapper.text()).not.toContain('claude-sonnet-5')
+  })
+
+  it('displays the smart-health cooldown, ready, and probing capsules', () => {
+    const states = [
+      { state: 'cooldown' as const, reason: 'error_rate' as const, next_probe_at: '2099-07-28T13:00:00Z', backoff_step: 1 },
+      { state: 'ready' as const, reason: 'ttft' as const, next_probe_at: null, backoff_step: 2 },
+      { state: 'probing' as const, reason: 'error_rate' as const, next_probe_at: null, backoff_step: 3 }
+    ]
+    const expected = [
+      'admin.accounts.status.smartHealthCooldown',
+      'admin.accounts.status.smartHealthReady',
+      'admin.accounts.status.smartHealthProbing'
+    ]
+
+    states.forEach((smart_health, index) => {
+      const wrapper = mount(AccountStatusIndicator, {
+        props: { account: makeAccount({ smart_health }) },
+        global: { stubs: { Icon: true } }
+      })
+      expect(wrapper.find('.badge-warning').text()).toBe(expected[index])
+      wrapper.unmount()
+    })
+  })
+
+  it('shows the local absolute cooldown time and changes to ready at expiry', async () => {
+    vi.useFakeTimers()
+    const now = new Date('2026-09-23T12:00:00.000Z')
+    vi.setSystemTime(now)
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          smart_health: {
+            state: 'cooldown',
+            reason: 'ttft',
+            next_probe_at: '2026-09-23T12:01:00.000Z',
+            backoff_step: 1
+          }
+        })
+      },
+      global: { stubs: { Icon: true } }
+    })
+
+    expect(wrapper.text()).toContain('admin.accounts.status.smartHealthCooldown')
+    expect(wrapper.text()).toContain('local:')
+    expect(wrapper.find('[title]').attributes('title')).toContain('admin.accounts.status.smartHealthNextProbeTime')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wrapper.text()).toContain('admin.accounts.status.smartHealthReady')
+    expect(wrapper.text()).not.toContain('local:')
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('does not add smart-health markers to normal accounts and coexists with 429, 529, and temporary unschedulable states', () => {
+    const normal = mount(AccountStatusIndicator, {
+      props: { account: makeAccount({}) },
+      global: { stubs: { Icon: true } }
+    })
+    expect(normal.text()).not.toContain('smartHealth')
+    normal.unmount()
+
+    const cases = [
+      { rate_limit_reset_at: '2099-07-28T13:00:00Z', smart_health: { state: 'ready' as const, reason: 'ttft' as const, next_probe_at: null, backoff_step: 1 }, label: 'rateLimited' },
+      { overload_until: '2099-07-28T13:00:00Z', smart_health: { state: 'probing' as const, reason: 'ttft' as const, next_probe_at: null, backoff_step: 1 }, label: 'overloaded' },
+      { temp_unschedulable_until: '2099-07-28T13:00:00Z', smart_health: { state: 'cooldown' as const, reason: 'error_rate' as const, next_probe_at: '2099-07-28T13:00:00Z', backoff_step: 1 }, label: 'tempUnschedulable' }
+    ]
+    for (const item of cases) {
+      const wrapper = mount(AccountStatusIndicator, {
+        props: { account: makeAccount(item) },
+        global: { stubs: { Icon: true } }
+      })
+      expect(wrapper.text()).toContain(`admin.accounts.status.${item.label}`)
+      expect(wrapper.text()).toContain('admin.accounts.status.smartHealth')
+      wrapper.unmount()
+    }
   })
 
   it('Grok 账号额度限流时显示自动恢复时间而非临时不可调度', () => {

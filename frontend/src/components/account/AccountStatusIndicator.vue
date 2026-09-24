@@ -32,6 +32,18 @@
       </span>
     </template>
 
+    <div v-if="smartHealthDisplayState" class="flex flex-col items-center gap-1">
+      <span class="badge text-xs badge-warning">{{ smartHealthLabel }}</span>
+      <span
+        v-if="smartHealthNextProbeText"
+        class="text-[11px] text-gray-400 dark:text-gray-500"
+        :title="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
+        :aria-label="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
+      >
+        {{ smartHealthNextProbeText }}
+      </span>
+    </div>
+
     <!-- Error Info Indicator -->
     <div v-if="hasError && account.error_message" class="group/error relative">
       <svg
@@ -159,7 +171,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
@@ -174,6 +186,58 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'show-temp-unsched', account: Account): void
 }>()
+
+const smartHealthNow = ref(Date.now())
+let smartHealthExpiryTimer: ReturnType<typeof setTimeout> | undefined
+
+const smartHealthDeadline = computed(() => {
+  const value = props.account.smart_health?.next_probe_at
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : null
+})
+
+const smartHealthDisplayState = computed(() => {
+  const snapshot = props.account.smart_health
+  if (!snapshot) return null
+  if (snapshot.state === 'cooldown' && smartHealthDeadline.value !== null && smartHealthDeadline.value <= smartHealthNow.value) {
+    return 'ready'
+  }
+  return snapshot.state
+})
+
+const smartHealthLabel = computed(() => {
+  switch (smartHealthDisplayState.value) {
+    case 'cooldown': return t('admin.accounts.status.smartHealthCooldown')
+    case 'ready': return t('admin.accounts.status.smartHealthReady')
+    case 'probing': return t('admin.accounts.status.smartHealthProbing')
+    default: return ''
+  }
+})
+
+const smartHealthNextProbeText = computed(() => {
+  if (smartHealthDisplayState.value !== 'cooldown' || smartHealthDeadline.value === null || smartHealthDeadline.value <= smartHealthNow.value) {
+    return ''
+  }
+  return formatDateTime(props.account.smart_health?.next_probe_at)
+})
+
+const scheduleSmartHealthExpiry = () => {
+  if (smartHealthExpiryTimer) clearTimeout(smartHealthExpiryTimer)
+  smartHealthExpiryTimer = undefined
+  smartHealthNow.value = Date.now()
+  const deadline = smartHealthDeadline.value
+  if (props.account.smart_health?.state !== 'cooldown' || deadline === null || deadline <= Date.now()) return
+  smartHealthExpiryTimer = setTimeout(() => {
+    smartHealthNow.value = Date.now()
+    smartHealthExpiryTimer = undefined
+  }, deadline - Date.now())
+}
+
+watch(() => [props.account.smart_health?.state, props.account.smart_health?.next_probe_at], scheduleSmartHealthExpiry, { immediate: true })
+onBeforeUnmount(() => {
+  if (smartHealthExpiryTimer) clearTimeout(smartHealthExpiryTimer)
+})
 
 // Computed: is rate limited (429)
 const isRateLimited = computed(() => {

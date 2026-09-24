@@ -260,6 +260,58 @@ func TestProfitControlSchedulerFiltersCandidates(t *testing.T) {
 	})
 }
 
+func TestOpenAIProfitControlVetoLatest_PreservesSmartProbeIdentity(t *testing.T) {
+	now := time.Unix(1776000000, 0).UTC()
+	newService := func(t *testing.T, threshold float64) (*OpenAIGatewayService, *Account, *Account, *openAIAccountRuntimeStats, context.Context) {
+		t.Helper()
+		shared := &Account{ID: 7801, UpdatedAt: now, RateMultiplier: float64PtrForTest(0.5)}
+		selected := &Account{ID: 7801, UpdatedAt: now, smartHealthProbeID: 81}
+		stats := newOpenAIAccountRuntimeStats()
+		seedSmartDegradedAccount(t, stats, selected.ID, "error_rate", now)
+		stat := stats.loadOrCreate(selected.ID)
+		probeID := stats.probeSequence.Add(1)
+		stat.mu.Lock()
+		stat.probeID = probeID
+		stat.probeActive.Store(true)
+		stat.probeLeaseUntil.Store(now.Add(openAIAccountHealthProbeLease).UnixNano())
+		stat.mu.Unlock()
+		selected.smartHealthProbeID = probeID
+		service := &OpenAIGatewayService{
+			schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{accountsByID: map[int64]*Account{shared.ID: shared}}},
+		}
+		service.openaiAccountStatsPublished.Store(stats)
+		ctx := context.WithValue(context.Background(), openAIProfitControlGateCtxKey{}, &openAIProfitControlGate{threshold: threshold, pricingAt: now})
+		return service, selected, shared, stats, ctx
+	}
+
+	t.Run("request_copy_receives_identity_without_mutating_cached_account", func(t *testing.T) {
+		service, selected, shared, _, ctx := newService(t, 0.7)
+		latest, vetoed, reason := service.ProfitControlVetoLatest(ctx, selected)
+		require.False(t, vetoed)
+		require.Empty(t, reason)
+		require.NotSame(t, selected, latest)
+		require.NotSame(t, shared, latest)
+		require.Equal(t, selected.smartHealthProbeID, latest.smartHealthProbeID)
+		require.Zero(t, shared.smartHealthProbeID)
+	})
+
+	t.Run("veto_releases_only_the_matching_probe_lease", func(t *testing.T) {
+		service, selected, shared, stats, ctx := newService(t, 0.1)
+		latest, vetoed, reason := service.ProfitControlVetoLatest(ctx, selected)
+		require.True(t, vetoed)
+		require.Equal(t, openAIProfitFilterReasonThreshold, reason)
+		require.Equal(t, selected.smartHealthProbeID, latest.smartHealthProbeID)
+		require.Zero(t, shared.smartHealthProbeID)
+		stat := stats.loadOrCreate(selected.ID)
+		stat.mu.Lock()
+		require.Zero(t, stat.probeID)
+		require.False(t, stat.probeActive.Load())
+		stat.mu.Unlock()
+	})
+}
+
+func float64PtrForTest(value float64) *float64 { return &value }
+
 func TestValidateProfitControlConfig(t *testing.T) {
 	require.NoError(t, ValidateProfitControlConfig(PlatformAnthropic, false, 0, 0))
 	for _, platform := range []string{PlatformOpenAI, PlatformAnthropic, PlatformGemini, PlatformGrok, PlatformAntigravity} {

@@ -1270,6 +1270,12 @@ export interface Account {
   overload_until: string | null
   temp_unschedulable_until: string | null
   temp_unschedulable_reason: string | null
+  smart_health?: {
+    state: 'cooldown' | 'ready' | 'probing'
+    reason: 'ttft' | 'error_rate'
+    next_probe_at: string | null
+    backoff_step: number
+  }
 
   // Session window fields (5-hour window)
   session_window_start: string | null
