@@ -26,6 +26,35 @@ type schedulerTestOpenAIAccountRepo struct {
 	accounts []Account
 }
 
+type openAIAccountRuntimeStatsRetentionRepo struct {
+	AccountRepository
+	mu       sync.Mutex
+	calls    [][]int64
+	getByIDs func(context.Context, []int64) ([]*Account, error)
+}
+
+func (r *openAIAccountRuntimeStatsRetentionRepo) GetByIDs(ctx context.Context, ids []int64) ([]*Account, error) {
+	idsCopy := append([]int64(nil), ids...)
+	r.mu.Lock()
+	r.calls = append(r.calls, idsCopy)
+	getByIDs := r.getByIDs
+	r.mu.Unlock()
+	if getByIDs == nil {
+		return nil, nil
+	}
+	return getByIDs(ctx, idsCopy)
+}
+
+func (r *openAIAccountRuntimeStatsRetentionRepo) callsSnapshot() [][]int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	calls := make([][]int64, len(r.calls))
+	for index := range r.calls {
+		calls[index] = append([]int64(nil), r.calls[index]...)
+	}
+	return calls
+}
+
 type schedulerTestLogRecord struct {
 	message string
 	attrs   map[string]any
@@ -839,6 +868,14 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabled_Require
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 }
 
+func openAIAccountRuntimeStatForTest(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64) *openAIAccountRuntimeStat {
+	t.Helper()
+	stat, release, ok := stats.acquire(accountID, true, true)
+	require.True(t, ok)
+	t.Cleanup(release)
+	return stat
+}
+
 func seedSmartDegradedAccount(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64, reason string, now time.Time) {
 	t.Helper()
 	for index := 0; index < openAIAccountSmartWindowSize; index++ {
@@ -854,7 +891,26 @@ func seedSmartDegradedAccount(t *testing.T, stats *openAIAccountRuntimeStats, ac
 		stats.reportAtForRequest(accountID, success, ttft, now.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
 	}
 	require.Equal(t, openAIAccountHealthDegraded, stats.health(accountID, now.Add(time.Minute), openAIStickyEscapeConfig{}).level)
-	stats.loadOrCreate(accountID).nextProbeAt.Store(now.Add(-time.Second).UnixNano())
+	stat, release, ok := stats.acquire(accountID, false, true)
+	require.True(t, ok)
+	stat.nextProbeAt.Store(now.Add(-time.Second).UnixNano())
+	release()
+}
+
+func addIdleOpenAIAccountRuntimeStat(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64, lastActivity time.Time) {
+	t.Helper()
+	stat, release, ok := stats.acquire(accountID, true, true)
+	require.True(t, ok)
+	stat.lastActivityAt.Store(lastActivity.UnixNano())
+	release()
+}
+
+func openAIAccountRuntimeStatSampleCount(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64) int64 {
+	t.Helper()
+	stat, release, ok := stats.acquire(accountID, false, false)
+	require.True(t, ok)
+	defer release()
+	return stat.sampleCount.Load()
 }
 
 func acquireAndReportSmartProbe(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64, success bool, ttft *int, now time.Time) uint64 {
@@ -935,7 +991,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthAllDegradedR
 				if !configured {
 					offset = -time.Minute
 				}
-				scheduler.stats.loadOrCreate(account.ID).nextProbeAt.Store(now.Add(offset).UnixNano())
+				openAIAccountRuntimeStatForTest(t, scheduler.stats, account.ID).nextProbeAt.Store(now.Add(offset).UnixNano())
 			}
 			for _, wantID := range tc.firstIDs {
 				for sample := 0; sample < openAIAccountSmartProbeBatchLimit; sample++ {
@@ -1004,7 +1060,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthPriorityFall
 	require.Equal(t, int64(7042), selection.Account.ID)
 	require.Zero(t, selection.Account.smartHealthProbeID)
 	require.Equal(t, []int64{7041, 7042}, acquired[:2])
-	stat := scheduler.stats.loadOrCreate(7041)
+	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, 7041)
 	stat.mu.Lock()
 	require.Zero(t, stat.probeID)
 	require.Empty(t, stat.probeBatchSamples)
@@ -1023,7 +1079,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthProbeResultI
 	stats.markProbeSlotAcquired(7051, probeID, now)
 	stats.reportAtForRequest(7051, true, intPtrForTest(100), now.Add(time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
 	stats.reportAtForRequest(7051, false, nil, now.Add(2*time.Second), openAIStickyEscapeConfig{}, false, true, probeID+1, true)
-	stat := stats.loadOrCreate(7051)
+	stat := openAIAccountRuntimeStatForTest(t, stats, 7051)
 	stat.mu.Lock()
 	require.Equal(t, probeID, stat.probeID)
 	require.Empty(t, stat.probeBatchSamples)
@@ -1050,7 +1106,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthProbeWaitPla
 	require.NotNil(t, selection.WaitPlan)
 	require.Zero(t, selection.Account.smartHealthProbeID)
 	require.Zero(t, svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthProbeTotal)
-	stat := scheduler.stats.loadOrCreate(7061)
+	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, 7061)
 	stat.mu.Lock()
 	require.Zero(t, stat.probeID)
 	stat.mu.Unlock()
@@ -1082,7 +1138,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthPostWriteFai
 	require.Equal(t, int64(7081), selection.Account.ID)
 	require.NotZero(t, selection.Account.smartHealthProbeID)
 	svc.ObserveOpenAIAccountHealthFailure(context.Background(), selection.Account, &UpstreamFailoverError{Scope: GatewayFailureScopeAccount})
-	stat := scheduler.stats.loadOrCreate(7081)
+	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, 7081)
 	stat.mu.Lock()
 	require.Zero(t, stat.probeID)
 	require.Len(t, stat.probeBatchSamples, 1)
@@ -1118,7 +1174,7 @@ func TestOpenAIAccountRuntimeStats_ProbeRecoveryInvariant(t *testing.T) {
 	stats.reportAtForRequest(7091, true, nil, now.Add(time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
 	require.Equal(t, openAIAccountHealthDegraded, stats.health(7091, now.Add(time.Second), openAIStickyEscapeConfig{}).level)
 	stats.cancelProbeLeaseForID(7091, probeID+1, now.Add(2*time.Second))
-	stat := stats.loadOrCreate(7091)
+	stat := openAIAccountRuntimeStatForTest(t, stats, 7091)
 	stat.mu.Lock()
 	require.Equal(t, probeID, stat.probeID)
 	stat.mu.Unlock()
@@ -1198,7 +1254,7 @@ func TestOpenAIAccountRuntimeStats_ProbeBackoffLadder(t *testing.T) {
 		success := index >= 2
 		stats.reportAtForRequest(7201, success, nil, base.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
 	}
-	stat := stats.loadOrCreate(7201)
+	stat := openAIAccountRuntimeStatForTest(t, stats, 7201)
 	require.Equal(t, openAIAccountHealthDegraded, stats.health(7201, base.Add(9*time.Second), openAIStickyEscapeConfig{}).level)
 	require.Equal(t, 0, stat.backoffIndex)
 	require.Equal(t, base.Add(9*time.Second+time.Minute).UnixNano(), stat.nextProbeAt.Load())
@@ -1253,7 +1309,7 @@ func TestOpenAIAccountRuntimeStats_TenProbeBatchRecovery(t *testing.T) {
 	base := time.Unix(1773000000, 0).UTC()
 	stats := newOpenAIAccountRuntimeStats()
 	seedSmartDegradedAccount(t, stats, 7301, "error_rate", base)
-	stat := stats.loadOrCreate(7301)
+	stat := openAIAccountRuntimeStatForTest(t, stats, 7301)
 	firstProbe := time.Unix(0, stat.nextProbeAt.Load())
 	stat.nextProbeAt.Store(firstProbe.UnixNano())
 
@@ -1296,7 +1352,7 @@ func TestOpenAIAccountRuntimeStats_TenProbeBatchRecovery(t *testing.T) {
 	// With all ten positive TTFT values, exactly 10 seconds is healthy; an old degraded history is replaced.
 	allTTFTStats := newOpenAIAccountRuntimeStats()
 	seedSmartDegradedAccount(t, allTTFTStats, 7302, "ttft", base)
-	allTTFTStat := allTTFTStats.loadOrCreate(7302)
+	allTTFTStat := openAIAccountRuntimeStatForTest(t, allTTFTStats, 7302)
 	for index := 0; index < openAIAccountSmartProbeBatchLimit; index++ {
 		probeAt := base.Add(time.Minute + time.Duration(index)*time.Second)
 		value := 10000
@@ -1317,7 +1373,7 @@ func TestOpenAIAccountRuntimeStats_InconclusiveAndOrdinaryTraffic(t *testing.T) 
 	t.Run("missing_required_ttft_reschedules_without_backoff", func(t *testing.T) {
 		stats := newOpenAIAccountRuntimeStats()
 		seedSmartDegradedAccount(t, stats, 7401, "ttft", base)
-		stat := stats.loadOrCreate(7401)
+		stat := openAIAccountRuntimeStatForTest(t, stats, 7401)
 		probeAt := time.Unix(0, stat.nextProbeAt.Load())
 		probeID := stats.probeSequence.Add(1)
 		require.True(t, stats.tryAcquireProbeLeaseWithID(7401, probeAt, probeID))
@@ -1334,7 +1390,7 @@ func TestOpenAIAccountRuntimeStats_InconclusiveAndOrdinaryTraffic(t *testing.T) 
 	t.Run("ordinary_results_do_not_become_probe_samples", func(t *testing.T) {
 		stats := newOpenAIAccountRuntimeStats()
 		seedSmartDegradedAccount(t, stats, 7402, "error_rate", base)
-		stat := stats.loadOrCreate(7402)
+		stat := openAIAccountRuntimeStatForTest(t, stats, 7402)
 		probeAt := time.Unix(0, stat.nextProbeAt.Load())
 		acquireAndReportSmartProbe(t, stats, 7402, true, nil, probeAt)
 		stats.reportAtForRequest(7402, true, nil, probeAt.Add(time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
@@ -1400,7 +1456,7 @@ func TestOpenAIGatewayService_SmartThresholdModeIsolation(t *testing.T) {
 		_, ewma, hasTTFT := stats.snapshot(7502)
 		require.True(t, hasTTFT)
 		require.InDelta(t, 12000, ewma, 1e-9, "legacy EWMA remains active")
-		stat := stats.loadOrCreate(7502)
+		stat := openAIAccountRuntimeStatForTest(t, stats, 7502)
 		stat.mu.Lock()
 		require.False(t, stat.smartMode, "S=false must not create smart windows")
 		require.Empty(t, stat.smartTTFTWindow)
@@ -1469,8 +1525,8 @@ func TestOpenAIGatewayService_SmartHealthSnapshotReadOnly(t *testing.T) {
 		seedSmartDegradedAccount(t, first, 7601, "error_rate", now)
 		seedSmartDegradedAccount(t, second, 7601, "ttft", now)
 		seedSmartDegradedAccount(t, first, 7602, "error_rate", now)
-		first.loadOrCreate(7601).nextProbeAt.Store(now.Add(15 * time.Minute).UnixNano())
-		first.loadOrCreate(7602).nextProbeAt.Store(now.Add(15 * time.Minute).UnixNano())
+		openAIAccountRuntimeStatForTest(t, first, 7601).nextProbeAt.Store(now.Add(15 * time.Minute).UnixNano())
+		openAIAccountRuntimeStatForTest(t, first, 7602).nextProbeAt.Store(now.Add(15 * time.Minute).UnixNano())
 		service.openaiAccountStats = first
 		service.openaiAccountStatsPublished.Store(first)
 		initial := service.SmartHealthSnapshot(ctx, accounts)
@@ -1588,7 +1644,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthProbeDecisio
 			require.Zero(t, selection.Account.smartHealthProbeID)
 			require.Zero(t, svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthProbeTotal)
 			if scheduler != nil {
-				stat := scheduler.stats.loadOrCreate(77031)
+				stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, 77031)
 				stat.mu.Lock()
 				require.False(t, stat.smartMode)
 				require.Empty(t, stat.smartErrorWindow)
@@ -4430,7 +4486,7 @@ func TestOpenAIAccountRuntimeStats_ColdStartMaturityAndStaleness(t *testing.T) {
 	stats.reportAt(5001, true, &ttft, now, thresholds, false)
 	require.Equal(t, openAIAccountHealthHealthy, stats.health(5001, now, thresholds).level)
 
-	stat := stats.loadOrCreate(5001)
+	stat := openAIAccountRuntimeStatForTest(t, stats, 5001)
 	stat.lastObservedAt.Store(now.Add(-openAIAccountHealthStaleAfter).UnixNano())
 	require.Equal(t, openAIAccountHealthHealthy, stats.health(5001, now, thresholds).level)
 	stat.lastObservedAt.Store(now.Add(-openAIAccountHealthStaleAfter - time.Nanosecond).UnixNano())
@@ -4459,7 +4515,7 @@ func TestOpenAIAccountRuntimeStats_ConcurrentReportAndProbeLease(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		stats.reportAt(5002, false, nil, now, thresholds, false)
 	}
-	stat := stats.loadOrCreate(5002)
+	stat := openAIAccountRuntimeStatForTest(t, stats, 5002)
 	stat.nextProbeAt.Store(now.Add(-time.Second).UnixNano())
 
 	const workers = 16
@@ -4680,7 +4736,7 @@ func TestOpenAIGatewayService_SchedulerModeAfterSettingsSave(t *testing.T) {
 				scheduler, ok := svc.getOpenAIAccountScheduler(ctx).(*defaultOpenAIAccountScheduler)
 				require.True(t, ok)
 				seedSmartDegradedAccount(t, scheduler.stats, 81211, "error_rate", time.Now().Add(-time.Minute))
-				scheduler.stats.loadOrCreate(81211).nextProbeAt.Store(time.Now().Add(time.Hour).UnixNano())
+				openAIAccountRuntimeStatForTest(t, scheduler.stats, 81211).nextProbeAt.Store(time.Now().Add(time.Hour).UnixNano())
 			}
 
 			selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
@@ -4837,7 +4893,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthSingleHalfOp
 	require.Equal(t, int64(1), svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthProbeTotal)
 	probeID := selection.Account.smartHealthProbeID
 	require.False(t, scheduler.stats.tryAcquireProbeLeaseWithID(5501, time.Now(), probeID+1), "an account has only one concurrent half-open lease")
-	stat := scheduler.stats.loadOrCreate(5501)
+	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, 5501)
 	stat.mu.Lock()
 	require.Equal(t, probeID, stat.probeID)
 	require.True(t, stat.probeActive.Load())
@@ -5722,4 +5778,302 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SubscriptionPriorityWai
 	require.NotNil(t, selection.WaitPlan)
 	require.Equal(t, int64(38011), selection.WaitPlan.AccountID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+}
+
+func TestOpenAIAccountRuntimeStats_RetentionReclaimsIdleNonDegraded(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	accountID := int64(91001)
+	now := time.Now()
+	lastActivity := now.Add(-openAIAccountRuntimeStatsReclaimIdle)
+	addIdleOpenAIAccountRuntimeStat(t, stats, accountID, lastActivity)
+
+	stats.smartHealthSnapshots([]int64{accountID}, now)
+	stat, release, ok := stats.acquire(accountID, false, false)
+	require.True(t, ok)
+	require.Equal(t, lastActivity.UnixNano(), stat.lastActivityAt.Load(), "admin snapshots must not refresh scheduling activity")
+	release()
+
+	repo := &openAIAccountRuntimeStatsRetentionRepo{
+		getByIDs: func(context.Context, []int64) ([]*Account, error) {
+			return []*Account{{ID: accountID}}, nil
+		},
+	}
+	require.Equal(t, 1, stats.reclaimIdleBatch(context.Background(), repo, now))
+	require.Zero(t, stats.size())
+	require.Equal(t, 0, newDefaultOpenAIAccountScheduler(nil, stats).SnapshotMetrics().RuntimeStatsAccountCount)
+
+	stat, release, ok = stats.acquire(accountID, true, true)
+	require.True(t, ok)
+	require.Zero(t, stat.sampleCount.Load(), "a reclaimed entry must reappear with unknown history")
+	stat.mu.Lock()
+	require.False(t, stat.smartMode)
+	require.Equal(t, openAIAccountHealthUnknown, stat.smartLevel)
+	stat.mu.Unlock()
+	release()
+	require.Equal(t, 1, stats.size())
+}
+
+func TestOpenAIAccountRuntimeStats_ReclaimDeletedIDsInBoundedBatches(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Now()
+	const accountCount = 205
+	for index := 0; index < accountCount; index++ {
+		addIdleOpenAIAccountRuntimeStat(t, stats, int64(92000+index), now.Add(-openAIAccountRuntimeStatsReclaimIdle))
+	}
+	repo := &openAIAccountRuntimeStatsRetentionRepo{}
+
+	for _, wantSize := range []int{105, 5, 0} {
+		require.Equal(t, min(openAIAccountRuntimeStatsReclaimBatchSize, stats.size()), stats.reclaimIdleBatch(context.Background(), repo, now))
+		require.Equal(t, wantSize, stats.size())
+		require.Equal(t, wantSize, newDefaultOpenAIAccountScheduler(nil, stats).SnapshotMetrics().RuntimeStatsAccountCount)
+	}
+
+	calls := repo.callsSnapshot()
+	require.Len(t, calls, 3)
+	require.Equal(t, []int{100, 100, 5}, []int{len(calls[0]), len(calls[1]), len(calls[2])})
+	for _, ids := range calls {
+		require.LessOrEqual(t, len(ids), openAIAccountRuntimeStatsReclaimBatchSize)
+	}
+	stat, release, ok := stats.acquire(92000, true, true)
+	require.True(t, ok)
+	require.Zero(t, stat.sampleCount.Load(), "a deleted account ID must not inherit its old runtime state")
+	release()
+	require.Equal(t, 1, stats.size())
+}
+
+func TestOpenAIAccountRuntimeStats_ReclaimPreservesDegradedAndProbeState(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Now()
+	staleAt := now.Add(-openAIAccountRuntimeStatsReclaimIdle)
+	const smartID, legacyID, leaseID, batchID int64 = 93001, 93002, 93003, 93004
+	var stat *openAIAccountRuntimeStat
+
+	seedSmartDegradedAccount(t, stats, smartID, "error_rate", now)
+	addIdleOpenAIAccountRuntimeStat(t, stats, smartID, staleAt)
+	smartStat, release, ok := stats.acquire(smartID, false, false)
+	require.True(t, ok)
+	smartStat.mu.Lock()
+	backoffBefore := smartStat.backoffIndex
+	smartStat.mu.Unlock()
+	release()
+
+	legacyStat, release, ok := stats.acquire(legacyID, true, true)
+	require.True(t, ok)
+	legacyStat.mu.Lock()
+	legacyStat.sampleCount.Store(openAIAccountLegacyHealthMinSamples)
+	legacyStat.healthLevel.Store(uint32(openAIAccountHealthDegraded))
+	legacyStat.healthReason.Store(openAIAccountHealthReasonErrorRate)
+	legacyStat.nextProbeAt.Store(now.Add(time.Hour).UnixNano())
+	legacyStat.mu.Unlock()
+	legacyStat.lastActivityAt.Store(staleAt.UnixNano())
+	release()
+
+	seedSmartDegradedAccount(t, stats, leaseID, "ttft", now)
+	require.True(t, stats.tryAcquireProbeLeaseWithID(leaseID, now, 93003))
+	stats.markProbeSlotAcquired(leaseID, 93003, now)
+	addIdleOpenAIAccountRuntimeStat(t, stats, leaseID, staleAt)
+
+	batchStat, release, ok := stats.acquire(batchID, true, true)
+	require.True(t, ok)
+	batchStat.mu.Lock()
+	batchStat.probeBatchStarted = now.Add(-time.Minute)
+	batchStat.probeBatchSamples = []openAISmartProbeSample{{success: true, observed: now}}
+	batchStat.mu.Unlock()
+	batchStat.lastActivityAt.Store(staleAt.UnixNano())
+	release()
+
+	repo := &openAIAccountRuntimeStatsRetentionRepo{
+		getByIDs: func(context.Context, []int64) ([]*Account, error) {
+			return []*Account{{ID: smartID}, {ID: legacyID}}, nil
+		},
+	}
+	require.Zero(t, stats.reclaimIdleBatch(context.Background(), repo, now))
+	require.Equal(t, 4, stats.size())
+
+	stat, release, ok = stats.acquire(smartID, false, false)
+	require.True(t, ok)
+	stat.mu.Lock()
+	require.Equal(t, openAIAccountHealthDegraded, stat.smartLevel)
+	require.Equal(t, backoffBefore, stat.backoffIndex)
+	stat.mu.Unlock()
+	release()
+	stat, release, ok = stats.acquire(legacyID, false, false)
+	require.True(t, ok)
+	require.Equal(t, uint32(openAIAccountHealthDegraded), stat.healthLevel.Load())
+	release()
+	stat, release, ok = stats.acquire(leaseID, false, false)
+	require.True(t, ok)
+	stat.mu.Lock()
+	require.Equal(t, uint64(93003), stat.probeID)
+	require.False(t, stat.probeBatchStarted.IsZero())
+	stat.mu.Unlock()
+	release()
+	stat, release, ok = stats.acquire(batchID, false, false)
+	require.True(t, ok)
+	stat.mu.Lock()
+	require.Len(t, stat.probeBatchSamples, 1)
+	stat.mu.Unlock()
+	release()
+}
+
+func TestOpenAIAccountRuntimeStats_ReclaimConcurrentReportCannotBecomeOrphaned(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	accountID := int64(94001)
+	now := time.Now()
+	addIdleOpenAIAccountRuntimeStat(t, stats, accountID, now.Add(-openAIAccountRuntimeStatsReclaimIdle))
+	queryStarted := make(chan struct{})
+	continueQuery := make(chan struct{})
+	var unblock sync.Once
+	t.Cleanup(func() { unblock.Do(func() { close(continueQuery) }) })
+	repo := &openAIAccountRuntimeStatsRetentionRepo{
+		getByIDs: func(ctx context.Context, _ []int64) ([]*Account, error) {
+			close(queryStarted)
+			select {
+			case <-continueQuery:
+				return []*Account{{ID: accountID}}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}
+	type reclaimResult struct {
+		deleted int
+	}
+	result := make(chan reclaimResult, 1)
+	go func() {
+		result <- reclaimResult{deleted: stats.reclaimIdleBatch(context.Background(), repo, now)}
+	}()
+	select {
+	case <-queryStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reclaimer did not reach repository lookup")
+	}
+
+	stats.reportAtForRequest(accountID, true, nil, now, openAIStickyEscapeConfig{}, false, false, 0, true)
+	unblock.Do(func() { close(continueQuery) })
+	select {
+	case got := <-result:
+		require.Zero(t, got.deleted)
+	case <-time.After(3 * time.Second):
+		t.Fatal("reclaimer did not finish after repository lookup")
+	}
+	require.Equal(t, 1, stats.size())
+	require.Equal(t, int64(1), openAIAccountRuntimeStatSampleCount(t, stats, accountID))
+}
+
+func TestOpenAIAccountRuntimeStats_ReclaimRepositoryErrorRetriesSameBatch(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	accountID := int64(95001)
+	now := time.Now()
+	addIdleOpenAIAccountRuntimeStat(t, stats, accountID, now.Add(-openAIAccountRuntimeStatsReclaimIdle))
+	var callCount int
+	repo := &openAIAccountRuntimeStatsRetentionRepo{
+		getByIDs: func(ctx context.Context, _ []int64) ([]*Account, error) {
+			callCount++
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "repository lookup must have its own timeout")
+			require.LessOrEqual(t, time.Until(deadline), openAIAccountRuntimeStatsReclaimTimeout)
+			if callCount == 1 {
+				return nil, errors.New("temporary repository failure")
+			}
+			return nil, nil
+		},
+	}
+	require.Zero(t, stats.reclaimIdleBatch(context.Background(), repo, now))
+	require.Equal(t, 1, stats.size(), "a repository error must retain the complete batch")
+	require.Equal(t, 1, stats.reclaimIdleBatch(context.Background(), repo, now))
+	require.Zero(t, stats.size())
+	requestedBatches := repo.callsSnapshot()
+	require.Len(t, requestedBatches, 2)
+	require.Equal(t, requestedBatches[0], requestedBatches[1], "a failed batch must be retried before advancing the cursor")
+}
+
+func TestOpenAIAccountRuntimeStats_RetentionMaintenanceLifecycle(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	stats.startReclamation(ctx, nil)
+	stats.maintenanceMu.Lock()
+	require.False(t, stats.maintenanceStarted, "maintenance must not start without a repository")
+	stats.maintenanceMu.Unlock()
+
+	stats.startReclamation(ctx, &openAIAccountRuntimeStatsRetentionRepo{})
+	stats.maintenanceMu.Lock()
+	done := stats.maintenanceDone
+	require.True(t, stats.maintenanceStarted)
+	stats.maintenanceMu.Unlock()
+	require.NotNil(t, done)
+	stats.startReclamation(ctx, &openAIAccountRuntimeStatsRetentionRepo{})
+	stats.maintenanceMu.Lock()
+	require.Equal(t, done, stats.maintenanceDone, "only one maintenance loop may be started")
+	stats.maintenanceMu.Unlock()
+
+	stats.stopReclamation()
+	select {
+	case <-done:
+	default:
+		t.Fatal("maintenance loop did not stop")
+	}
+	stats.startReclamation(ctx, &openAIAccountRuntimeStatsRetentionRepo{})
+	stats.maintenanceMu.Lock()
+	require.True(t, stats.maintenanceStopped)
+	require.Equal(t, done, stats.maintenanceDone, "a stopped maintenance loop must not restart")
+	stats.maintenanceMu.Unlock()
+}
+
+func TestOpenAIAccountRuntimeStats_ReclaimWithSchedulerModesDisabled(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+	settingsRepo := &openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
+		SettingKeySmartSchedulingEnabled:  "true",
+		openAIAdvancedSchedulerSettingKey: "false",
+	}}
+	repo := &openAIAccountRuntimeStatsRetentionRepo{}
+	const normalID, degradedID int64 = 96001, 96002
+	repo.getByIDs = func(_ context.Context, ids []int64) ([]*Account, error) {
+		accounts := make([]*Account, 0, len(ids))
+		for _, id := range ids {
+			if id == normalID || id == degradedID {
+				accounts = append(accounts, &Account{ID: id})
+			}
+		}
+		return accounts, nil
+	}
+	maintenanceCtx, cancel := context.WithCancel(context.Background())
+	svc := &OpenAIGatewayService{
+		accountRepo:                         repo,
+		rateLimitService:                    &RateLimitService{settingService: NewSettingService(settingsRepo, &config.Config{})},
+		openaiAccountStatsMaintenanceCtx:    maintenanceCtx,
+		openaiAccountStatsMaintenanceCancel: cancel,
+	}
+	t.Cleanup(svc.CloseOpenAIWSPool)
+
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	stats := scheduler.stats
+	now := time.Now()
+	staleAt := now.Add(-openAIAccountRuntimeStatsReclaimIdle)
+	addIdleOpenAIAccountRuntimeStat(t, stats, normalID, staleAt)
+	degradedStat, release, ok := stats.acquire(degradedID, true, true)
+	require.True(t, ok)
+	degradedStat.sampleCount.Store(openAIAccountLegacyHealthMinSamples)
+	degradedStat.healthLevel.Store(uint32(openAIAccountHealthDegraded))
+	degradedStat.healthReason.Store(openAIAccountHealthReasonErrorRate)
+	degradedStat.nextProbeAt.Store(now.Add(time.Hour).UnixNano())
+	degradedStat.lastActivityAt.Store(staleAt.UnixNano())
+	release()
+	require.Equal(t, 2, scheduler.SnapshotMetrics().RuntimeStatsAccountCount)
+
+	settingsRepo.values[SettingKeySmartSchedulingEnabled] = "false"
+	settingsRepo.values[openAIAdvancedSchedulerSettingKey] = "false"
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	require.Nil(t, svc.getOpenAIAccountScheduler(context.Background()), "both disabled switches must preserve the legacy gateway path")
+	require.Nil(t, svc.SmartHealthSnapshot(context.Background(), []*Account{{ID: degradedID}}))
+	require.Equal(t, 1, stats.reclaimIdleBatch(context.Background(), repo, now))
+	require.Equal(t, 1, scheduler.SnapshotMetrics().RuntimeStatsAccountCount)
+	require.Equal(t, int64(openAIAccountLegacyHealthMinSamples), openAIAccountRuntimeStatSampleCount(t, stats, degradedID))
+	remaining, release, ok := stats.acquire(degradedID, false, false)
+	require.True(t, ok)
+	require.Equal(t, uint32(openAIAccountHealthDegraded), remaining.healthLevel.Load(), "closing both modes must not erase legacy degraded state")
+	release()
 }

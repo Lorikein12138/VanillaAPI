@@ -470,23 +470,25 @@ type OpenAIGatewayService struct {
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
 
-	openaiWSPoolOnce               sync.Once
-	openaiWSStateStoreOnce         sync.Once
-	openaiSchedulerOnce            sync.Once
-	openaiProxyStreamCircuitOnce   sync.Once
-	openaiWSPassthroughDialerOnce  sync.Once
-	openaiModelTransientOnce       sync.Once
-	agentIdentityTaskMu            sync.Mutex
-	openaiWSPool                   *openAIWSConnPool
-	openaiWSStateStore             OpenAIWSStateStore
-	openaiScheduler                OpenAIAccountScheduler
-	openaiWSPassthroughDialer      openAIWSClientDialer
-	openaiWSSessionPreemptions     openAIWSSessionPreemptRegistry
-	openaiAccountStats             *openAIAccountRuntimeStats
-	openaiAccountStatsPublished    atomic.Pointer[openAIAccountRuntimeStats]
-	openaiModelTransient           *openAIAccountModelTransientState
-	openaiProxyStreamCircuit       *openAIProxyStreamCircuit
-	openaiProxyStreamFailOpenLogAt atomic.Int64
+	openaiWSPoolOnce                    sync.Once
+	openaiWSStateStoreOnce              sync.Once
+	openaiSchedulerOnce                 sync.Once
+	openaiProxyStreamCircuitOnce        sync.Once
+	openaiWSPassthroughDialerOnce       sync.Once
+	openaiModelTransientOnce            sync.Once
+	agentIdentityTaskMu                 sync.Mutex
+	openaiWSPool                        *openAIWSConnPool
+	openaiAccountStatsMaintenanceCtx    context.Context
+	openaiAccountStatsMaintenanceCancel context.CancelFunc
+	openaiWSStateStore                  OpenAIWSStateStore
+	openaiScheduler                     OpenAIAccountScheduler
+	openaiWSPassthroughDialer           openAIWSClientDialer
+	openaiWSSessionPreemptions          openAIWSSessionPreemptRegistry
+	openaiAccountStats                  *openAIAccountRuntimeStats
+	openaiAccountStatsPublished         atomic.Pointer[openAIAccountRuntimeStats]
+	openaiModelTransient                *openAIAccountModelTransientState
+	openaiProxyStreamCircuit            *openAIProxyStreamCircuit
+	openaiProxyStreamFailOpenLogAt      atomic.Int64
 
 	openaiWSFallbackUntil               sync.Map // key: int64(accountID), value: time.Time
 	openaiAccountRuntimeBlockUntil      sync.Map // key: int64(accountID), value: time.Time
@@ -577,6 +579,9 @@ func NewOpenAIGatewayService(
 		responseHeaderFilter:  compileResponseHeaderFilter(cfg),
 		codexSnapshotThrottle: newAccountWriteThrottle(openAICodexSnapshotPersistMinInterval),
 		openaiModelTransient:  newOpenAIAccountModelTransientState(openAIModelTransientDefaultMax),
+	}
+	if accountRepo != nil {
+		svc.openaiAccountStatsMaintenanceCtx, svc.openaiAccountStatsMaintenanceCancel = context.WithCancel(context.Background())
 	}
 	if rateLimitService != nil {
 		rateLimitService.SetAccountRuntimeBlocker(svc)
@@ -697,7 +702,16 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 // CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池的后台 worker 和空闲连接。
 // 应在应用优雅关闭时调用。
 func (s *OpenAIGatewayService) CloseOpenAIWSPool() {
-	if s != nil && s.openaiWSPool != nil {
+	if s == nil {
+		return
+	}
+	if s.openaiAccountStatsMaintenanceCancel != nil {
+		s.openaiAccountStatsMaintenanceCancel()
+	}
+	if stats := s.openaiAccountStatsPublished.Load(); stats != nil {
+		stats.stopReclamation()
+	}
+	if s.openaiWSPool != nil {
 		s.openaiWSPool.Close()
 	}
 }
