@@ -3,9 +3,12 @@ package service
 import (
 	"container/heap"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log/slog"
 	"math"
 	"sort"
@@ -18,6 +21,22 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"golang.org/x/sync/singleflight"
 )
+
+var (
+	openAIProbeProcessTraceNamespace, openAIProbeProcessTraceCorrelationAvailable = openAIProbeTraceNamespaceFrom(rand.Reader)
+	openAIProbeTraceInstanceSequence                                              atomic.Uint64
+)
+
+func openAIProbeTraceNamespaceFrom(source io.Reader) (string, bool) {
+	var namespace [16]byte
+	if source == nil {
+		return "", false
+	}
+	if _, err := io.ReadFull(source, namespace[:]); err != nil {
+		return "", false
+	}
+	return hex.EncodeToString(namespace[:]), true
+}
 
 const (
 	openAIAccountScheduleLayerPreviousResponse = "previous_response_id"
@@ -329,15 +348,18 @@ func (m *openAIAccountSchedulerMetrics) recordSmartHealthAllDegraded() {
 }
 
 type openAIAccountRuntimeStats struct {
-	accounts           sync.Map
-	accountCount       atomic.Int64
-	probeSequence      atomic.Uint64
-	reclaimCursor      atomic.Int64
-	maintenanceMu      sync.Mutex
-	maintenanceStarted bool
-	maintenanceStopped bool
-	maintenanceCancel  context.CancelFunc
-	maintenanceDone    chan struct{}
+	accounts                     sync.Map
+	accountCount                 atomic.Int64
+	probeSequence                atomic.Uint64
+	probeTraceNamespace          string
+	probeTraceNamespaceAvailable bool
+	probeTraceInstanceID         uint64
+	reclaimCursor                atomic.Int64
+	maintenanceMu                sync.Mutex
+	maintenanceStarted           bool
+	maintenanceStopped           bool
+	maintenanceCancel            context.CancelFunc
+	maintenanceDone              chan struct{}
 }
 
 type openAIAccountHealthLevel uint32
@@ -355,31 +377,152 @@ const (
 )
 
 type openAIAccountRuntimeStat struct {
-	mu                sync.Mutex
-	lifecycleMu       sync.Mutex
-	activeRefs        int64
-	retiring          bool
-	lastActivityAt    atomic.Int64
-	errorRateEWMABits atomic.Uint64
-	ttftEWMABits      atomic.Uint64
-	sampleCount       atomic.Int64
-	lastObservedAt    atomic.Int64
-	healthLevel       atomic.Uint32
-	healthReason      atomic.Uint32
-	nextProbeAt       atomic.Int64
-	probeLeaseUntil   atomic.Int64
-	probeActive       atomic.Bool
-	smartMode         bool
-	smartLevel        openAIAccountHealthLevel
-	smartReason       uint32
-	smartErrorWindow  []openAISmartTimedSample
-	smartTTFTWindow   []openAISmartTimedSample
-	smartLastObserved time.Time
-	probeID           uint64
-	probeStartedAt    time.Time
-	probeBatchStarted time.Time
-	probeBatchSamples []openAISmartProbeSample
-	backoffIndex      int
+	mu                    sync.Mutex
+	probeTraceQueueMu     sync.Mutex
+	probeTraceQueue       []openAIAccountProbeTraceEvent
+	probeTraceDraining    bool
+	lifecycleMu           sync.Mutex
+	activeRefs            int64
+	retiring              bool
+	lastActivityAt        atomic.Int64
+	errorRateEWMABits     atomic.Uint64
+	ttftEWMABits          atomic.Uint64
+	sampleCount           atomic.Int64
+	lastObservedAt        atomic.Int64
+	healthLevel           atomic.Uint32
+	healthReason          atomic.Uint32
+	nextProbeAt           atomic.Int64
+	probeLeaseUntil       atomic.Int64
+	probeActive           atomic.Bool
+	smartMode             bool
+	smartLevel            openAIAccountHealthLevel
+	smartReason           uint32
+	smartErrorWindow      []openAISmartTimedSample
+	smartTTFTWindow       []openAISmartTimedSample
+	smartLastObserved     time.Time
+	probeID               uint64
+	probeStartedAt        time.Time
+	probeTraceID          string
+	probeTraceStarted     bool
+	probeTraceCorrelation string
+	probeTraceGroupID     int64
+	probeTraceHasGroupID  bool
+	probeBatchOrdinal     int
+	probeBatchStarted     time.Time
+	probeBatchSamples     []openAISmartProbeSample
+	backoffIndex          int
+}
+
+type openAIAccountProbeTraceEvent struct {
+	accountID        int64
+	groupID          int64
+	hasGroupID       bool
+	traceID          string
+	correlation      string
+	phase            string
+	outcome          string
+	reason           string
+	batchOrdinal     int
+	batchSampleCount int
+	backoffStep      int
+	nextProbeAt      int64
+	healthLevel      string
+}
+
+func openAIProbeTraceEventLocked(
+	stat *openAIAccountRuntimeStat,
+	accountID int64,
+	phase string,
+	outcome string,
+	reason string,
+) openAIAccountProbeTraceEvent {
+	healthLevel := openAIAccountHealthLevel(stat.healthLevel.Load())
+	if stat.smartMode {
+		healthLevel = stat.smartLevel
+	}
+	event := openAIAccountProbeTraceEvent{
+		accountID:        accountID,
+		groupID:          stat.probeTraceGroupID,
+		hasGroupID:       stat.probeTraceHasGroupID,
+		traceID:          stat.probeTraceID,
+		correlation:      stat.probeTraceCorrelation,
+		phase:            phase,
+		outcome:          outcome,
+		reason:           reason,
+		batchOrdinal:     stat.probeBatchOrdinal,
+		batchSampleCount: len(stat.probeBatchSamples),
+		backoffStep:      stat.backoffIndex + 1,
+		nextProbeAt:      stat.nextProbeAt.Load(),
+		healthLevel:      openAIAccountHealthLevelName(healthLevel),
+	}
+	return event
+}
+
+func logOpenAIAccountProbeTrace(event openAIAccountProbeTraceEvent) {
+	attrs := []any{
+		"account_id", event.accountID,
+		"phase", event.phase,
+		"correlation", event.correlation,
+	}
+	if event.hasGroupID {
+		attrs = append(attrs, "group_id", event.groupID)
+	}
+	if event.traceID != "" {
+		attrs = append(attrs, "probe_trace_id", event.traceID)
+	}
+	if event.outcome != "" {
+		attrs = append(attrs, "outcome", event.outcome)
+	}
+	if event.reason != "" {
+		attrs = append(attrs, "reason", event.reason)
+	}
+	if event.batchOrdinal > 0 {
+		attrs = append(attrs, "batch_ordinal", event.batchOrdinal)
+	}
+	attrs = append(attrs,
+		"batch_sample_count", event.batchSampleCount,
+		"backoff_step", event.backoffStep,
+		"health_level", event.healthLevel,
+	)
+	if event.nextProbeAt > 0 {
+		attrs = append(attrs, "next_probe_at", time.Unix(0, event.nextProbeAt).UTC())
+	}
+	slog.Info("openai_account_health_probe", attrs...)
+}
+
+// enqueueOpenAIAccountProbeTraceLocked appends an immutable event while stat.mu
+// is held and atomically elects one synchronous drainer for this entry.
+func enqueueOpenAIAccountProbeTraceLocked(
+	stat *openAIAccountRuntimeStat,
+	event openAIAccountProbeTraceEvent,
+) bool {
+	stat.probeTraceQueueMu.Lock()
+	stat.probeTraceQueue = append(stat.probeTraceQueue, event)
+	shouldDrain := !stat.probeTraceDraining
+	if shouldDrain {
+		stat.probeTraceDraining = true
+	}
+	stat.probeTraceQueueMu.Unlock()
+	return shouldDrain
+}
+
+// drainOpenAIAccountProbeTraceQueue writes queued events in state-transition
+// order without holding any per-entry lock while invoking the log handler.
+func drainOpenAIAccountProbeTraceQueue(stat *openAIAccountRuntimeStat) {
+	for {
+		stat.probeTraceQueueMu.Lock()
+		if len(stat.probeTraceQueue) == 0 {
+			stat.probeTraceDraining = false
+			stat.probeTraceQueueMu.Unlock()
+			return
+		}
+		event := stat.probeTraceQueue[0]
+		stat.probeTraceQueue[0] = openAIAccountProbeTraceEvent{}
+		stat.probeTraceQueue = stat.probeTraceQueue[1:]
+		stat.probeTraceQueueMu.Unlock()
+
+		logOpenAIAccountProbeTrace(event)
+	}
 }
 
 type openAISmartTimedSample struct {
@@ -411,7 +554,11 @@ type openAIAccountHealthAssessment struct {
 }
 
 func newOpenAIAccountRuntimeStats() *openAIAccountRuntimeStats {
-	return &openAIAccountRuntimeStats{}
+	return &openAIAccountRuntimeStats{
+		probeTraceNamespace:          openAIProbeProcessTraceNamespace,
+		probeTraceNamespaceAvailable: openAIProbeProcessTraceCorrelationAvailable,
+		probeTraceInstanceID:         openAIProbeTraceInstanceSequence.Add(1),
+	}
 }
 
 // acquire pins a stat while a caller reads or mutates it so reclamation cannot
@@ -803,7 +950,11 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 	if !ok {
 		return
 	}
-	defer release()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 
 	errorSample := 1.0
 	if success {
@@ -840,7 +991,18 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 			s.appendSmartHealthObservationLocked(stat, success, firstTokenMs, now)
 		}
 		matchedProbe := probeID != 0 && stat.probeID == probeID
+		traceStarted := matchedProbe && stat.probeTraceStarted
+		batchSamplesBefore := len(stat.probeBatchSamples)
+		tracePhase := "finish"
+		traceOutcome := ""
+		traceReason := ""
 		if matchedProbe {
+			if traceStarted {
+				traceOutcome, traceReason = openAIProbeTraceOutcome(stat, success, firstTokenMs, now, attributable)
+				if !attributable {
+					tracePhase = "cancel"
+				}
+			}
 			stat.probeID = 0
 			stat.probeLeaseUntil.Store(0)
 			stat.probeActive.Store(false)
@@ -856,7 +1018,22 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 		s.recomputeSmartHealthLocked(stat, now, oldLevel)
 		newLevel := stat.smartLevel
 		newReason := stat.smartReason
+		shouldDrainProbeTrace := false
+		if traceStarted {
+			event := openAIProbeTraceEventLocked(stat, accountID, tracePhase, traceOutcome, traceReason)
+			event.batchSampleCount = batchSamplesBefore
+			if traceOutcome == "qualified" || traceOutcome == "unqualified" {
+				event.batchSampleCount++
+			}
+			shouldDrainProbeTrace = enqueueOpenAIAccountProbeTraceLocked(stat, event)
+			clearOpenAIProbeTraceLocked(stat)
+		}
 		stat.mu.Unlock()
+		release()
+		release = nil
+		if shouldDrainProbeTrace {
+			drainOpenAIAccountProbeTraceQueue(stat)
+		}
 		if logHealth && oldLevel != openAIAccountHealthDegraded && newLevel == openAIAccountHealthDegraded {
 			errorRate, ttft, hasTTFT := s.smartHealthWindowValues(accountID, now)
 			if !hasTTFT {
@@ -894,6 +1071,8 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 		}
 	}
 	stat.mu.Unlock()
+	release()
+	release = nil
 	if logHealth && oldLevel != openAIAccountHealthDegraded && newLevel == openAIAccountHealthDegraded {
 		slog.Info("openai_account_health_changed",
 			"account_id", accountID,
@@ -905,6 +1084,41 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 			"sample_count", sampleCount,
 		)
 	}
+}
+
+func openAIProbeTraceOutcome(
+	stat *openAIAccountRuntimeStat,
+	success bool,
+	firstTokenMs *int,
+	now time.Time,
+	attributable bool,
+) (string, string) {
+	if !attributable {
+		return "inconclusive", "not_attributable"
+	}
+	if !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+		return "inconclusive", "batch_timeout"
+	}
+	if !success {
+		return "unqualified", "account_error"
+	}
+	if stat.smartReason == openAIAccountHealthReasonTTFT &&
+		(firstTokenMs == nil || *firstTokenMs <= 0) {
+		return "inconclusive", "ttft"
+	}
+	if reason := openAIAccountHealthReasonName(stat.smartReason); reason != "" {
+		return "qualified", reason
+	}
+	return "qualified", "none"
+}
+
+func clearOpenAIProbeTraceLocked(stat *openAIAccountRuntimeStat) {
+	stat.probeTraceID = ""
+	stat.probeTraceStarted = false
+	stat.probeTraceCorrelation = ""
+	stat.probeTraceGroupID = 0
+	stat.probeTraceHasGroupID = false
+	stat.probeBatchOrdinal = 0
 }
 
 func (s *openAIAccountRuntimeStats) appendSmartHealthObservationLocked(stat *openAIAccountRuntimeStat, success bool, firstTokenMs *int, now time.Time) {
@@ -1213,20 +1427,53 @@ func (s *openAIAccountRuntimeStats) tryAcquireProbeLeaseWithID(accountID int64, 
 	return true
 }
 
-func (s *openAIAccountRuntimeStats) markProbeSlotAcquired(accountID int64, probeID uint64, now time.Time) {
-	if probeID == 0 {
+func (s *openAIAccountRuntimeStats) markProbeSlotAcquired(
+	accountID int64,
+	probeID uint64,
+	now time.Time,
+	groupIDs ...*int64,
+) {
+	if s == nil || probeID == 0 {
 		return
 	}
 	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return
 	}
-	defer release()
+	shouldDrainProbeTrace := false
 	stat.mu.Lock()
 	if stat.probeID == probeID && stat.probeBatchStarted.IsZero() {
 		stat.probeBatchStarted = now
 	}
+	if stat.probeID == probeID && !stat.probeTraceStarted {
+		stat.probeTraceID = ""
+		stat.probeTraceCorrelation = "unavailable"
+		if s.probeTraceNamespaceAvailable {
+			stat.probeTraceID = fmt.Sprintf("%s-%d-%d", s.probeTraceNamespace, s.probeTraceInstanceID, probeID)
+			stat.probeTraceCorrelation = "available"
+		}
+		stat.probeTraceStarted = true
+		stat.probeBatchOrdinal = len(stat.probeBatchSamples) + 1
+		stat.probeTraceGroupID = 0
+		stat.probeTraceHasGroupID = false
+		if len(groupIDs) > 0 && groupIDs[0] != nil {
+			stat.probeTraceGroupID = *groupIDs[0]
+			stat.probeTraceHasGroupID = true
+		}
+		traceEvent := openAIProbeTraceEventLocked(
+			stat,
+			accountID,
+			"start",
+			"",
+			openAIAccountHealthReasonName(stat.smartReason),
+		)
+		shouldDrainProbeTrace = enqueueOpenAIAccountProbeTraceLocked(stat, traceEvent)
+	}
 	stat.mu.Unlock()
+	release()
+	if shouldDrainProbeTrace {
+		drainOpenAIAccountProbeTraceQueue(stat)
+	}
 }
 
 func (s *openAIAccountRuntimeStats) probeEligible(accountID int64, now time.Time) bool {
@@ -1285,21 +1532,41 @@ func (s *openAIAccountRuntimeStats) cancelProbeLease(accountID int64, now time.T
 }
 
 func (s *openAIAccountRuntimeStats) cancelProbeLeaseForID(accountID int64, probeID uint64, now time.Time) {
+	if probeID == 0 {
+		return
+	}
 	stat, release, ok := s.acquire(accountID, false, true)
 	if !ok {
 		return
 	}
-	defer release()
+	shouldDrainProbeTrace := false
 	stat.mu.Lock()
-	defer stat.mu.Unlock()
-	if probeID != 0 && stat.probeID == probeID {
+	if stat.probeID == probeID {
+		batchSamplesBefore := len(stat.probeBatchSamples)
+		batchTimedOut := stat.smartMode && !stat.probeBatchStarted.IsZero() &&
+			now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout
+		reason := "not_attributable"
+		if batchTimedOut {
+			reason = "batch_timeout"
+		}
 		stat.probeID = 0
 		stat.probeStartedAt = time.Time{}
 		stat.probeActive.Store(false)
 		stat.probeLeaseUntil.Store(0)
-		if stat.smartMode && !stat.probeBatchStarted.IsZero() && now.Sub(stat.probeBatchStarted) > openAIAccountSmartProbeBatchTimeout {
+		if batchTimedOut {
 			s.rescheduleSmartProbeBatchLocked(stat, now, false)
 		}
+		if stat.probeTraceStarted {
+			event := openAIProbeTraceEventLocked(stat, accountID, "cancel", "inconclusive", reason)
+			event.batchSampleCount = batchSamplesBefore
+			shouldDrainProbeTrace = enqueueOpenAIAccountProbeTraceLocked(stat, event)
+		}
+		clearOpenAIProbeTraceLocked(stat)
+	}
+	stat.mu.Unlock()
+	release()
+	if shouldDrainProbeTrace {
+		drainOpenAIAccountProbeTraceQueue(stat)
 	}
 }
 
@@ -1621,7 +1888,7 @@ func (s *defaultOpenAIAccountScheduler) logOpenAIAccountScheduleDecision(
 		selectedAccountID = selection.Account.ID
 	}
 
-	slog.Info("openai_account_schedule_decision",
+	attrs := []any{
 		"group_id", derefGroupID(req.GroupID),
 		"platform", NormalizeOpenAICompatiblePlatform(req.Platform),
 		"model", normalizeOpenAISchedulingModelForLog(req.RequestedModel),
@@ -1637,7 +1904,34 @@ func (s *defaultOpenAIAccountScheduler) logOpenAIAccountScheduleDecision(
 		"health_escape", decision.HealthEscape,
 		"filter_reasons", filterReasons,
 		"reason", reason,
-	)
+	}
+	if selection != nil && selection.Account != nil && selection.Account.smartHealthProbeID != 0 && s.stats != nil {
+		traceID, correlation, found := s.stats.probeTraceFor(selection.Account.ID, selection.Account.smartHealthProbeID)
+		if found {
+			if traceID != "" {
+				attrs = append(attrs, "probe_trace_id", traceID)
+			}
+			attrs = append(attrs, "correlation", correlation)
+		}
+	}
+	slog.Info("openai_account_schedule_decision", attrs...)
+}
+
+func (s *openAIAccountRuntimeStats) probeTraceFor(accountID int64, probeID uint64) (string, string, bool) {
+	if s == nil || probeID == 0 {
+		return "", "", false
+	}
+	stat, release, ok := s.acquire(accountID, false, false)
+	if !ok {
+		return "", "", false
+	}
+	defer release()
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	if stat.probeID != probeID || !stat.probeTraceStarted {
+		return "", "", false
+	}
+	return stat.probeTraceID, stat.probeTraceCorrelation, true
 }
 
 func normalizeOpenAISchedulingModelForLog(model string) string {
@@ -2549,7 +2843,7 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			freshCopy := *fresh
 			freshCopy.smartHealthProbeID = probeID
 			fresh = &freshCopy
-			s.stats.markProbeSlotAcquired(fresh.ID, probeID, time.Now())
+			s.stats.markProbeSlotAcquired(fresh.ID, probeID, time.Now(), req.GroupID)
 			s.metrics.recordSmartHealthProbe()
 		}
 		releaseFunc := result.ReleaseFunc
@@ -2865,18 +3159,29 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 			decision.DegradedCount = len(degraded)
 		}
 		hasPrimary := len(primary) > 0
+		allDegraded := !hasPrimary && len(degraded) > 0
 		if hasPrimary {
 			filtered = primary
-		} else if len(degraded) > 0 {
+		} else if allDegraded {
 			filtered = degraded
 			s.metrics.recordSmartHealthAllDegraded()
-			slog.Info("openai_account_health_all_degraded", "candidate_count", len(degraded))
 		}
-		if probe := s.selectSmartHealthProbeCandidate(req, degraded, loadMap); probe != nil {
+		probe := s.selectSmartHealthProbeCandidate(req, degraded, loadMap)
+		if probe != nil {
 			if hasPrimary {
 				filtered = append(filtered, probe)
 			}
 			req.SmartHealthProbeAccountID = probe.ID
+		}
+		if allDegraded {
+			probeOpportunity := "unavailable"
+			if probe != nil {
+				probeOpportunity = "eligible"
+			}
+			slog.Info("openai_account_health_all_degraded",
+				"candidate_count", len(degraded),
+				"probe_opportunity", probeOpportunity,
+			)
 		}
 	}
 
