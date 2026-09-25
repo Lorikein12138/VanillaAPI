@@ -59,3 +59,42 @@ func TestAPIKeyService_RejectsV15AuthSnapshotWithoutReasoningEffortPolicy(t *tes
 		t.Fatalf("expected no API key from stale snapshot, got %#v", apiKey)
 	}
 }
+
+func TestAPIKeyService_RejectsV24AuthSnapshotWithLegacyManualModelAllowlist(t *testing.T) {
+	groupID := int64(9)
+	svc := &APIKeyService{}
+
+	apiKey, ok, err := svc.applyAuthCacheEntry("k-v24-manual-allowlist", &APIKeyAuthCacheEntry{
+		Snapshot: &APIKeyAuthSnapshot{
+			Version:  24,
+			APIKeyID: 1,
+			UserID:   2,
+			GroupID:  &groupID,
+			Status:   StatusActive,
+			User: APIKeyAuthUserSnapshot{
+				ID:          2,
+				Status:      StatusActive,
+				Role:        RoleUser,
+				Concurrency: 3,
+			},
+			Group: &APIKeyAuthGroupSnapshot{
+				ID:     groupID,
+				Status: StatusActive,
+				ModelAllowlist: GroupModelAllowlist{
+					Enabled: true,
+					Models:  []string{"legacy-manual-model"},
+				},
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("expected stale v24 snapshot to be ignored without error, got %v", err)
+	}
+	if ok {
+		t.Fatal("expected v24 snapshot to be rejected after automatic account unions were introduced")
+	}
+	if apiKey != nil {
+		t.Fatalf("expected no API key from stale snapshot, got %#v", apiKey)
+	}
+}

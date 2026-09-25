@@ -68,6 +68,7 @@ type PlazaGroup struct {
 type ModelPlazaService struct {
 	channelRepo    ChannelRepository
 	groupRepo      GroupRepository
+	accountRepo    AccountRepository
 	pricingService *PricingService
 	billingService *BillingService
 	resolver       *ModelPricingResolver
@@ -77,6 +78,7 @@ type ModelPlazaService struct {
 func NewModelPlazaService(
 	channelRepo ChannelRepository,
 	groupRepo GroupRepository,
+	accountRepo AccountRepository,
 	pricingService *PricingService,
 	billingService *BillingService,
 	resolver *ModelPricingResolver,
@@ -84,6 +86,7 @@ func NewModelPlazaService(
 	return &ModelPlazaService{
 		channelRepo:    channelRepo,
 		groupRepo:      groupRepo,
+		accountRepo:    accountRepo,
 		pricingService: pricingService,
 		billingService: billingService,
 		resolver:       resolver,
@@ -113,6 +116,20 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 	groups, err := s.groupRepo.ListActive(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list active groups: %w", err)
+	}
+	memberRepo, hasMemberRepo := s.accountRepo.(AccountGroupMembersRepository)
+	for i := range groups {
+		if !groups[i].ModelAllowlist.Enabled {
+			continue
+		}
+		if !hasMemberRepo {
+			return nil, fmt.Errorf("list members for model allowlist group %d: account group member repository is unavailable", groups[i].ID)
+		}
+		accounts, listErr := memberRepo.ListAllByGroup(ctx, groups[i].ID)
+		if listErr != nil {
+			return nil, fmt.Errorf("list members for model allowlist group %d: %w", groups[i].ID, listErr)
+		}
+		groups[i].ModelAllowlist = ResolveEffectiveGroupModelAllowlist(groups[i].ModelAllowlist, accounts)
 	}
 
 	sort.SliceStable(channels, func(i, j int) bool {

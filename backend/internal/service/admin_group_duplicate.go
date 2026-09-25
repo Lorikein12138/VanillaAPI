@@ -93,6 +93,13 @@ func cloneGroupMessagesDispatchModelConfig(value OpenAIMessagesDispatchModelConf
 	return cloned
 }
 
+func groupModelAllowlistForDuplicate(value GroupModelAllowlist) GroupModelAllowlist {
+	if value.Enabled {
+		return GroupModelAllowlist{Enabled: true, Models: []string{}}
+	}
+	return GroupModelAllowlist{Models: append([]string(nil), value.Models...)}
+}
+
 func cloneGroupForDuplicate(source *Group, operationID string) *Group {
 	return &Group{
 		Name:                            duplicateGroupName(source.Name, 1),
@@ -150,10 +157,7 @@ func cloneGroupForDuplicate(source *Group, operationID string) *Group {
 		RequirePrivacySet:               source.RequirePrivacySet,
 		DefaultMappedModel:              source.DefaultMappedModel,
 		MessagesDispatchModelConfig:     cloneGroupMessagesDispatchModelConfig(source.MessagesDispatchModelConfig),
-		ModelAllowlist: GroupModelAllowlist{
-			Enabled: source.ModelAllowlist.Enabled,
-			Models:  append([]string(nil), source.ModelAllowlist.Models...),
-		},
+		ModelAllowlist:                  groupModelAllowlistForDuplicate(source.ModelAllowlist),
 		// 固定账号 manifest 配置指向源分组的账号 ID，复制后成员关系可能变化，重置为关闭且列表为空。
 		CodexModelsManifestConfig:   GroupCodexModelsManifestConfig{},
 		RPMLimit:                    source.RPMLimit,
@@ -186,6 +190,9 @@ func (s *adminServiceImpl) RecoverDuplicateGroup(ctx context.Context, id int64, 
 	hydrated, err := s.groupRepo.GetByID(ctx, group.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load recovered duplicate group: %w", err)
+	}
+	if err := s.resolveAdminGroupModelAllowlist(ctx, hydrated); err != nil {
+		return nil, err
 	}
 	return hydrated, nil
 }
@@ -224,6 +231,9 @@ func (s *adminServiceImpl) DuplicateGroup(ctx context.Context, id int64, actorSc
 			hydrated, loadErr := s.groupRepo.GetByID(ctx, duplicate.ID)
 			if loadErr != nil {
 				return nil, fmt.Errorf("load duplicate group: %w", loadErr)
+			}
+			if err := s.resolveAdminGroupModelAllowlist(ctx, hydrated); err != nil {
+				return nil, err
 			}
 			return hydrated, nil
 		} else if !errors.Is(err, ErrGroupExists) {

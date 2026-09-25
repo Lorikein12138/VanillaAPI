@@ -148,6 +148,7 @@ func GroupFromServiceAdmin(g *service.Group) *AdminGroup {
 	}
 	out := &AdminGroup{
 		Group:                       groupFromServiceBase(g),
+		ModelAllowlist:              AdminGroupModelAllowlistFromService(g),
 		ForceOpenAIFast:             g.ForceOpenAIFast,
 		FreeOpenAIFast:              g.FreeOpenAIFast,
 		ProfitControlEnabled:        g.ProfitControlEnabled,
@@ -159,7 +160,6 @@ func GroupFromServiceAdmin(g *service.Group) *AdminGroup {
 		MCPXMLInject:                g.MCPXMLInject,
 		DefaultMappedModel:          g.DefaultMappedModel,
 		MessagesDispatchModelConfig: g.MessagesDispatchModelConfig,
-		ModelAllowlist:              g.ModelAllowlist,
 		CodexModelsManifestConfig:   g.CodexModelsManifestConfig,
 		SupportedModelScopes:        g.SupportedModelScopes,
 		AccountCount:                g.AccountCount,
@@ -175,6 +175,17 @@ func GroupFromServiceAdmin(g *service.Group) *AdminGroup {
 		}
 	}
 	return out
+}
+
+func AdminGroupModelAllowlistFromService(g *service.Group) AdminGroupModelAllowlist {
+	if g == nil {
+		return AdminGroupModelAllowlist{Models: []string{}}
+	}
+	return AdminGroupModelAllowlist{
+		Enabled:            g.ModelAllowlist.Enabled,
+		Models:             append([]string{}, g.ModelAllowlist.Models...),
+		SourceAccountCount: g.ModelAllowlistSourceAccountCount,
+	}
 }
 
 func groupFromServiceBase(g *service.Group) Group {

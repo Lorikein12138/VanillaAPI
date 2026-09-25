@@ -126,6 +126,13 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// AccountGroupMembersRepository lists every undeleted account bound to a group,
+// regardless of account status or scheduling state. It is narrower than
+// AccountRepository for consumers that only need member credentials.
+type AccountGroupMembersRepository interface {
+	ListAllByGroup(ctx context.Context, groupID int64) ([]Account, error)
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

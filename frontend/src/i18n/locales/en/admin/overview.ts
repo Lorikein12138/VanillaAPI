@@ -1143,7 +1143,11 @@ export default {
       },
       modelAllowlist: {
         title: 'Model Allowlist',
-        hint: 'When enabled, models outside the allowlist are rejected with 404 model_not_found, and model listing endpoints only show allowlisted models. Entries support exact model IDs and trailing * wildcards. Note: Claude Code probes with haiku-family models for titles/summaries and /messages/count_tokens is also allowlist-controlled, so make sure the small models you need are selected too.',
+        hint: 'When enabled, the allowlist is calculated from identity model mappings on accounts bound to this group. When disabled, the manual selection below is saved for later use.',
+        autoHint: 'The automatic allowlist includes identity model mappings from every bound account, including inactive or unschedulable accounts. Manual entries are ignored while enabled.',
+        autoSourceCount: 'Source accounts: {count}',
+        autoEmpty: 'The automatic allowlist is empty. Add identity model mappings to accounts bound to this group.',
+        autoAfterCreate: 'The automatic union is calculated after the group is created from its bound accounts.',
         loading: 'Loading candidate models...',
         empty: 'No candidate models; add custom entries below',
         selectedSummary: 'Selected {selected} / {total}',

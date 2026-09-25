@@ -2,13 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   addCustomModelAllowlistItem,
-  createModelAllowlistState,
   type ModelAllowlistAddError,
-} from "../groupModelAllowlist";
-
-import {
-  buildModelAllowlistConfig,
   createModelAllowlistState,
+  createModelAllowlistSummaryState,
+  buildModelAllowlistConfig,
   hydrateModelAllowlistState,
   invertModelAllowlistSelection,
   moveModelAllowlistItem,
@@ -18,6 +15,23 @@ import {
 } from "../groupModelAllowlist";
 
 describe("groupModelAllowlist", () => {
+  it("builds the automatic summary separately from disabled manual models", () => {
+    expect(createModelAllowlistSummaryState({
+      enabled: false,
+      models: ["legacy-manual-model"],
+      source_account_count: 3,
+    })).toEqual({ models: [], sourceAccountCount: 0 });
+
+    expect(createModelAllowlistSummaryState({
+      enabled: true,
+      models: ["gpt-5.5", "gpt-5.4"],
+      source_account_count: 2,
+    })).toEqual({
+      models: ["gpt-5.5", "gpt-5.4"],
+      sourceAccountCount: 2,
+    });
+  });
+
   it("selects all default candidates for a new disabled config", () => {
     const state = createModelAllowlistState();
 
@@ -32,13 +46,13 @@ describe("groupModelAllowlist", () => {
 
   it("keeps saved selections and marks new candidates as unselected when editing", () => {
     const state = createModelAllowlistState({
-      enabled: true,
+      enabled: false,
       models: ["gpt-5.5", "gpt-5.4"],
     });
 
     setModelAllowlistCandidates(state, ["gpt-5.4", "legacy-gpt", "gpt-5.5"]);
 
-    expect(state.enabled).toBe(true);
+    expect(state.enabled).toBe(false);
     expect(state.items).toEqual([
       { id: "gpt-5.5", selected: true },
       { id: "gpt-5.4", selected: true },
@@ -48,7 +62,7 @@ describe("groupModelAllowlist", () => {
 
   it("preserves explicitly unselected saved candidates when candidates refresh", () => {
     const state = createModelAllowlistState({
-      enabled: true,
+      enabled: false,
       models: ["gpt-5.5"],
     });
 
@@ -62,7 +76,7 @@ describe("groupModelAllowlist", () => {
 
   it("builds config with selected models in current display order", () => {
     const state = hydrateModelAllowlistState({
-      enabled: true,
+      enabled: false,
       models: ["gpt-5.5", "gpt-5.4", "legacy-gpt"],
     }, ["gpt-5.5", "gpt-5.4", "legacy-gpt"]);
 
@@ -70,7 +84,7 @@ describe("groupModelAllowlist", () => {
     moveModelAllowlistItem(state, 1, 0);
 
     expect(buildModelAllowlistConfig(state)).toEqual({
-      enabled: true,
+      enabled: false,
       models: ["gpt-5.4", "gpt-5.5"],
     });
   });
@@ -87,7 +101,7 @@ describe("groupModelAllowlist", () => {
     });
   });
 
-  it("preserves saved models when candidates have not loaded yet", () => {
+  it("discards legacy automatic models when candidates have not loaded yet", () => {
     const state = createModelAllowlistState({
       enabled: true,
       models: ["gpt-5.5", "gpt-5.4"],
@@ -95,13 +109,14 @@ describe("groupModelAllowlist", () => {
 
     expect(buildModelAllowlistConfig(state)).toEqual({
       enabled: true,
-      models: ["gpt-5.5", "gpt-5.4"],
+      models: [],
     });
+    expect(state.savedModels).toEqual([]);
   });
 
   it("selects all candidate models from the toolbar action", () => {
     const state = hydrateModelAllowlistState({
-      enabled: true,
+      enabled: false,
       models: ["gpt-5.5"],
     }, ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]);
 
@@ -116,7 +131,7 @@ describe("groupModelAllowlist", () => {
 
   it("inverts selected models from the toolbar action", () => {
     const state = hydrateModelAllowlistState({
-      enabled: true,
+      enabled: false,
       models: ["gpt-5.5"],
     }, ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]);
 
@@ -131,7 +146,7 @@ describe("groupModelAllowlist", () => {
 });
 
 describe("addCustomModelAllowlistItem", () => {
-  const state = () => createModelAllowlistState({ enabled: true, models: ["gpt-5.4"] });
+  const state = () => createModelAllowlistState({ enabled: false, models: ["gpt-5.4"] });
 
   it("appends a trimmed entry as selected", () => {
     const s = state();

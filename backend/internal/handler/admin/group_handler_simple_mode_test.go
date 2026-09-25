@@ -153,7 +153,9 @@ func TestGroupHandlerSimpleModeResponseUsesFieldAllowlist(t *testing.T) {
 		ModelPricing:              []service.ChannelModelPricing{{Models: []string{"claude"}}},
 		AllowBatchImageGeneration: true, VideoPrice720P: float64PtrForSimpleModeTest(2),
 		WebSearchPricePerCall: float64PtrForSimpleModeTest(3), AudioRealtimePricePerMin: float64PtrForSimpleModeTest(4),
-		ModelRouting: map[string][]int64{"claude": {2}},
+		ModelRouting:                     map[string][]int64{"claude": {2}},
+		ModelAllowlist:                   service.GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet-4.5"}},
+		ModelAllowlistSourceAccountCount: 2,
 	}}
 	r := newSimpleModeGroupRouter(svc)
 	res := httptest.NewRecorder()
@@ -172,9 +174,14 @@ func TestGroupHandlerSimpleModeResponseUsesFieldAllowlist(t *testing.T) {
 	require.Equal(t, "allowed", item["description"])
 	require.Equal(t, "anthropic", item["platform"])
 	require.Equal(t, float64(3), item["account_count"])
+	allowlist, ok := item["model_allowlist"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, allowlist["enabled"])
+	require.Equal(t, []any{"claude-sonnet-4.5"}, allowlist["models"])
+	require.Equal(t, float64(2), allowlist["source_account_count"])
 	require.ElementsMatch(t, []string{
 		"id", "name", "description", "platform", "status", "account_count",
-		"active_account_count", "rate_limited_account_count", "sort_order", "created_at", "updated_at",
+		"active_account_count", "rate_limited_account_count", "model_allowlist", "sort_order", "created_at", "updated_at",
 	}, mapKeys(item))
 	for _, forbidden := range []string{
 		"rate_multiplier", "rpm_limit", "long_context_pricing_enabled", "model_pricing",
@@ -220,6 +227,11 @@ func TestGroupHandlerSimpleModeAllReadAndWriteResponsesUseFieldAllowlist(t *test
 
 	assertNoAdvancedFields := func(t *testing.T, item map[string]any) {
 		t.Helper()
+		allowlist, ok := item["model_allowlist"].(map[string]any)
+		require.True(t, ok, "simple mode response must include model_allowlist")
+		require.Contains(t, allowlist, "enabled")
+		require.Contains(t, allowlist, "models")
+		require.Contains(t, allowlist, "source_account_count")
 		for _, forbidden := range []string{
 			"rate_multiplier", "rpm_limit", "long_context_pricing_enabled", "model_pricing",
 			"allow_batch_image_generation", "video_price_720p", "web_search_price_per_call",

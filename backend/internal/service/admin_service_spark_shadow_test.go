@@ -195,7 +195,8 @@ func TestCreateShadowInheritsParentEffectiveOpenAILongContextBillingValue(t *tes
 func TestCreateShadow_BindGroups(t *testing.T) {
 	ctx := context.Background()
 	repo := newSparkShadowRepoStub()
-	svc := &adminServiceImpl{accountRepo: repo}
+	cache := &authCacheInvalidatorStub{}
+	svc := &adminServiceImpl{accountRepo: repo, authCacheInvalidator: cache}
 
 	parent := &Account{
 		Name:     "parent",
@@ -216,6 +217,7 @@ func TestCreateShadow_BindGroups(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, shadow)
 	require.Equal(t, []int64{testGroupID}, shadow.GroupIDs, "CreateShadow should backfill GroupIDs into the returned shadow")
+	require.Equal(t, []int64{testGroupID}, cache.groupIDs)
 
 	accounts, err := repo.ListSchedulableByGroupID(ctx, testGroupID)
 	require.NoError(t, err)

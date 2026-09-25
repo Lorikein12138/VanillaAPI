@@ -14,6 +14,18 @@ export interface ModelAllowlistState {
   items: ModelAllowlistItem[]
 }
 
+export interface ModelAllowlistSummaryState {
+  models: string[]
+  sourceAccountCount: number
+}
+
+export const createModelAllowlistSummaryState = (
+  config?: (Partial<ModelAllowlistConfig> & { source_account_count?: number }) | null,
+): ModelAllowlistSummaryState => ({
+  models: config?.enabled ? normalizeModels(config.models ?? []) : [],
+  sourceAccountCount: config?.enabled ? config.source_account_count ?? 0 : 0,
+})
+
 // 自定义条目校验错误码，由视图映射为 i18n 提示。
 export type ModelAllowlistAddError = 'empty' | 'invalid_wildcard' | 'duplicate'
 
@@ -21,7 +33,7 @@ export const createModelAllowlistState = (
   config?: Partial<ModelAllowlistConfig> | null,
 ): ModelAllowlistState => ({
   enabled: config?.enabled ?? false,
-  savedModels: normalizeModels(config?.models ?? []),
+  savedModels: config?.enabled ? [] : normalizeModels(config?.models ?? []),
   items: [],
 })
 
@@ -132,7 +144,9 @@ export const buildModelAllowlistConfig = (
   state: ModelAllowlistState,
 ): ModelAllowlistConfig => ({
   enabled: state.enabled,
-  models: state.items.length > 0
+  models: state.enabled
+    ? []
+    : state.items.length > 0
     ? state.items.filter(item => item.selected).map(item => item.id)
     : [...state.savedModels],
 })

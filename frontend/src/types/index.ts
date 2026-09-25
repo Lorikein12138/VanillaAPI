@@ -660,6 +660,7 @@ export interface AdminGroup extends Group {
 export interface ModelAllowlist {
   enabled: boolean
   models: string[]
+  source_account_count?: number
 }
 
 // 固定账号获取 Codex Model Manifest 配置（仅 openai 分组）

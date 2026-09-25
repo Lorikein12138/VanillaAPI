@@ -25,6 +25,36 @@ func (s *adminServiceImpl) ValidateSimpleModeGroupOperation(operation AdminGroup
 	return ValidateSimpleModeGroupOperation(s.cfg, operation)
 }
 
+func (s *adminServiceImpl) resolveAdminGroupModelAllowlist(ctx context.Context, group *Group) error {
+	if group == nil {
+		return nil
+	}
+	if !group.ModelAllowlist.Enabled {
+		group.ModelAllowlistSourceAccountCount = 0
+		return nil
+	}
+	memberRepo, ok := s.accountRepo.(AccountGroupMembersRepository)
+	if !ok {
+		return fmt.Errorf("resolve model allowlist for group %d: account group member repository is unavailable", group.ID)
+	}
+	accounts, err := memberRepo.ListAllByGroup(ctx, group.ID)
+	if err != nil {
+		return fmt.Errorf("resolve model allowlist for group %d: %w", group.ID, err)
+	}
+	group.ModelAllowlist = ResolveEffectiveGroupModelAllowlist(group.ModelAllowlist, accounts)
+	group.ModelAllowlistSourceAccountCount = CountAccountModelAllowlistSources(accounts)
+	return nil
+}
+
+func (s *adminServiceImpl) resolveAdminGroupModelAllowlists(ctx context.Context, groups []Group) error {
+	for i := range groups {
+		if err := s.resolveAdminGroupModelAllowlist(ctx, &groups[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *adminServiceImpl) ListGroups(ctx context.Context, page, pageSize int, platform, status, search string, isExclusive *bool, sortBy, sortOrder string) ([]Group, int64, error) {
 	params := pagination.PaginationParams{Page: page, PageSize: pageSize, SortBy: sortBy, SortOrder: sortOrder}
 	var groups []Group
@@ -44,22 +74,45 @@ func (s *adminServiceImpl) ListGroups(ctx context.Context, page, pageSize int, p
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := s.resolveAdminGroupModelAllowlists(ctx, groups); err != nil {
+		return nil, 0, err
+	}
 	return groups, result.Total, nil
 }
 
 func (s *adminServiceImpl) GetAllGroups(ctx context.Context) ([]Group, error) {
-	return s.groupRepo.ListActive(ctx)
+	groups, err := s.groupRepo.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.resolveAdminGroupModelAllowlists(ctx, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 func (s *adminServiceImpl) GetAllGroupsByPlatform(ctx context.Context, platform string) ([]Group, error) {
-	return s.groupRepo.ListActiveByPlatform(ctx, platform)
+	groups, err := s.groupRepo.ListActiveByPlatform(ctx, platform)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.resolveAdminGroupModelAllowlists(ctx, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 func (s *adminServiceImpl) GetAllGroupsIncludingInactive(ctx context.Context) ([]Group, error) {
 	// ListWithFilters with empty status = no status filter, so active + disabled groups are returned.
 	// PageSize 10000 is intentionally large; group count is O(dozens) in practice.
 	groups, _, err := s.groupRepo.ListWithFilters(ctx, pagination.PaginationParams{Page: 1, PageSize: 10000}, "", "", "", nil)
-	return groups, err
+	if err != nil {
+		return nil, err
+	}
+	if err := s.resolveAdminGroupModelAllowlists(ctx, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, error) {
@@ -68,6 +121,9 @@ func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, erro
 		return nil, err
 	}
 	if err := s.validateSimpleModeGroupAccess(group); err != nil {
+		return nil, err
+	}
+	if err := s.resolveAdminGroupModelAllowlist(ctx, group); err != nil {
 		return nil, err
 	}
 	return group, nil
@@ -653,6 +709,9 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		}
 		group.AccountCount = int64(len(accountIDsToCopy))
 	}
+	if err := s.resolveAdminGroupModelAllowlist(ctx, group); err != nil {
+		return nil, err
+	}
 
 	return group, nil
 }
@@ -1127,6 +1186,9 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 				return nil, fmt.Errorf("failed to bind accounts to group: %w", err)
 			}
 		}
+	}
+	if err := s.resolveAdminGroupModelAllowlist(ctx, group); err != nil {
+		return nil, err
 	}
 
 	return group, nil

@@ -338,6 +338,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	if err := s.accountDuplicateRepo.CreateWithAccountGroups(ctx, duplicate, groups); err != nil {
 		return nil, fmt.Errorf("create duplicate account: %w", err)
 	}
+	s.invalidateAuthCacheByGroupIDs(ctx, groupIDs)
 	for i := range groups {
 		groups[i].AccountID = duplicate.ID
 	}
@@ -507,6 +508,13 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 			}
 		}
 	}
+	var created bool
+	var createdGroupIDs []int64
+	defer func() {
+		if created {
+			s.invalidateAuthCacheByGroupIDs(ctx, createdGroupIDs)
+		}
+	}()
 
 	// 检查混合渠道风险（除非用户已确认）
 	if len(groupIDs) > 0 && !input.SkipMixedChannelCheck {
@@ -535,6 +543,8 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, err
 	}
+	created = true
+	createdGroupIDs = append(createdGroupIDs, groupIDs...)
 
 	// 绑定分组
 	if len(groupIDs) > 0 {
@@ -571,11 +581,28 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	return account, nil
 }
 
-func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
+func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (result *Account, returnErr error) {
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	previousGroupIDs := append([]int64(nil), account.GroupIDs...)
+	_, modelMappingProvided := input.Credentials["model_mapping"]
+	allowlistMayChange := modelMappingProvided || input.Status != "" || input.GroupIDs != nil
+	persisted := false
+	affectedGroupIDs := make([]int64, 0, len(previousGroupIDs)+4)
+	markPersisted := func() {
+		if !allowlistMayChange {
+			return
+		}
+		persisted = true
+		affectedGroupIDs = append(affectedGroupIDs, previousGroupIDs...)
+	}
+	defer func() {
+		if persisted && allowlistMayChange {
+			s.invalidateAuthCacheByGroupIDs(ctx, affectedGroupIDs)
+		}
+	}()
 	var normalizedExtra map[string]any
 	if input.Extra != nil {
 		normalizedExtra, err = normalizeOpenAILongContextBillingUpdateExtra(account, input)
@@ -874,11 +901,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 		billingSettingsAppliedAtomically = true
+		markPersisted()
 	}
 	if !billingSettingsAppliedAtomically {
 		if err := s.accountRepo.Update(ctx, account); err != nil {
 			return nil, err
 		}
+		markPersisted()
 		if (requestedProbeEnabledUpdate != nil || requestedRateSyncEnabledUpdate != nil) &&
 			isUpstreamBillingProbeAccount(account) {
 			settings := make(map[string]any, 2)
@@ -906,6 +935,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if input.GroupIDs != nil {
 		if err := s.accountRepo.BindGroups(ctx, account.ID, *input.GroupIDs); err != nil {
 			return nil, err
+		}
+		if allowlistMayChange {
+			affectedGroupIDs = append(affectedGroupIDs, (*input.GroupIDs)...)
 		}
 	}
 
@@ -959,6 +991,15 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, OllamaCloudUsageSnapshotExtraKey)
 	delete(input.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(input.Extra, OpenCodeGoUsageSnapshotExtraKey)
+	_, modelMappingProvided := input.Credentials["model_mapping"]
+	allowlistMayChange := modelMappingProvided || input.Status != "" || input.Schedulable != nil || input.GroupIDs != nil
+	mutationPersisted := false
+	affectedGroupIDs := make([]int64, 0)
+	defer func() {
+		if mutationPersisted {
+			s.invalidateAuthCacheByGroupIDs(ctx, affectedGroupIDs)
+		}
+	}()
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)
@@ -994,7 +1035,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil || allowlistMayChange {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1164,6 +1205,14 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	if _, err := s.accountRepo.BulkUpdate(ctx, input.AccountIDs, repoUpdates); err != nil {
 		return nil, err
 	}
+	if allowlistMayChange {
+		mutationPersisted = true
+		for _, account := range cachedTargets {
+			if account != nil {
+				affectedGroupIDs = append(affectedGroupIDs, account.GroupIDs...)
+			}
+		}
+	}
 
 	// 将 proxy 变更传播到每个目标账号的 spark 影子账号
 	if repoUpdates.ProxyID != nil {
@@ -1190,6 +1239,9 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 				result.FailedIDs = append(result.FailedIDs, accountID)
 				result.Results = append(result.Results, entry)
 				continue
+			}
+			if allowlistMayChange {
+				affectedGroupIDs = append(affectedGroupIDs, (*input.GroupIDs)...)
 			}
 		}
 
@@ -1282,14 +1334,42 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 	if err != nil {
 		return fmt.Errorf("list spark shadows for cascade delete: %w", err)
 	}
+	accountIDs := make([]int64, 0, len(shadows)+1)
+	accountIDs = append(accountIDs, id)
 	for _, shadow := range shadows {
+		if shadow != nil {
+			accountIDs = append(accountIDs, shadow.ID)
+		}
+	}
+	accounts, err := s.accountRepo.GetByIDs(ctx, accountIDs)
+	if err != nil {
+		return fmt.Errorf("load account groups before delete: %w", err)
+	}
+	affectedGroupIDs := make([]int64, 0)
+	for _, account := range accounts {
+		if account != nil {
+			affectedGroupIDs = append(affectedGroupIDs, account.GroupIDs...)
+		}
+	}
+	deleted := false
+	defer func() {
+		if deleted {
+			s.invalidateAuthCacheByGroupIDs(ctx, affectedGroupIDs)
+		}
+	}()
+	for _, shadow := range shadows {
+		if shadow == nil {
+			continue
+		}
 		if err := s.accountRepo.Delete(ctx, shadow.ID); err != nil {
 			return fmt.Errorf("cascade delete spark shadow %d: %w", shadow.ID, err)
 		}
+		deleted = true
 	}
 	if err := s.accountRepo.Delete(ctx, id); err != nil {
 		return err
 	}
+	deleted = true
 	return nil
 }
 
@@ -1303,9 +1383,14 @@ func (s *adminServiceImpl) RefreshAccountCredentials(ctx context.Context, id int
 }
 
 func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Account, error) {
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.ClearError(ctx, id); err != nil {
 		return nil, err
 	}
+	s.invalidateAuthCacheByGroupIDs(ctx, account.GroupIDs)
 	if err := s.accountRepo.ClearRateLimit(ctx, id); err != nil {
 		return nil, err
 	}
@@ -1325,13 +1410,26 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {
-	return s.accountRepo.SetError(ctx, id, errorMsg)
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.accountRepo.SetError(ctx, id, errorMsg); err != nil {
+		return err
+	}
+	s.invalidateAuthCacheByGroupIDs(ctx, account.GroupIDs)
+	return nil
 }
 
 func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
 		return nil, err
 	}
+	s.invalidateAuthCacheByGroupIDs(ctx, account.GroupIDs)
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1472,6 +1570,7 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		}
 		shadow.GroupIDs = groupIDs
 	}
+	s.invalidateAuthCacheByGroupIDs(ctx, groupIDs)
 
 	return shadow, nil
 }

@@ -1,8 +1,10 @@
 package service
 
 import (
+	"encoding/json"
 	"net/http"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -28,6 +30,112 @@ func GroupModelAllowlistFromDomain(cfg domain.GroupModelAllowlist) GroupModelAll
 	return GroupModelAllowlist{Enabled: cfg.Enabled, Models: cfg.Models}
 }
 
+// BuildAccountModelAllowlistUnion builds a deterministic union from raw
+// credentials.model_mapping identity entries. Account health and scheduling
+// state do not affect whether an account contributes its declared models.
+func BuildAccountModelAllowlistUnion(accounts []Account) []string {
+	models, _ := buildAccountModelAllowlistUnion(accounts)
+	return models
+}
+
+// CountAccountModelAllowlistSources returns the number of accounts that
+// contribute at least one identity entry to the allowlist union.
+func CountAccountModelAllowlistSources(accounts []Account) int {
+	_, count := buildAccountModelAllowlistUnion(accounts)
+	return count
+}
+
+func buildAccountModelAllowlistUnion(accounts []Account) ([]string, int) {
+	allModels := make([]string, 0)
+	sourceCount := 0
+	for i := range accounts {
+		keys := accountModelAllowlistIdentityKeys(accounts[i].Credentials["model_mapping"])
+		if len(keys) == 0 {
+			continue
+		}
+		sourceCount++
+		allModels = append(allModels, keys...)
+	}
+
+	sort.Slice(allModels, func(i, j int) bool {
+		lowerI := strings.ToLower(allModels[i])
+		lowerJ := strings.ToLower(allModels[j])
+		if lowerI != lowerJ {
+			return lowerI < lowerJ
+		}
+		return allModels[i] < allModels[j]
+	})
+	models := make([]string, 0, len(allModels))
+	lastLower := ""
+	for _, model := range allModels {
+		lower := strings.ToLower(model)
+		if len(models) > 0 && lower == lastLower {
+			continue
+		}
+		models = append(models, model)
+		lastLower = lower
+	}
+	return models, sourceCount
+}
+
+func accountModelAllowlistIdentityKeys(raw any) []string {
+	var mappings map[string]any
+	switch value := raw.(type) {
+	case map[string]any:
+		mappings = value
+	case map[string]string:
+		mappings = make(map[string]any, len(value))
+		for key, model := range value {
+			mappings[key] = model
+		}
+	case json.RawMessage:
+		if err := json.Unmarshal(value, &mappings); err != nil {
+			return nil
+		}
+	case []byte:
+		if err := json.Unmarshal(value, &mappings); err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	if mappings == nil {
+		return nil
+	}
+
+	keys := make([]string, 0, len(mappings))
+	for key, rawModel := range mappings {
+		model, ok := rawModel.(string)
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		model = strings.TrimSpace(model)
+		if key == "" || model != key {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		lowerI := strings.ToLower(keys[i])
+		lowerJ := strings.ToLower(keys[j])
+		if lowerI != lowerJ {
+			return lowerI < lowerJ
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+// ResolveEffectiveGroupModelAllowlist keeps manual entries when disabled and
+// derives enabled entries from the bound accounts without modifying inputs.
+func ResolveEffectiveGroupModelAllowlist(group GroupModelAllowlist, accounts []Account) GroupModelAllowlist {
+	if !group.Enabled {
+		return GroupModelAllowlist{Enabled: false, Models: slices.Clone(group.Models)}
+	}
+	return GroupModelAllowlist{Enabled: true, Models: BuildAccountModelAllowlistUnion(accounts)}
+}
+
 // supplementUnmappedOpenAIModels ensures a partial mapping catalog does not
 // hide models from unmapped OpenAI accounts. An empty catalog is left unchanged
 // so callers retain their existing discovery fallback.
@@ -46,13 +154,15 @@ func supplementUnmappedOpenAIModels(accounts []Account, models []string) []strin
 
 // normalizeGroupModelAllowlist 归一化管理端提交的分组模型白名单：
 // 条目 TrimSpace、按小写去重保序；`*` 只允许出现在条目末尾；
-// enabled=true 且列表为空视为配置错误，返回 400 而不是运行时静默放行/拒绝。
+// enabled=true 时丢弃客户端条目，运行时由所属账号白名单计算。
 func normalizeGroupModelAllowlist(cfg GroupModelAllowlist) (GroupModelAllowlist, error) {
+	if cfg.Enabled {
+		// Enabled allowlists are derived from account credentials. Client-supplied
+		// models, including legacy entries, are intentionally discarded.
+		return GroupModelAllowlist{Enabled: true, Models: []string{}}, nil
+	}
 	out := GroupModelAllowlist{Enabled: cfg.Enabled}
 	if len(cfg.Models) == 0 {
-		if out.Enabled {
-			return out, infraerrors.New(http.StatusBadRequest, "INVALID_MODEL_ALLOWLIST", "model allowlist cannot be enabled with an empty model list")
-		}
 		return out, nil
 	}
 
@@ -74,9 +184,6 @@ func normalizeGroupModelAllowlist(cfg GroupModelAllowlist) (GroupModelAllowlist,
 		out.Models = append(out.Models, model)
 	}
 	if len(out.Models) == 0 {
-		if out.Enabled {
-			return out, infraerrors.New(http.StatusBadRequest, "INVALID_MODEL_ALLOWLIST", "model allowlist cannot be enabled with an empty model list")
-		}
 		out.Models = nil
 	}
 	return out, nil

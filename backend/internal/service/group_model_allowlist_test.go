@@ -1,7 +1,10 @@
 package service
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -13,12 +16,12 @@ func TestNormalizeGroupModelAllowlist(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "trims and dedupes case-insensitively preserving order",
+			name: "disabled manual config trims and dedupes case-insensitively preserving order",
 			in: GroupModelAllowlist{
-				Enabled: true,
+				Enabled: false,
 				Models:  []string{" gpt-5.4 ", "GPT-5.4", "claude-sonnet-4.5", ""},
 			},
-			want: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.4", "claude-sonnet-4.5"}},
+			want: GroupModelAllowlist{Enabled: false, Models: []string{"gpt-5.4", "claude-sonnet-4.5"}},
 		},
 		{
 			name: "disabled with empty list is fine",
@@ -26,29 +29,29 @@ func TestNormalizeGroupModelAllowlist(t *testing.T) {
 			want: GroupModelAllowlist{Enabled: false},
 		},
 		{
-			name:    "enabled with empty list is rejected",
-			in:      GroupModelAllowlist{Enabled: true},
-			wantErr: "INVALID_MODEL_ALLOWLIST",
+			name: "enabled with empty list is an empty automatic config",
+			in:   GroupModelAllowlist{Enabled: true},
+			want: GroupModelAllowlist{Enabled: true, Models: []string{}},
 		},
 		{
-			name:    "enabled with only blank entries is rejected",
-			in:      GroupModelAllowlist{Enabled: true, Models: []string{" ", ""}},
-			wantErr: "INVALID_MODEL_ALLOWLIST",
+			name: "enabled ignores client models",
+			in:   GroupModelAllowlist{Enabled: true, Models: []string{"legacy-model", "bad-*middle"}},
+			want: GroupModelAllowlist{Enabled: true, Models: []string{}},
 		},
 		{
-			name: "trailing wildcard is accepted",
-			in:   GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.5-*"}},
-			want: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.5-*"}},
+			name: "disabled trailing wildcard is accepted",
+			in:   GroupModelAllowlist{Enabled: false, Models: []string{"gpt-5.5-*"}},
+			want: GroupModelAllowlist{Enabled: false, Models: []string{"gpt-5.5-*"}},
 		},
 		{
 			name:    "wildcard in the middle is rejected",
-			in:      GroupModelAllowlist{Enabled: true, Models: []string{"gpt-*-5.4"}},
+			in:      GroupModelAllowlist{Enabled: false, Models: []string{"gpt-*-5.4"}},
 			wantErr: "INVALID_MODEL_ALLOWLIST",
 		},
 		{
-			name:    "bare wildcard is accepted as allow-all",
+			name:    "enabled bare wildcard is discarded as client input",
 			in:      GroupModelAllowlist{Enabled: true, Models: []string{"*"}},
-			want:    GroupModelAllowlist{Enabled: true, Models: []string{"*"}},
+			want:    GroupModelAllowlist{Enabled: true, Models: []string{}},
 			wantErr: "",
 		},
 		{
@@ -82,6 +85,80 @@ func TestNormalizeGroupModelAllowlist(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildAccountModelAllowlistUnion(t *testing.T) {
+	accounts := []Account{
+		{ID: 1, Status: StatusDisabled, Schedulable: false, ErrorMessage: "unavailable", Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				" gpt-5.5-* ": " gpt-5.5-* ",
+				"GPT-5.4":     "GPT-5.4",
+				"renamed":     "upstream-name",
+				"not-string":  3,
+			},
+		}},
+		{ID: 2, Status: StatusError, Credentials: map[string]any{
+			"model_mapping": map[string]string{"gpt-5.4": "gpt-5.4", "claude-sonnet-4.5": "claude-sonnet-4.5"},
+		}},
+		{ID: 3, Credentials: map[string]any{"model_mapping": map[string]any{}}},
+		{ID: 4, Credentials: map[string]any{"model_mapping": []string{"not", "an object"}}},
+		{ID: 5},
+		{ID: 6, Credentials: map[string]any{"model_mapping": json.RawMessage(`{"raw-model":"raw-model","alias":"target"}`)}},
+	}
+
+	want := []string{"claude-sonnet-4.5", "GPT-5.4", "gpt-5.5-*", "raw-model"}
+	got := BuildAccountModelAllowlistUnion(accounts)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BuildAccountModelAllowlistUnion() = %#v, want %#v", got, want)
+	}
+	if count := CountAccountModelAllowlistSources(accounts); count != 3 {
+		t.Fatalf("CountAccountModelAllowlistSources() = %d, want 3", count)
+	}
+}
+
+func TestResolveEffectiveGroupModelAllowlist(t *testing.T) {
+	accounts := []Account{{Credentials: map[string]any{"model_mapping": map[string]any{"new-model": "new-model"}}}}
+
+	disabled := GroupModelAllowlist{Enabled: false, Models: []string{"manual-model"}}
+	resolvedDisabled := ResolveEffectiveGroupModelAllowlist(disabled, accounts)
+	if !reflect.DeepEqual(resolvedDisabled, disabled) {
+		t.Fatalf("disabled allowlist changed: got %#v want %#v", resolvedDisabled, disabled)
+	}
+
+	enabled := GroupModelAllowlist{Enabled: true, Models: []string{"legacy-model"}}
+	resolvedEnabled := ResolveEffectiveGroupModelAllowlist(enabled, accounts)
+	if !reflect.DeepEqual(resolvedEnabled, GroupModelAllowlist{Enabled: true, Models: []string{"new-model"}}) {
+		t.Fatalf("enabled allowlist = %#v, want current account union", resolvedEnabled)
+	}
+	if !reflect.DeepEqual(enabled.Models, []string{"legacy-model"}) || !reflect.DeepEqual(accounts[0].Credentials["model_mapping"], map[string]any{"new-model": "new-model"}) {
+		t.Fatal("resolving an allowlist must not modify its input")
+	}
+}
+
+func TestBuildAccountModelAllowlistUnionConcurrentReadOnly(t *testing.T) {
+	accounts := []Account{
+		{Credentials: map[string]any{"model_mapping": map[string]any{"gpt-5.4": "gpt-5.4", "gpt-5.5-*": "gpt-5.5-*"}}},
+		{Credentials: map[string]any{"model_mapping": map[string]any{"GPT-5.4": "GPT-5.4", "claude-sonnet-4.5": "claude-sonnet-4.5"}}},
+	}
+	want := []string{"claude-sonnet-4.5", "GPT-5.4", "gpt-5.5-*"}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := BuildAccountModelAllowlistUnion(accounts); !reflect.DeepEqual(got, want) {
+				t.Errorf("concurrent union = %#v, want %#v", got, want)
+			}
+		}()
+	}
+	wg.Wait()
+	modelMapping, ok := accounts[0].Credentials["model_mapping"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_mapping type = %T, want map[string]any", accounts[0].Credentials["model_mapping"])
+	}
+	if got := modelMapping["gpt-5.4"]; got != "gpt-5.4" {
+		t.Fatalf("input credentials were modified: %#v", got)
 	}
 }
 
