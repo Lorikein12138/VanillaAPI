@@ -278,6 +278,38 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 	require.Equal(t, apiKey.Group.MessagesDispatchModelConfig, roundTrip.Group.MessagesDispatchModelConfig)
 }
 
+func TestAPIKeyService_SnapshotRoundTrip_PreservesAutomaticModelAllowlistUnion(t *testing.T) {
+	svc := NewAPIKeyService(nil, nil, nil, nil, nil, nil, &config.Config{})
+	groupID := int64(9)
+	apiKey := &APIKey{
+		ID:      1,
+		UserID:  2,
+		GroupID: &groupID,
+		Key:     "k-auto-model-allowlist",
+		Status:  StatusActive,
+		User: &User{
+			ID:          2,
+			Status:      StatusActive,
+			Role:        RoleUser,
+			Concurrency: 3,
+		},
+		Group: &Group{
+			ID:             groupID,
+			Name:           "automatic",
+			Platform:       PlatformOpenAI,
+			Status:         StatusActive,
+			ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5.4", "gpt-5.5-*"}},
+		},
+	}
+
+	snapshot := svc.snapshotFromAPIKey(context.Background(), apiKey)
+	roundTrip := svc.snapshotToAPIKey(apiKey.Key, snapshot)
+
+	require.NotNil(t, roundTrip)
+	require.True(t, roundTrip.Group.ModelAllowlist.Enabled)
+	require.Equal(t, []string{"gpt-5.4", "gpt-5.5-*"}, roundTrip.Group.ModelAllowlist.Models)
+}
+
 func TestAPIKeyService_SnapshotRoundTrip_PreservesReasoningEffortPolicy(t *testing.T) {
 	svc := NewAPIKeyService(nil, nil, nil, nil, nil, nil, &config.Config{})
 	groupID := int64(9)

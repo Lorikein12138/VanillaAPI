@@ -74,7 +74,8 @@ func (s *duplicateAccountRepoStub) FindByExtraField(_ context.Context, key strin
 func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) {
 	ctx := context.Background()
 	repo := newDuplicateAccountRepoStub()
-	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo}
+	cache := &authCacheInvalidatorStub{}
+	svc := &adminServiceImpl{accountRepo: repo, accountDuplicateRepo: repo, authCacheInvalidator: cache}
 
 	notes := "keep this note"
 	proxyID := int64(17)
@@ -172,6 +173,7 @@ func TestDuplicateAccountCopiesConfigurationAndResetsRuntimeState(t *testing.T) 
 	require.Equal(t, source.RateMultiplier, duplicate.RateMultiplier)
 	require.Equal(t, source.LoadFactor, duplicate.LoadFactor)
 	require.Equal(t, source.GroupIDs, repo.groupsOf[duplicate.ID])
+	require.Equal(t, []int64{7, 3}, cache.groupIDs)
 	require.Equal(t, []AccountGroup{
 		{AccountID: duplicate.ID, GroupID: 7, Priority: 50},
 		{AccountID: duplicate.ID, GroupID: 3, Priority: 7},

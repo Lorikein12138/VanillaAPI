@@ -11,6 +11,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	dbaccount "github.com/Wei-Shaw/sub2api/ent/account"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
@@ -231,6 +232,16 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 				group.FieldProfitMinMargin,
 				group.FieldProfitSafetyBuffer,
 			)
+			q.WithAccounts(func(aq *dbent.AccountQuery) {
+				aq.Where(dbaccount.DeletedAtIsNil()).
+					Select(
+						dbaccount.FieldID,
+						dbaccount.FieldStatus,
+						dbaccount.FieldErrorMessage,
+						dbaccount.FieldSchedulable,
+						dbaccount.FieldCredentials,
+					)
+			})
 		}).
 		Only(ctx)
 	if err != nil {
@@ -239,7 +250,28 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 		}
 		return nil, err
 	}
-	return apiKeyEntityToService(m), nil
+	out := apiKeyEntityToService(m)
+	if m.Edges.Group != nil && out.Group != nil {
+		members := make([]service.Account, 0, len(m.Edges.Group.Edges.Accounts))
+		for _, account := range m.Edges.Group.Edges.Accounts {
+			if account == nil {
+				continue
+			}
+			errorMessage := ""
+			if account.ErrorMessage != nil {
+				errorMessage = *account.ErrorMessage
+			}
+			members = append(members, service.Account{
+				ID:           account.ID,
+				Status:       account.Status,
+				ErrorMessage: errorMessage,
+				Schedulable:  account.Schedulable,
+				Credentials:  account.Credentials,
+			})
+		}
+		out.Group = groupEntityToServiceWithAccounts(m.Edges.Group, members)
+	}
+	return out, nil
 }
 
 func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey, fields service.APIKeyUpdateFields) error {
@@ -1033,6 +1065,15 @@ func groupEntityToService(g *dbent.Group) *service.Group {
 		CreatedAt:                       g.CreatedAt,
 		UpdatedAt:                       g.UpdatedAt,
 	}
+}
+
+func groupEntityToServiceWithAccounts(g *dbent.Group, accounts []service.Account) *service.Group {
+	group := groupEntityToService(g)
+	if group == nil {
+		return nil
+	}
+	group.ModelAllowlist = service.ResolveEffectiveGroupModelAllowlist(group.ModelAllowlist, accounts)
+	return group
 }
 
 func derefString(s *string) string {

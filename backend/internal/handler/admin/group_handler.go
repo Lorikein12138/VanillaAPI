@@ -142,12 +142,13 @@ type simpleModeGroupResponse struct {
 	Platform    string `json:"platform"`
 	Status      string `json:"status"`
 
-	AccountCount            int64     `json:"account_count,omitempty"`
-	ActiveAccountCount      int64     `json:"active_account_count,omitempty"`
-	RateLimitedAccountCount int64     `json:"rate_limited_account_count,omitempty"`
-	SortOrder               int       `json:"sort_order"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	AccountCount            int64                        `json:"account_count,omitempty"`
+	ActiveAccountCount      int64                        `json:"active_account_count,omitempty"`
+	RateLimitedAccountCount int64                        `json:"rate_limited_account_count,omitempty"`
+	ModelAllowlist          dto.AdminGroupModelAllowlist `json:"model_allowlist"`
+	SortOrder               int                          `json:"sort_order"`
+	CreatedAt               time.Time                    `json:"created_at"`
+	UpdatedAt               time.Time                    `json:"updated_at"`
 }
 
 func groupForSimpleMode(group *service.Group) *simpleModeGroupResponse {
@@ -156,6 +157,7 @@ func groupForSimpleMode(group *service.Group) *simpleModeGroupResponse {
 	}
 	return &simpleModeGroupResponse{
 		ID: group.ID, Name: group.Name, Description: group.Description, Platform: group.Platform,
+		ModelAllowlist:     dto.AdminGroupModelAllowlistFromService(group),
 		Status:             group.Status,
 		AccountCount:       group.AccountCount,
 		ActiveAccountCount: group.ActiveAccountCount, RateLimitedAccountCount: group.RateLimitedAccountCount,

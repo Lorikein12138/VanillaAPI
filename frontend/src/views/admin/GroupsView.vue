@@ -782,6 +782,15 @@
           </div>
           <div
             v-if="createModelAllowlistState.enabled"
+            data-testid="group-model-allowlist-auto"
+            class="space-y-2 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs text-gray-600 dark:border-dark-600 dark:bg-dark-800/40 dark:text-gray-300"
+          >
+            <p>{{ t("admin.groups.modelAllowlist.autoHint") }}</p>
+            <p>{{ t("admin.groups.modelAllowlist.autoAfterCreate") }}</p>
+          </div>
+          <div
+            v-else
+            data-testid="group-model-allowlist-manual"
             class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50 dark:border-dark-600 dark:bg-dark-800/40"
           >
             <div
@@ -2418,10 +2427,39 @@
                 {{ t("admin.groups.modelAllowlist.hint") }}
               </p>
             </div>
-            <Toggle v-model="editModelAllowlistState.enabled" />
+            <Toggle
+              data-testid="group-model-allowlist-toggle"
+              :model-value="editModelAllowlistState.enabled"
+              @update:model-value="setEditModelAllowlistEnabled"
+            />
           </div>
           <div
             v-if="editModelAllowlistState.enabled"
+            data-testid="group-model-allowlist-auto"
+            class="space-y-2 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs text-gray-600 dark:border-dark-600 dark:bg-dark-800/40 dark:text-gray-300"
+          >
+            <p>{{ t("admin.groups.modelAllowlist.autoHint") }}</p>
+            <p>
+              {{ t("admin.groups.modelAllowlist.autoSourceCount", {
+                count: editModelAllowlistSummary.sourceAccountCount,
+              }) }}
+            </p>
+            <p v-if="editModelAllowlistSummary.models.length === 0">
+              {{ t("admin.groups.modelAllowlist.autoEmpty") }}
+            </p>
+            <ul v-else class="max-h-48 space-y-1 overflow-y-auto">
+              <li
+                v-for="model in editModelAllowlistSummary.models"
+                :key="model"
+                class="break-all rounded bg-white px-2 py-1 dark:bg-dark-800"
+              >
+                {{ model }}
+              </li>
+            </ul>
+          </div>
+          <div
+            v-else
+            data-testid="group-model-allowlist-manual"
             class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50/50 dark:border-dark-600 dark:bg-dark-800/40"
           >
             <div
@@ -4337,6 +4375,7 @@ import {
   addCustomModelAllowlistItem,
   buildModelAllowlistConfig,
   createModelAllowlistState as createInitialModelAllowlistState,
+  createModelAllowlistSummaryState,
   invertModelAllowlistSelection,
   moveModelAllowlistItem,
   selectAllModelAllowlistItems,
@@ -4879,6 +4918,7 @@ const createMessagesDispatchDefaults = createDefaultMessagesDispatchFormState();
 const editMessagesDispatchDefaults = createDefaultMessagesDispatchFormState();
 const createModelAllowlistState = reactive(createInitialModelAllowlistState());
 const editModelAllowlistState = reactive(createInitialModelAllowlistState());
+const editModelAllowlistSummary = ref(createModelAllowlistSummaryState());
 const createModelAllowlistLoading = ref(false);
 const editModelAllowlistLoading = ref(false);
 type ReasoningEffortPolicyFieldsExpose = {
@@ -5216,6 +5256,15 @@ const resetModelAllowlistState = (
   state.enabled = fresh.enabled;
   state.savedModels = fresh.savedModels;
   state.items = fresh.items;
+};
+
+const setEditModelAllowlistEnabled = (enabled: boolean) => {
+  editModelAllowlistState.enabled = enabled;
+  if (enabled) {
+    editModelAllowlistSummary.value = createModelAllowlistSummaryState({
+      enabled: true,
+    });
+  }
 };
 
 const loadModelAllowlistCandidates = async (
@@ -5893,14 +5942,6 @@ const handleCreateGroup = async () => {
     return;
   }
   if (!validateGroupReasoningMultipliers(createForm.model_pricing)) return;
-  // 模型白名单：开启且没有任何条目时阻止提交，与后端 400 对齐。
-  if (
-    createModelAllowlistState.enabled &&
-    createModelAllowlistSelectedCount.value === 0
-  ) {
-    appStore.showError(t("admin.groups.modelAllowlist.emptySelectionError"));
-    return;
-  }
   submitting.value = true;
   try {
     const {
@@ -6135,6 +6176,9 @@ const handleEdit = async (group: AdminGroup) => {
     group.platform,
   );
   resetModelAllowlistState(editModelAllowlistState, group.model_allowlist);
+  editModelAllowlistSummary.value = createModelAllowlistSummaryState(
+    group.model_allowlist,
+  );
   // 固定账号 manifest 配置：回显配置并异步解析已存账号名称（失败显示 #<id>）
   const savedCodexManifestConfig =
     group.codex_models_manifest_config ?? createCodexManifestDefaults();
@@ -6172,6 +6216,7 @@ const closeEditModal = () => {
   clearAllAccountSearchState();
   showEditModal.value = false;
   editingGroup.value = null;
+  editModelAllowlistSummary.value = createModelAllowlistSummaryState();
   editForm.max_reasoning_effort = "";
   editForm.max_reasoning_effort_over_limit = reasoningEffortOverLimitDowngrade;
   editForm.reasoning_effort_mappings = [];
@@ -6225,14 +6270,6 @@ const handleUpdateGroup = async () => {
     return;
   }
   if (!validateGroupReasoningMultipliers(editForm.model_pricing)) return;
-  // 模型白名单：开启且没有任何条目时阻止提交，与后端 400 对齐。
-  if (
-    editModelAllowlistState.enabled &&
-    editModelAllowlistSelectedCount.value === 0
-  ) {
-    appStore.showError(t("admin.groups.modelAllowlist.emptySelectionError"));
-    return;
-  }
   // 固定账号 manifest：开启后至少一个账号，前端阻止提交并提示。
   if (
     editForm.platform === "openai" &&
@@ -6771,7 +6808,14 @@ watch(
     }
     resetDisabledBatchImagePricing(editForm);
     if (editingGroup.value) {
-      resetModelAllowlistState(editModelAllowlistState, editForm.platform === editingGroup.value.platform ? editingGroup.value.model_allowlist : undefined);
+      const modelAllowlist =
+        editForm.platform === editingGroup.value.platform
+          ? editingGroup.value.model_allowlist
+          : undefined;
+      resetModelAllowlistState(editModelAllowlistState, modelAllowlist);
+      editModelAllowlistSummary.value = createModelAllowlistSummaryState(
+        modelAllowlist,
+      );
       loadModelAllowlistCandidates("edit", editingGroup.value.id, newVal);
     }
   },

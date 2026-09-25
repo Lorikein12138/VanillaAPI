@@ -166,6 +166,7 @@ type Group struct {
 // 注意：普通用户接口不得返回 model_routing/account_count/account_groups 等内部信息。
 type AdminGroup struct {
 	Group
+	ModelAllowlist AdminGroupModelAllowlist `json:"model_allowlist"`
 	// ForceOpenAIFast 是管理端请求策略，用户侧分组 DTO 无需暴露。
 	ForceOpenAIFast bool `json:"force_openai_fast"`
 	// FreeOpenAIFast 是管理端计费策略，用户侧分组 DTO 无需暴露。
@@ -189,7 +190,6 @@ type AdminGroup struct {
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
 	DefaultMappedModel          string                                   `json:"default_mapped_model"`
 	MessagesDispatchModelConfig domain.OpenAIMessagesDispatchModelConfig `json:"messages_dispatch_model_config"`
-	ModelAllowlist              service.GroupModelAllowlist              `json:"model_allowlist"`
 	// 固定账号获取 Codex Model Manifest 配置（仅 openai 平台使用）。
 	CodexModelsManifestConfig domain.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
 
@@ -202,6 +202,12 @@ type AdminGroup struct {
 
 	// 分组排序
 	SortOrder int `json:"sort_order"`
+}
+
+type AdminGroupModelAllowlist struct {
+	Enabled            bool     `json:"enabled"`
+	Models             []string `json:"models"`
+	SourceAccountCount int      `json:"source_account_count"`
 }
 
 type Account struct {

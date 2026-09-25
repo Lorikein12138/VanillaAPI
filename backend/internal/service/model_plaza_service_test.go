@@ -11,12 +11,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type modelPlazaMembersRepoStub struct {
+	AccountRepository
+	accountsByGroup map[int64][]Account
+	err             error
+}
+
+func (s *modelPlazaMembersRepoStub) ListAllByGroup(_ context.Context, groupID int64) ([]Account, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.accountsByGroup[groupID], nil
+}
+
+func plazaMembersFromGroups(groups []Group) AccountRepository {
+	accountsByGroup := make(map[int64][]Account)
+	for _, group := range groups {
+		if !group.ModelAllowlist.Enabled || len(group.ModelAllowlist.Models) == 0 {
+			continue
+		}
+		mappings := make(map[string]any, len(group.ModelAllowlist.Models))
+		for _, model := range group.ModelAllowlist.Models {
+			mappings[model] = model
+		}
+		accountsByGroup[group.ID] = []Account{{Credentials: map[string]any{"model_mapping": mappings}}}
+	}
+	return &modelPlazaMembersRepoStub{accountsByGroup: accountsByGroup}
+}
+
 // newPlazaService 构造 ListGroups 测试用的 ModelPlazaService（不接计费服务：展示定价原样透传）。
 func newPlazaService(channels []Channel, groups []Group, pricing *PricingService) *ModelPlazaService {
 	repo := &mockChannelRepository{
 		listAllFn: func(ctx context.Context) ([]Channel, error) { return channels, nil },
 	}
-	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, pricing, nil, nil)
+	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaMembersFromGroups(groups), pricing, nil, nil)
 }
 
 func plazaPricedChannel(id int64, name string, groupIDs []int64, platform string, models ...string) Channel {
@@ -109,6 +137,53 @@ func TestListPlazaGroups_ModelAllowlistFiltersChannelPricingModels(t *testing.T)
 	require.Len(t, out, 1)
 	require.Len(t, out[0].Models, 1)
 	require.Equal(t, "model-a", out[0].Models[0].Name)
+}
+
+func TestListPlazaGroups_AutomaticAccountUnionFiltersExistingChannelCandidates(t *testing.T) {
+	channels := []Channel{
+		plazaPricedChannel(1, "associated-active", []int64{10}, PlatformAnthropic,
+			"model-a", "model-b", "model-c", "channel-only"),
+	}
+	groups := []Group{{
+		ID:             10,
+		Name:           "automatic-group",
+		Platform:       PlatformAnthropic,
+		RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"legacy-manual-model"}},
+	}}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{
+		10: {
+			{Status: StatusDisabled, ErrorMessage: "expired", Schedulable: false, Credentials: map[string]any{
+				"model_mapping": map[string]any{"model-a": "model-a", "model-c": "model-c", "renamed": "upstream-model"},
+			}},
+			{Status: StatusError, Schedulable: false, Credentials: map[string]any{
+				"model_mapping": map[string]any{"model-c": "model-c", "model-x": "model-x"},
+			}},
+		},
+	}}
+	channelRepo := &mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return channels, nil }}
+	svc := NewModelPlazaService(channelRepo, &stubGroupRepoForAvailable{activeGroups: groups}, members, nil, nil, nil)
+
+	out, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, []string{"model-a", "model-c"}, []string{out[0].Models[0].Name, out[0].Models[1].Name})
+	for _, model := range out[0].Models {
+		require.NotEqual(t, "model-x", model.Name, "allowlist entries must not synthesize channel models")
+	}
+}
+
+func TestListPlazaGroups_AutomaticAccountReadFailureFailsClosed(t *testing.T) {
+	sentinel := errors.New("member read failed")
+	groups := []Group{{ID: 10, Platform: PlatformAnthropic, ModelAllowlist: GroupModelAllowlist{Enabled: true}}}
+	svc := NewModelPlazaService(
+		&mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return nil, nil }},
+		&stubGroupRepoForAvailable{activeGroups: groups},
+		&modelPlazaMembersRepoStub{err: sentinel}, nil, nil, nil,
+	)
+	out, err := svc.ListGroups(context.Background())
+	require.Nil(t, out)
+	require.ErrorIs(t, err, sentinel)
 }
 
 func TestListPlazaGroups_DisabledModelAllowlistKeepsChannelPricingModels(t *testing.T) {
@@ -538,7 +613,7 @@ func TestListPlazaGroups_RepoErrorsPropagate(t *testing.T) {
 	repo := &mockChannelRepository{
 		listAllFn: func(ctx context.Context) ([]Channel, error) { return nil, sentinel },
 	}
-	svc := NewModelPlazaService(repo, &stubGroupRepoForAvailable{}, nil, nil, nil)
+	svc := NewModelPlazaService(repo, &stubGroupRepoForAvailable{}, nil, nil, nil, nil)
 	out, err := svc.ListGroups(context.Background())
 	require.Nil(t, out)
 	require.ErrorIs(t, err, sentinel)
@@ -546,7 +621,7 @@ func TestListPlazaGroups_RepoErrorsPropagate(t *testing.T) {
 	svc2 := NewModelPlazaService(
 		&mockChannelRepository{listAllFn: func(ctx context.Context) ([]Channel, error) { return nil, nil }},
 		&stubGroupRepoForAvailable{listActiveErr: sentinel},
-		nil, nil, nil,
+		nil, nil, nil, nil,
 	)
 	out2, err2 := svc2.ListGroups(context.Background())
 	require.Nil(t, out2)
@@ -563,7 +638,7 @@ func newPlazaServiceWithBilling(channels []Channel, groups []Group, groupPlatfor
 	}
 	cs := NewChannelService(repo, nil, nil, nil, nil)
 	bs := NewBillingService(&config.Config{}, catalog)
-	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, catalog, bs, NewModelPricingResolver(cs, bs))
+	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaMembersFromGroups(groups), catalog, bs, NewModelPricingResolver(cs, bs))
 }
 
 func plazaModelsByName(models []PlazaModel) map[string]PlazaModel {
