@@ -727,6 +727,23 @@ type userGroupRateBatchReader interface {
 	GetByUserIDs(ctx context.Context, userIDs []int64) (map[int64]map[int64]float64, error)
 }
 
+func (s *adminServiceImpl) invalidateAuthCacheByGroupIDs(ctx context.Context, groupIDs []int64) {
+	if s == nil || s.authCacheInvalidator == nil {
+		return
+	}
+	seen := make(map[int64]struct{}, len(groupIDs))
+	for _, groupID := range groupIDs {
+		if groupID <= 0 {
+			continue
+		}
+		if _, exists := seen[groupID]; exists {
+			continue
+		}
+		seen[groupID] = struct{}{}
+		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, groupID)
+	}
+}
+
 // NewAdminService creates a new AdminService
 func NewAdminService(
 	cfg *config.Config,

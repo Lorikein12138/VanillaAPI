@@ -63,6 +63,7 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 			ID:                      31,
 			Platform:                PlatformOpenAI,
 			Type:                    AccountTypeOAuth,
+			GroupIDs:                []int64{71},
 			Status:                  StatusError,
 			ErrorMessage:            "refresh failed",
 			RateLimitResetAt:        &resetAt,
@@ -71,7 +72,8 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 		},
 	}
 	blocker := &runtimeBlockRecorder{}
-	svc := &adminServiceImpl{accountRepo: repo, runtimeBlocker: blocker}
+	cache := &authCacheInvalidatorStub{}
+	svc := &adminServiceImpl{accountRepo: repo, runtimeBlocker: blocker, authCacheInvalidator: cache}
 
 	updated, err := svc.ClearAccountError(context.Background(), 31)
 	require.NoError(t, err)
@@ -85,4 +87,5 @@ func TestAdminService_ClearAccountError_AlsoClearsRecoverableRuntimeState(t *tes
 	require.Nil(t, updated.TempUnschedulableUntil)
 	require.Empty(t, updated.TempUnschedulableReason)
 	require.Equal(t, []int64{31}, blocker.clearedIDs)
+	require.Equal(t, []int64{71}, cache.groupIDs)
 }

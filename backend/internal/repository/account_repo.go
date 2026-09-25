@@ -1274,6 +1274,12 @@ func (r *accountRepository) ListByGroup(ctx context.Context, groupID int64) ([]s
 	return accounts, nil
 }
 
+// ListAllByGroup returns all undeleted accounts bound to a group without
+// filtering by status, schedulability, or transient runtime state.
+func (r *accountRepository) ListAllByGroup(ctx context.Context, groupID int64) ([]service.Account, error) {
+	return r.queryAccountsByGroup(ctx, groupID, accountGroupQueryOptions{})
+}
+
 func (r *accountRepository) ListActive(ctx context.Context) ([]service.Account, error) {
 	accounts, err := r.client.Account.Query().
 		Where(dbaccount.StatusEQ(service.StatusActive)).

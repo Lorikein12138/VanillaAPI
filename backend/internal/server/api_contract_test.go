@@ -1419,20 +1419,30 @@ func TestAPIContracts(t *testing.T) {
 			status, body := doRequest(t, deps.router, tt.method, tt.path, tt.body, tt.headers)
 			require.Equal(t, tt.wantStatus, status)
 			require.JSONEq(t, tt.wantJSON, body)
+			if tt.path == "/api/v1/admin/accounts/bulk-update" {
+				require.Equal(t, []int64{101, 102}, deps.accountRepo.bulkUpdateIDs)
+				require.Equal(t, []int64{101, 102}, deps.accountRepo.getByIDsIDs)
+				require.Len(t, deps.accountRepo.bulkUpdates, 1)
+				require.NotNil(t, deps.accountRepo.bulkUpdates[0].Schedulable)
+				require.False(t, *deps.accountRepo.bulkUpdates[0].Schedulable)
+				require.Equal(t, []int64{7, 8, 11}, deps.authCacheInvalidator.groupIDs)
+			}
 		})
 	}
 }
 
 type contractDeps struct {
-	now         time.Time
-	router      http.Handler
-	cfg         *config.Config
-	apiKeyRepo  *stubApiKeyRepo
-	groupRepo   *stubGroupRepo
-	userSubRepo *stubUserSubscriptionRepo
-	usageRepo   *stubUsageLogRepo
-	settingRepo *stubSettingRepo
-	redeemRepo  *stubRedeemCodeRepo
+	now                  time.Time
+	router               http.Handler
+	cfg                  *config.Config
+	apiKeyRepo           *stubApiKeyRepo
+	groupRepo            *stubGroupRepo
+	accountRepo          *stubAccountRepo
+	authCacheInvalidator *stubAuthCacheInvalidator
+	userSubRepo          *stubUserSubscriptionRepo
+	usageRepo            *stubUsageLogRepo
+	settingRepo          *stubSettingRepo
+	redeemRepo           *stubRedeemCodeRepo
 }
 
 func newContractDeps(t *testing.T) *contractDeps {
@@ -1462,7 +1472,11 @@ func newContractDeps(t *testing.T) *contractDeps {
 	apiKeyCache := stubApiKeyCache{}
 	groupRepo := &stubGroupRepo{}
 	userSubRepo := &stubUserSubscriptionRepo{}
-	accountRepo := stubAccountRepo{}
+	accountRepo := &stubAccountRepo{accounts: map[int64]*service.Account{
+		101: {ID: 101, GroupIDs: []int64{7, 8}},
+		102: {ID: 102, GroupIDs: []int64{8, 11, 7}},
+	}}
+	authCacheInvalidator := &stubAuthCacheInvalidator{}
 	proxyRepo := stubProxyRepo{}
 	redeemRepo := &stubRedeemCodeRepo{}
 
@@ -1488,7 +1502,7 @@ func newContractDeps(t *testing.T) *contractDeps {
 	settingRepo := newStubSettingRepo()
 	settingService := service.NewSettingService(settingRepo, cfg)
 
-	adminService := service.NewAdminService(nil, userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	adminService := service.NewAdminService(nil, userRepo, groupRepo, accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, authCacheInvalidator, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	authHandler := handler.NewAuthHandler(cfg, nil, userService, settingService, nil, redeemService, nil, nil)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, nil, nil)
@@ -1545,15 +1559,17 @@ func newContractDeps(t *testing.T) *contractDeps {
 	v1Admin.POST("/accounts/bulk-update", adminAccountHandler.BulkUpdate)
 
 	return &contractDeps{
-		now:         now,
-		router:      r,
-		cfg:         cfg,
-		apiKeyRepo:  apiKeyRepo,
-		groupRepo:   groupRepo,
-		userSubRepo: userSubRepo,
-		usageRepo:   usageRepo,
-		settingRepo: settingRepo,
-		redeemRepo:  redeemRepo,
+		now:                  now,
+		router:               r,
+		cfg:                  cfg,
+		apiKeyRepo:           apiKeyRepo,
+		groupRepo:            groupRepo,
+		accountRepo:          accountRepo,
+		authCacheInvalidator: authCacheInvalidator,
+		userSubRepo:          userSubRepo,
+		usageRepo:            usageRepo,
+		settingRepo:          settingRepo,
+		redeemRepo:           redeemRepo,
 	}
 }
 
@@ -1861,7 +1877,10 @@ func (stubGroupRepo) CreateFromSource(ctx context.Context, group *service.Group,
 }
 
 type stubAccountRepo struct {
+	accounts      map[int64]*service.Account
+	getByIDsIDs   []int64
 	bulkUpdateIDs []int64
+	bulkUpdates   []service.AccountBulkUpdate
 }
 
 func (s *stubAccountRepo) Create(ctx context.Context, account *service.Account) error {
@@ -1877,7 +1896,14 @@ func (s *stubAccountRepo) GetByID(ctx context.Context, id int64) (*service.Accou
 }
 
 func (s *stubAccountRepo) GetByIDs(ctx context.Context, ids []int64) ([]*service.Account, error) {
-	return nil, errors.New("not implemented")
+	s.getByIDsIDs = append([]int64(nil), ids...)
+	accounts := make([]*service.Account, 0, len(ids))
+	for _, id := range ids {
+		if account := s.accounts[id]; account != nil {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts, nil
 }
 
 func (s *stubAccountRepo) ExistsByID(ctx context.Context, id int64) (bool, error) {
@@ -2060,7 +2086,20 @@ func (s *stubAccountRepo) ResetQuotaUsedAndClearRateLimitCooldown(ctx context.Co
 
 func (s *stubAccountRepo) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
 	s.bulkUpdateIDs = append([]int64{}, ids...)
+	s.bulkUpdates = append(s.bulkUpdates, updates)
 	return int64(len(ids)), nil
+}
+
+type stubAuthCacheInvalidator struct {
+	groupIDs []int64
+}
+
+func (*stubAuthCacheInvalidator) InvalidateAuthCacheByKey(context.Context, string) {}
+
+func (*stubAuthCacheInvalidator) InvalidateAuthCacheByUserID(context.Context, int64) {}
+
+func (s *stubAuthCacheInvalidator) InvalidateAuthCacheByGroupID(_ context.Context, groupID int64) {
+	s.groupIDs = append(s.groupIDs, groupID)
 }
 
 func (s *stubAccountRepo) ListCRSAccountIDs(ctx context.Context) (map[string]int64, error) {

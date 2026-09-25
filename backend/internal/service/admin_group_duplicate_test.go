@@ -195,7 +195,11 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 		{AccountID: 13, GroupID: source.ID, Priority: 37},
 		{AccountID: 17, GroupID: source.ID, Priority: 8},
 	}
-	svc := &adminServiceImpl{groupRepo: repo, groupDuplicateRepo: repo}
+	members := &groupModelAllowlistMembersRepoStub{accounts: []Account{
+		{Credentials: map[string]any{"model_mapping": map[string]any{"auto-a": "auto-a"}}},
+		{Credentials: map[string]any{"model_mapping": map[string]any{"auto-b": "auto-b"}}},
+	}}
+	svc := &adminServiceImpl{groupRepo: repo, groupDuplicateRepo: repo, accountRepo: members}
 
 	duplicate, err := svc.DuplicateGroup(context.Background(), source.ID, "admin:7", "stable-key")
 
@@ -217,7 +221,9 @@ func TestDuplicateGroupCopiesConfigurationDeeplyAndResetsRuntimeState(t *testing
 	require.Equal(t, source.MessagesDispatchModelConfig, duplicate.MessagesDispatchModelConfig)
 	require.Equal(t, source.ForceOpenAIFast, duplicate.ForceOpenAIFast)
 	require.Equal(t, source.FreeOpenAIFast, duplicate.FreeOpenAIFast)
-	require.Equal(t, source.ModelAllowlist, duplicate.ModelAllowlist)
+	require.Equal(t, GroupModelAllowlist{Enabled: true, Models: []string{"auto-a", "auto-b"}}, duplicate.ModelAllowlist)
+	require.Equal(t, 2, duplicate.ModelAllowlistSourceAccountCount)
+	require.Empty(t, repo.groups[duplicate.ID].ModelAllowlist.Models, "persisted automatic allowlists must discard legacy entries")
 	require.Equal(t, source.RPMLimit, duplicate.RPMLimit)
 	require.Equal(t, source.MaxReasoningEffort, duplicate.MaxReasoningEffort)
 	require.Equal(t, source.MaxReasoningEffortOverLimit, duplicate.MaxReasoningEffortOverLimit)
