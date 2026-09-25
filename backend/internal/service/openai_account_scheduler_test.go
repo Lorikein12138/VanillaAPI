@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -65,6 +66,15 @@ type schedulerTestLogHandler struct {
 	records []schedulerTestLogRecord
 }
 
+type blockingOpenAIProbeTraceLogHandler struct {
+	entered     chan struct{}
+	unblock     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	records     []schedulerTestLogRecord
+}
+
 func (h *schedulerTestLogHandler) Enabled(context.Context, slog.Level) bool {
 	return true
 }
@@ -90,6 +100,48 @@ func (h *schedulerTestLogHandler) WithGroup(string) slog.Handler {
 }
 
 func (h *schedulerTestLogHandler) snapshot() []schedulerTestLogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	result := make([]schedulerTestLogRecord, len(h.records))
+	copy(result, h.records)
+	return result
+}
+
+func (h *blockingOpenAIProbeTraceLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingOpenAIProbeTraceLogHandler) Handle(_ context.Context, record slog.Record) error {
+	attrs := make(map[string]any)
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs[attr.Key] = attr.Value.Resolve().Any()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, schedulerTestLogRecord{message: record.Message, attrs: attrs})
+	h.mu.Unlock()
+	if record.Message == "openai_account_health_probe" {
+		h.enteredOnce.Do(func() {
+			close(h.entered)
+			<-h.unblock
+		})
+	}
+	return nil
+}
+
+func (h *blockingOpenAIProbeTraceLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingOpenAIProbeTraceLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingOpenAIProbeTraceLogHandler) release() {
+	h.releaseOnce.Do(func() { close(h.unblock) })
+}
+
+func (h *blockingOpenAIProbeTraceLogHandler) snapshot() []schedulerTestLogRecord {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	result := make([]schedulerTestLogRecord, len(h.records))
@@ -6076,4 +6128,610 @@ func TestOpenAIAccountRuntimeStats_ReclaimWithSchedulerModesDisabled(t *testing.
 	require.True(t, ok)
 	require.Equal(t, uint32(openAIAccountHealthDegraded), remaining.healthLevel.Load(), "closing both modes must not erase legacy degraded state")
 	release()
+}
+
+func captureOpenAIProbeTraceLogs(t *testing.T) *schedulerTestLogHandler {
+	t.Helper()
+	previousLogger := slog.Default()
+	logHandler := &schedulerTestLogHandler{}
+	slog.SetDefault(slog.New(logHandler))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	return logHandler
+}
+
+func openAIProbeTraceLogRecords(records []schedulerTestLogRecord) []schedulerTestLogRecord {
+	var result []schedulerTestLogRecord
+	for _, record := range records {
+		if record.message == "openai_account_health_probe" {
+			result = append(result, record)
+		}
+	}
+	return result
+}
+
+func requireOpenAIProbeTraceFieldWhitelist(t *testing.T, record schedulerTestLogRecord) {
+	t.Helper()
+	allowed := map[string]struct{}{
+		"account_id": {}, "group_id": {}, "probe_trace_id": {}, "correlation": {},
+		"phase": {}, "outcome": {}, "reason": {}, "batch_ordinal": {},
+		"batch_sample_count": {}, "backoff_step": {}, "next_probe_at": {}, "health_level": {},
+	}
+	for key := range record.attrs {
+		_, ok := allowed[key]
+		require.True(t, ok, "unexpected probe trace log field %q", key)
+	}
+	if value, exists := record.attrs["correlation"]; exists {
+		correlation, ok := value.(string)
+		require.True(t, ok, "correlation must be a string")
+		require.Contains(t, []string{"available", "unavailable"}, correlation)
+	}
+	if value, exists := record.attrs["batch_sample_count"]; exists {
+		batchSampleCount, ok := value.(int64)
+		require.True(t, ok, "batch_sample_count must be an int64")
+		require.GreaterOrEqual(t, batchSampleCount, int64(0))
+		require.LessOrEqual(t, batchSampleCount, int64(openAIAccountSmartProbeBatchLimit))
+	}
+	if value, exists := record.attrs["batch_ordinal"]; exists {
+		batchOrdinal, ok := value.(int64)
+		require.True(t, ok, "batch_ordinal must be an int64")
+		require.GreaterOrEqual(t, batchOrdinal, int64(1))
+		require.LessOrEqual(t, batchOrdinal, int64(openAIAccountSmartProbeBatchLimit))
+	}
+}
+
+func requireOpenAIProbeOpportunityFieldContract(t *testing.T, record schedulerTestLogRecord) {
+	t.Helper()
+	require.Equal(t, "openai_account_health_all_degraded", record.message)
+	require.ElementsMatch(t, []string{"candidate_count", "probe_opportunity"}, openAIProbeOpportunityLogAttrKeys(record.attrs))
+	opportunity, ok := record.attrs["probe_opportunity"].(string)
+	require.True(t, ok, "probe_opportunity must be a string")
+	require.Contains(t, []string{"eligible", "unavailable"}, opportunity)
+}
+
+func openAIProbeOpportunityLogAttrKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func TestOpenAIAccountProbeTraceBatchRecoveryAndRedaction(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	const groupID, degradedID, primaryID int64 = 81101, 81111, 81112
+	accounts := []Account{
+		newSmartSchedulerTestAccount(degradedID, groupID, 10),
+		newSmartSchedulerTestAccount(primaryID, groupID, 20),
+	}
+	accounts[0].Credentials = map[string]any{
+		"api_key":              "probe-api-key-sentinel",
+		"request_body":         "probe-body-sentinel",
+		"prompt":               "probe-prompt-sentinel",
+		"session_id":           "probe-session-id-sentinel",
+		"session_hash":         "probe-session-hash-sentinel",
+		"response_id":          "probe-response-id-sentinel",
+		"previous_response_id": "probe-previous-response-id-sentinel",
+	}
+	svc := newSmartSchedulerTestService(accounts, schedulerTestConcurrencyCache{})
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+
+	traceIDs := make(map[string]struct{}, openAIAccountSmartProbeBatchLimit)
+	for ordinal := 1; ordinal <= openAIAccountSmartProbeBatchLimit; ordinal++ {
+		before := len(logHandler.snapshot())
+		selection := selectSmartAccountForTest(t, svc, groupID, "probe-session-sentinel")
+		require.Equal(t, degradedID, selection.Account.ID)
+		require.NotZero(t, selection.Account.smartHealthProbeID)
+
+		requestRecords := logHandler.snapshot()[before:]
+		traceRecords := openAIProbeTraceLogRecords(requestRecords)
+		var start *schedulerTestLogRecord
+		for i := range traceRecords {
+			if traceRecords[i].attrs["phase"] == "start" {
+				start = &traceRecords[i]
+				break
+			}
+		}
+		require.NotNil(t, start)
+		require.Equal(t, int64(degradedID), start.attrs["account_id"])
+		require.Equal(t, int64(groupID), start.attrs["group_id"])
+		require.Equal(t, int64(ordinal), start.attrs["batch_ordinal"])
+		require.Equal(t, "available", start.attrs["correlation"])
+		requireOpenAIProbeTraceFieldWhitelist(t, *start)
+		traceID, ok := start.attrs["probe_trace_id"].(string)
+		require.True(t, ok)
+		require.NotEmpty(t, traceID)
+		traceIDs[traceID] = struct{}{}
+
+		var decision *schedulerTestLogRecord
+		for i := range requestRecords {
+			if requestRecords[i].message == "openai_account_schedule_decision" {
+				decision = &requestRecords[i]
+			}
+		}
+		require.NotNil(t, decision)
+		require.Equal(t, traceID, decision.attrs["probe_trace_id"])
+		require.Equal(t, "available", decision.attrs["correlation"])
+
+		svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, nil)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		allTraceRecords := openAIProbeTraceLogRecords(logHandler.snapshot()[before:])
+		var finishes []schedulerTestLogRecord
+		for _, record := range allTraceRecords {
+			if record.attrs["phase"] == "finish" {
+				finishes = append(finishes, record)
+			}
+		}
+		require.Len(t, finishes, 1)
+		require.Equal(t, traceID, finishes[0].attrs["probe_trace_id"])
+		require.Equal(t, int64(ordinal), finishes[0].attrs["batch_ordinal"])
+		require.Equal(t, "qualified", finishes[0].attrs["outcome"])
+		require.Equal(t, int64(ordinal), finishes[0].attrs["batch_sample_count"])
+		requireOpenAIProbeTraceFieldWhitelist(t, finishes[0])
+		for _, record := range logHandler.snapshot() {
+			if record.message != "openai_account_health_probe" &&
+				record.message != "openai_account_schedule_decision" &&
+				record.message != "openai_account_health_all_degraded" {
+				continue
+			}
+			for _, sentinel := range []string{
+				"probe-api-key-sentinel", "probe-body-sentinel", "probe-prompt-sentinel",
+				"probe-session-id-sentinel", "probe-session-hash-sentinel",
+				"probe-response-id-sentinel", "probe-previous-response-id-sentinel",
+			} {
+				require.NotContains(t, fmt.Sprint(record.attrs), sentinel)
+			}
+		}
+	}
+	require.Len(t, traceIDs, openAIAccountSmartProbeBatchLimit)
+	require.Equal(t, int64(openAIAccountSmartProbeBatchLimit), svc.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthProbeTotal)
+	require.NotEqual(t, openAIAccountHealthDegraded, scheduler.stats.health(degradedID, time.Now(), svc.openAIStickyEscapeConfig()).level)
+}
+
+func TestOpenAIAccountProbeTraceConcurrentTerminalAndStaleID(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	const groupID, degradedID, primaryID int64 = 81201, 81211, 81212
+	svc := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(degradedID, groupID, 10),
+		newSmartSchedulerTestAccount(primaryID, groupID, 20),
+	}, schedulerTestConcurrencyCache{})
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+	first := selectSmartAccountForTest(t, svc, groupID, "")
+	firstProbeID := first.Account.smartHealthProbeID
+	require.NotZero(t, firstProbeID)
+
+	var terminal sync.WaitGroup
+	terminal.Add(2)
+	go func() {
+		defer terminal.Done()
+		svc.ReportOpenAIAccountScheduleResult(first.Account, "gpt-5.1", true, nil)
+	}()
+	go func() {
+		defer terminal.Done()
+		if first.ReleaseFunc != nil {
+			first.ReleaseFunc()
+		}
+	}()
+	terminal.Wait()
+	for range 3 {
+		if first.ReleaseFunc != nil {
+			first.ReleaseFunc()
+		}
+	}
+
+	firstTraceID := ""
+	firstTerminals := 0
+	for _, record := range openAIProbeTraceLogRecords(logHandler.snapshot()) {
+		if record.attrs["phase"] == "start" && record.attrs["account_id"] == degradedID {
+			firstTraceID, _ = record.attrs["probe_trace_id"].(string)
+		}
+		if record.attrs["probe_trace_id"] == firstTraceID && record.attrs["phase"] != "start" {
+			firstTerminals++
+		}
+	}
+	require.NotEmpty(t, firstTraceID)
+	require.Equal(t, 1, firstTerminals)
+
+	second := selectSmartAccountForTest(t, svc, groupID, "")
+	secondProbeID := second.Account.smartHealthProbeID
+	require.NotZero(t, secondProbeID)
+	require.NotEqual(t, firstProbeID, secondProbeID)
+	svc.ReportOpenAIAccountScheduleResult(first.Account, "gpt-5.1", true, nil)
+	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, degradedID)
+	stat.mu.Lock()
+	require.Equal(t, secondProbeID, stat.probeID, "a late result for the old probe must not clear the new lease")
+	stat.mu.Unlock()
+	if second.ReleaseFunc != nil {
+		second.ReleaseFunc()
+	}
+
+	secondTraceID := ""
+	secondTerminals := 0
+	for _, record := range openAIProbeTraceLogRecords(logHandler.snapshot()) {
+		if record.attrs["phase"] == "start" && record.attrs["account_id"] == degradedID {
+			traceID, _ := record.attrs["probe_trace_id"].(string)
+			if traceID != firstTraceID {
+				secondTraceID = traceID
+			}
+		}
+		if secondTraceID != "" && record.attrs["probe_trace_id"] == secondTraceID && record.attrs["phase"] != "start" {
+			secondTerminals++
+		}
+	}
+	require.NotEmpty(t, secondTraceID)
+	require.Equal(t, 1, secondTerminals)
+}
+
+func TestOpenAIAccountProbeTraceBlockedHandlerDoesNotBlockTerminal(t *testing.T) {
+	previousLogger := slog.Default()
+	handler := &blockingOpenAIProbeTraceLogHandler{
+		entered: make(chan struct{}),
+		unblock: make(chan struct{}),
+	}
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		handler.release()
+		slog.SetDefault(previousLogger)
+	})
+
+	stats := newOpenAIAccountRuntimeStats()
+	const accountID int64 = 81221
+	now := time.Now()
+	seedSmartDegradedAccount(t, stats, accountID, "error_rate", now.Add(-2*time.Minute))
+	probeID := stats.probeSequence.Add(1)
+	require.True(t, stats.tryAcquireProbeLeaseWithID(accountID, now, probeID))
+
+	startDone := make(chan struct{})
+	go func() {
+		stats.markProbeSlotAcquired(accountID, probeID, now)
+		close(startDone)
+	}()
+	select {
+	case <-handler.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe start log handler was not entered")
+	}
+
+	cancelDone := make(chan struct{})
+	go func() {
+		stats.cancelProbeLeaseForID(accountID, probeID, now.Add(time.Second))
+		close(cancelDone)
+	}()
+	select {
+	case <-cancelDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-account cancellation waited for the blocked log handler")
+	}
+	select {
+	case <-startDone:
+		t.Fatal("start call returned before its synchronous log handler was released")
+	default:
+	}
+
+	handler.release()
+	select {
+	case <-startDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe trace drainer did not finish after releasing the handler")
+	}
+
+	traceRecords := openAIProbeTraceLogRecords(handler.snapshot())
+	require.Len(t, traceRecords, 2)
+	require.Equal(t, "start", traceRecords[0].attrs["phase"])
+	require.Equal(t, "cancel", traceRecords[1].attrs["phase"])
+	startTraceID, ok := traceRecords[0].attrs["probe_trace_id"].(string)
+	require.True(t, ok)
+	terminalTraceID, ok := traceRecords[1].attrs["probe_trace_id"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, startTraceID)
+	require.Equal(t, startTraceID, terminalTraceID)
+}
+
+func TestOpenAIAccountProbeTraceAttributionAndBatchTimeout(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Now()
+	const accountID int64 = 81801
+	seedSmartDegradedAccount(t, stats, accountID, "error_rate", now.Add(-2*time.Minute))
+
+	probeID := stats.probeSequence.Add(1)
+	require.True(t, stats.tryAcquireProbeLeaseWithID(accountID, now, probeID))
+	stats.markProbeSlotAcquired(accountID, probeID, now)
+	stats.reportAtForRequest(accountID, false, nil, now.Add(time.Second), openAIStickyEscapeConfig{}, false, true, probeID, true)
+	traceRecords := openAIProbeTraceLogRecords(logHandler.snapshot())
+	require.Len(t, traceRecords, 2)
+	require.Equal(t, "start", traceRecords[0].attrs["phase"])
+	require.Equal(t, "finish", traceRecords[1].attrs["phase"])
+	require.Equal(t, "unqualified", traceRecords[1].attrs["outcome"])
+	require.Equal(t, "account_error", traceRecords[1].attrs["reason"])
+	require.Len(t, openAIAccountRuntimeStatForTest(t, stats, accountID).probeBatchSamples, 1)
+
+	const unattributableAccountID int64 = 81803
+	unattributableStart := now.Add(time.Minute)
+	seedSmartDegradedAccount(t, stats, unattributableAccountID, "error_rate", unattributableStart.Add(-2*time.Minute))
+	unattributableProbeID := stats.probeSequence.Add(1)
+	require.True(t, stats.tryAcquireProbeLeaseWithID(unattributableAccountID, unattributableStart, unattributableProbeID))
+	stats.markProbeSlotAcquired(unattributableAccountID, unattributableProbeID, unattributableStart)
+	stats.reportAtForRequest(unattributableAccountID, false, nil, unattributableStart.Add(time.Second), openAIStickyEscapeConfig{}, false, true, unattributableProbeID, false)
+	traceRecords = openAIProbeTraceLogRecords(logHandler.snapshot())
+	var unattributableTerminal *schedulerTestLogRecord
+	for i := range traceRecords {
+		if traceRecords[i].attrs["account_id"] == unattributableAccountID && traceRecords[i].attrs["phase"] != "start" {
+			unattributableTerminal = &traceRecords[i]
+		}
+	}
+	require.NotNil(t, unattributableTerminal)
+	require.Equal(t, "cancel", unattributableTerminal.attrs["phase"])
+	require.Equal(t, "inconclusive", unattributableTerminal.attrs["outcome"])
+	require.Equal(t, "not_attributable", unattributableTerminal.attrs["reason"])
+	unattributableStat := openAIAccountRuntimeStatForTest(t, stats, unattributableAccountID)
+	unattributableStat.mu.Lock()
+	require.Empty(t, unattributableStat.probeBatchSamples)
+	unattributableStat.mu.Unlock()
+
+	const timeoutAccountID int64 = 81802
+	probeStartedAt := now.Add(-openAIAccountSmartProbeBatchTimeout - time.Minute)
+	seedSmartDegradedAccount(t, stats, timeoutAccountID, "error_rate", probeStartedAt.Add(-2*time.Minute))
+	timeoutProbeID := stats.probeSequence.Add(1)
+	require.True(t, stats.tryAcquireProbeLeaseWithID(timeoutAccountID, probeStartedAt, timeoutProbeID))
+	stats.markProbeSlotAcquired(timeoutAccountID, timeoutProbeID, probeStartedAt)
+	stats.reportAtForRequest(
+		timeoutAccountID,
+		true,
+		nil,
+		probeStartedAt.Add(openAIAccountSmartProbeBatchTimeout+time.Second),
+		openAIStickyEscapeConfig{},
+		false,
+		true,
+		timeoutProbeID,
+		true,
+	)
+	traceRecords = openAIProbeTraceLogRecords(logHandler.snapshot())
+	var timeoutFinish *schedulerTestLogRecord
+	for i := range traceRecords {
+		if traceRecords[i].attrs["account_id"] == timeoutAccountID && traceRecords[i].attrs["phase"] == "finish" {
+			timeoutFinish = &traceRecords[i]
+		}
+	}
+	require.NotNil(t, timeoutFinish)
+	require.Equal(t, "inconclusive", timeoutFinish.attrs["outcome"])
+	require.Equal(t, "batch_timeout", timeoutFinish.attrs["reason"])
+	require.Zero(t, timeoutFinish.attrs["batch_sample_count"])
+	requireOpenAIProbeTraceFieldWhitelist(t, traceRecords[len(traceRecords)-1])
+
+	const retryAccountID int64 = 81804
+	retryStart := now.Add(2 * time.Minute)
+	seedSmartDegradedAccount(t, stats, retryAccountID, "error_rate", retryStart.Add(-2*time.Minute))
+	for ordinal := 1; ordinal <= 2; ordinal++ {
+		probeAt := retryStart.Add(time.Duration(ordinal) * time.Second)
+		retryProbeID := stats.probeSequence.Add(1)
+		require.True(t, stats.tryAcquireProbeLeaseWithID(retryAccountID, probeAt, retryProbeID))
+		stats.markProbeSlotAcquired(retryAccountID, retryProbeID, probeAt)
+		stats.reportAtForRequest(retryAccountID, false, nil, probeAt.Add(time.Second), openAIStickyEscapeConfig{}, false, true, retryProbeID, true)
+	}
+	retryStat := openAIAccountRuntimeStatForTest(t, stats, retryAccountID)
+	retryAt := time.Unix(0, retryStat.nextProbeAt.Load()).Add(time.Second)
+	retryProbeID := stats.probeSequence.Add(1)
+	require.True(t, stats.tryAcquireProbeLeaseWithID(retryAccountID, retryAt, retryProbeID))
+	stats.markProbeSlotAcquired(retryAccountID, retryProbeID, retryAt)
+	stats.cancelProbeLeaseForID(retryAccountID, retryProbeID, retryAt.Add(time.Second))
+	var retryOrdinals []int64
+	for _, record := range openAIProbeTraceLogRecords(logHandler.snapshot()) {
+		if record.attrs["account_id"] == retryAccountID && record.attrs["phase"] == "start" {
+			ordinal, ok := record.attrs["batch_ordinal"].(int64)
+			require.True(t, ok, "batch_ordinal must be an int64")
+			retryOrdinals = append(retryOrdinals, ordinal)
+		}
+	}
+	require.Equal(t, []int64{1, 2, 1}, retryOrdinals)
+}
+
+func TestOpenAIAccountProbeTraceWaitPlanAndAllDegraded(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	const waitGroup, waitDegraded, waitPrimary int64 = 81301, 81311, 81312
+	waitService := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(waitDegraded, waitGroup, 10),
+		newSmartSchedulerTestAccount(waitPrimary, waitGroup, 20),
+	}, schedulerTestConcurrencyCache{acquireResults: map[int64]bool{waitDegraded: false, waitPrimary: false}})
+	waitScheduler, ok := waitService.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, waitScheduler.stats, waitDegraded, "error_rate", time.Now().Add(-2*time.Minute))
+	waitSelection := selectSmartAccountForTest(t, waitService, waitGroup, "")
+	require.NotNil(t, waitSelection.WaitPlan)
+	require.Zero(t, waitService.SnapshotOpenAIAccountSchedulerMetrics().SmartHealthProbeTotal)
+	require.Empty(t, openAIProbeTraceLogRecords(logHandler.snapshot()))
+
+	const unavailableGroup, unavailableID int64 = 81401, 81411
+	unavailableService := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(unavailableID, unavailableGroup, 10),
+	}, schedulerTestConcurrencyCache{})
+	unavailableScheduler, ok := unavailableService.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, unavailableScheduler.stats, unavailableID, "error_rate", time.Now().Add(-2*time.Minute))
+	unavailableStat := openAIAccountRuntimeStatForTest(t, unavailableScheduler.stats, unavailableID)
+	unavailableStat.nextProbeAt.Store(time.Now().Add(time.Hour).UnixNano())
+	before := len(logHandler.snapshot())
+	unavailableSelection := selectSmartAccountForTest(t, unavailableService, unavailableGroup, "")
+	require.Equal(t, unavailableID, unavailableSelection.Account.ID)
+	var unavailableRecord *schedulerTestLogRecord
+	for _, record := range logHandler.snapshot()[before:] {
+		if record.message == "openai_account_health_all_degraded" {
+			unavailableRecord = &record
+		}
+	}
+	require.NotNil(t, unavailableRecord)
+	requireOpenAIProbeOpportunityFieldContract(t, *unavailableRecord)
+	require.Equal(t, "unavailable", unavailableRecord.attrs["probe_opportunity"])
+	require.Len(t, unavailableRecord.attrs, 2)
+	require.Empty(t, openAIProbeTraceLogRecords(logHandler.snapshot()[before:]))
+
+	const eligibleGroup, eligibleID int64 = 81501, 81511
+	eligibleService := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(eligibleID, eligibleGroup, 10),
+	}, schedulerTestConcurrencyCache{})
+	eligibleScheduler, ok := eligibleService.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, eligibleScheduler.stats, eligibleID, "error_rate", time.Now().Add(-2*time.Minute))
+	before = len(logHandler.snapshot())
+	eligibleSelection := selectSmartAccountForTest(t, eligibleService, eligibleGroup, "")
+	require.NotZero(t, eligibleSelection.Account.smartHealthProbeID)
+	var eligibleRecord *schedulerTestLogRecord
+	for _, record := range logHandler.snapshot()[before:] {
+		if record.message == "openai_account_health_all_degraded" {
+			eligibleRecord = &record
+		}
+	}
+	require.NotNil(t, eligibleRecord)
+	requireOpenAIProbeOpportunityFieldContract(t, *eligibleRecord)
+	require.Equal(t, "eligible", eligibleRecord.attrs["probe_opportunity"])
+	if eligibleSelection.ReleaseFunc != nil {
+		eligibleSelection.ReleaseFunc()
+	}
+	require.Len(t, openAIProbeTraceLogRecords(logHandler.snapshot()[before:]), 2)
+}
+
+func TestOpenAIAccountProbeTraceCorrelationFallbackAndSchedulerModes(t *testing.T) {
+	if namespace, available := openAIProbeTraceNamespaceFrom(strings.NewReader("")); available || namespace != "" {
+		t.Fatalf("empty random source returned namespace=%q available=%v", namespace, available)
+	}
+	t.Run("instance_scope_disambiguates_local_probe_ids", func(t *testing.T) {
+		logHandler := captureOpenAIProbeTraceLogs(t)
+		first := newOpenAIAccountRuntimeStats()
+		second := newOpenAIAccountRuntimeStats()
+		for index, stats := range []*openAIAccountRuntimeStats{first, second} {
+			stats.probeTraceNamespace = "test-namespace"
+			stats.probeTraceNamespaceAvailable = true
+			stats.probeTraceInstanceID = uint64(index + 1)
+			seedSmartDegradedAccount(t, stats, 81600, "error_rate", time.Now().Add(-2*time.Minute))
+			require.True(t, stats.tryAcquireProbeLeaseWithID(81600, time.Now(), 1))
+			stats.markProbeSlotAcquired(81600, 1, time.Now())
+		}
+		var traceIDs []string
+		for _, record := range openAIProbeTraceLogRecords(logHandler.snapshot()) {
+			if record.attrs["phase"] == "start" {
+				traceID, ok := record.attrs["probe_trace_id"].(string)
+				require.True(t, ok, "probe_trace_id must be a string")
+				traceIDs = append(traceIDs, traceID)
+			}
+		}
+		require.Len(t, traceIDs, 2)
+		require.NotEqual(t, traceIDs[0], traceIDs[1], "same local probeID in separate stats instances must not collide")
+		first.cancelProbeLeaseForID(81600, 1, time.Now())
+		second.cancelProbeLeaseForID(81600, 1, time.Now())
+	})
+
+	t.Run("random_source_failure_keeps_unavailable_events", func(t *testing.T) {
+		logHandler := captureOpenAIProbeTraceLogs(t)
+		const groupID, degradedID, primaryID int64 = 81601, 81611, 81612
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(degradedID, groupID, 10),
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		scheduler.stats.probeTraceNamespaceAvailable = false
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		selection := selectSmartAccountForTest(t, svc, groupID, "")
+		require.NotZero(t, selection.Account.smartHealthProbeID)
+		records := logHandler.snapshot()
+		var decision *schedulerTestLogRecord
+		for _, record := range records {
+			if record.message == "openai_account_schedule_decision" {
+				decision = &record
+			}
+		}
+		require.NotNil(t, decision)
+		require.Equal(t, "unavailable", decision.attrs["correlation"])
+		_, hasDecisionTrace := decision.attrs["probe_trace_id"]
+		require.False(t, hasDecisionTrace)
+		traces := openAIProbeTraceLogRecords(records)
+		require.Len(t, traces, 1)
+		require.Equal(t, "start", traces[0].attrs["phase"])
+		require.Equal(t, "unavailable", traces[0].attrs["correlation"])
+		_, hasStartTrace := traces[0].attrs["probe_trace_id"]
+		require.False(t, hasStartTrace)
+		svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, nil)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		traces = openAIProbeTraceLogRecords(logHandler.snapshot())
+		require.Len(t, traces, 2)
+		require.Equal(t, "finish", traces[1].attrs["phase"])
+		require.Equal(t, "unavailable", traces[1].attrs["correlation"])
+	})
+
+	for _, tc := range []struct {
+		name            string
+		smartEnabled    bool
+		advancedEnabled bool
+	}{
+		{name: "smart_off_advanced_off"},
+		{name: "smart_off_advanced_on", advancedEnabled: true},
+		{name: "smart_on_advanced_off", smartEnabled: true},
+		{name: "smart_on_advanced_on", smartEnabled: true, advancedEnabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetOpenAIAdvancedSchedulerSettingCacheForTest()
+			t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+			logHandler := captureOpenAIProbeTraceLogs(t)
+			const groupID, degradedID, primaryID int64 = 81701, 81711, 81712
+			svc := newSmartSchedulerTestService([]Account{
+				newSmartSchedulerTestAccount(degradedID, groupID, 10),
+				newSmartSchedulerTestAccount(primaryID, groupID, 20),
+			}, schedulerTestConcurrencyCache{})
+			svc.rateLimitService = newOpenAISchedulerModeRateLimitService(tc.smartEnabled, tc.advancedEnabled)
+			if tc.smartEnabled {
+				scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+				require.True(t, ok)
+				seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+			}
+			selection := selectSmartAccountForTest(t, svc, groupID, "")
+			if tc.smartEnabled {
+				require.NotZero(t, selection.Account.smartHealthProbeID)
+				svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, nil)
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				require.Len(t, openAIProbeTraceLogRecords(logHandler.snapshot()), 2)
+			} else {
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				require.Empty(t, openAIProbeTraceLogRecords(logHandler.snapshot()), "S=false must not emit smart probe events")
+			}
+		})
+	}
+	t.Run("smart_on_ordinary_selection_has_no_probe_trace", func(t *testing.T) {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+		logHandler := captureOpenAIProbeTraceLogs(t)
+		const groupID int64 = 81799
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(81791, groupID, 10),
+			newSmartSchedulerTestAccount(81792, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		svc.rateLimitService = newOpenAISchedulerModeRateLimitService(true, false)
+		selection := selectSmartAccountForTest(t, svc, groupID, "")
+		require.Zero(t, selection.Account.smartHealthProbeID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		var decision *schedulerTestLogRecord
+		for _, record := range logHandler.snapshot() {
+			if record.message == "openai_account_schedule_decision" {
+				decision = &record
+			}
+		}
+		require.NotNil(t, decision)
+		_, hasTrace := decision.attrs["probe_trace_id"]
+		require.False(t, hasTrace)
+		_, hasCorrelation := decision.attrs["correlation"]
+		require.False(t, hasCorrelation)
+		require.Empty(t, openAIProbeTraceLogRecords(logHandler.snapshot()))
+	})
 }
