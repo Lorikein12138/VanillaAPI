@@ -504,6 +504,8 @@ const baseSettingsResponse = {
   payment_visible_method_wxpay_enabled: true,
   openai_low_upstream_rate_priority_enabled: false,
   openai_oauth_scheduling_rate_multiplier: 1,
+  smart_scheduling_enabled: false,
+  openai_first_output_timeout_seconds: 30,
   openai_advanced_scheduler_enabled: false,
   openai_advanced_scheduler_sticky_weighted_enabled: false,
   openai_advanced_scheduler_subscription_priority_enabled: false,
@@ -1706,6 +1708,101 @@ describe("admin SettingsView payment visible method controls", () => {
     );
     expect(zhSettings.settings.openaiExperimentalScheduler.smartOnlyRelation).toBeTruthy();
     expect(enSettings.settings.openaiExperimentalScheduler.smartOnlyRelation).toBeTruthy();
+  });
+
+  it("SmartSchedulingStall loads missing timeout as 30 and preserves explicit zero", async () => {
+    const { openai_first_output_timeout_seconds: _ignored, ...missingTimeout } = baseSettingsResponse;
+    getSettings.mockResolvedValueOnce(missingTimeout);
+    const missingWrapper = mountView();
+    await flushPromises();
+    await openFeaturesTab(missingWrapper);
+    const missingInput = missingWrapper.get<HTMLInputElement>(
+      '[data-testid="smart-scheduling-first-output-timeout"]',
+    );
+    expect(missingInput.element.value).toBe("30");
+    await missingWrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ openai_first_output_timeout_seconds: 30 }),
+    );
+    missingWrapper.unmount();
+
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_first_output_timeout_seconds: 0,
+    });
+    const zeroWrapper = mountView();
+    await flushPromises();
+    await openFeaturesTab(zeroWrapper);
+    const zeroInput = zeroWrapper.get<HTMLInputElement>(
+      '[data-testid="smart-scheduling-first-output-timeout"]',
+    );
+    expect(zeroInput.element.value).toBe("0");
+    await zeroWrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ openai_first_output_timeout_seconds: 0 }),
+    );
+    zeroWrapper.unmount();
+  });
+
+  it("SmartSchedulingStall accepts boundary integers and rejects decimals or values outside 0-300", async () => {
+    for (const value of [0, 1, 30, 300]) {
+      getSettings.mockResolvedValueOnce({
+        ...baseSettingsResponse,
+        openai_first_output_timeout_seconds: value,
+      });
+      const wrapper = mountView();
+      await flushPromises();
+      await openFeaturesTab(wrapper);
+      const input = wrapper.get<HTMLInputElement>(
+        '[data-testid="smart-scheduling-first-output-timeout"]',
+      );
+      expect(input.attributes("min")).toBe("0");
+      expect(input.attributes("max")).toBe("300");
+      expect(input.attributes("step")).toBe("1");
+      await wrapper.find("form").trigger("submit.prevent");
+      await flushPromises();
+      expect(updateSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ openai_first_output_timeout_seconds: value }),
+      );
+      wrapper.unmount();
+    }
+
+    for (const value of [-1, 301, 1.5]) {
+      showError.mockClear();
+      updateSettings.mockClear();
+      getSettings.mockResolvedValueOnce({
+        ...baseSettingsResponse,
+        openai_first_output_timeout_seconds: 30,
+      });
+      const wrapper = mountView();
+      await flushPromises();
+      await openFeaturesTab(wrapper);
+      await wrapper
+        .get('[data-testid="smart-scheduling-first-output-timeout"]')
+        .setValue(String(value));
+      await wrapper.find("form").trigger("submit.prevent");
+      await flushPromises();
+      expect(updateSettings).not.toHaveBeenCalled();
+      expect(showError).toHaveBeenCalled();
+      wrapper.unmount();
+    }
+  });
+
+  it("SmartSchedulingStall references matching translated range, default, scope and billing-risk copy", () => {
+    for (const locale of [zhSettings.settings.features.smartScheduling, enSettings.settings.features.smartScheduling]) {
+      expect(locale.firstOutputTimeoutLabel).toBeTruthy();
+      expect(locale.firstOutputTimeoutHint).toBeTruthy();
+      expect(locale.firstOutputTimeoutRisk).toBeTruthy();
+      expect(locale.firstOutputTimeoutInvalid).toBeTruthy();
+    }
+    expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("30");
+    expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("300");
+    expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("重复计费");
+    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("30");
+    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("300");
+    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("duplicate billing");
   });
 });
 

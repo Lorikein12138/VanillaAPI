@@ -645,6 +645,8 @@ const (
 	SettingKeyOpenAILowUpstreamRatePriorityEnabled = "openai_low_upstream_rate_priority_enabled"
 	// SettingKeySmartSchedulingEnabled 是否启用 OpenAI 账号健康感知智能调度。
 	SettingKeySmartSchedulingEnabled = "smart_scheduling_enabled"
+	// SettingKeyOpenAIFirstOutputTimeoutSeconds 智能调度开启时的 OpenAI 首字超时阈值。
+	SettingKeyOpenAIFirstOutputTimeoutSeconds = "openai_first_output_timeout_seconds"
 	// SettingKeyOpenAIOAuthSchedulingRateMultiplier OAuth 账号参与成本调度时使用的参考倍率。
 	SettingKeyOpenAIOAuthSchedulingRateMultiplier = "openai_oauth_scheduling_rate_multiplier"
 	// SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled OpenAI 高级调度下是否启用粘性加权。

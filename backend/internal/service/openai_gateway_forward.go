@@ -37,6 +37,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, err
 	}
 	startTime := time.Now()
+	var firstOutputSettings openAIAdvancedSchedulerRuntimeSettings
+	if account != nil && account.Platform == PlatformOpenAI {
+		// The Gin context survives handler-level account failover. Keep S and its
+		// timeout value together so every transport and switched attempt uses the
+		// request-start generation.
+		firstOutputSettings = s.openAIFirstOutputRuntimeSettings(ctx, c)
+	}
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
 
@@ -834,10 +841,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			delete(wsReqBody, "previous_response_id")
 			wsPrevResponseRecoveryTried = true
 			logOpenAIWSModeInfo(
-				"reconnect_prev_response_recovery account_id=%d attempt=%d action=drop_previous_response_id retry=1 previous_response_id=%s previous_response_id_kind=%s",
+				"reconnect_prev_response_recovery account_id=%d attempt=%d action=drop_previous_response_id retry=1 previous_response_id_present=true previous_response_id_kind=%s",
 				account.ID,
 				attempt,
-				truncateOpenAIWSLogValue(previousResponseID, openAIWSIDValueMaxLen),
 				normalizeOpenAIWSLogValue(ClassifyOpenAIPreviousResponseIDKind(previousResponseID)),
 			)
 			return true
@@ -872,11 +878,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			wsInvalidEncryptedContentRecoveryTried = true
 			logOpenAIWSModeInfo(
-				"reconnect_invalid_encrypted_content_recovery account_id=%d attempt=%d action=drop_encrypted_reasoning_items retry=1 previous_response_id_present=%v previous_response_id=%s previous_response_id_kind=%s has_function_call_output=%v dropped_previous_response_id=%v",
+				"reconnect_invalid_encrypted_content_recovery account_id=%d attempt=%d action=drop_encrypted_reasoning_items retry=1 previous_response_id_present=%v previous_response_id_kind=%s has_function_call_output=%v dropped_previous_response_id=%v",
 				account.ID,
 				attempt,
 				previousResponseID != "",
-				truncateOpenAIWSLogValue(previousResponseID, openAIWSIDValueMaxLen),
 				normalizeOpenAIWSLogValue(ClassifyOpenAIPreviousResponseIDKind(previousResponseID)),
 				hasFunctionCallOutput,
 				previousResponseID != "" && !hasFunctionCallOutput,
@@ -993,14 +998,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if hasFirstTokenMs {
 				firstTokenMs = int64(*wsResult.FirstTokenMs)
 			}
-			requestID := ""
-			if wsResult != nil {
-				requestID = strings.TrimSpace(wsResult.RequestID)
-			}
 			logOpenAIWSModeDebug(
-				"forward_succeeded account_id=%d request_id=%s stream=%v has_first_token_ms=%v first_token_ms=%d ws_attempts=%d",
+				"forward_succeeded account_id=%d stream=%v has_first_token_ms=%v first_token_ms=%d ws_attempts=%d",
 				account.ID,
-				requestID,
 				reqStream,
 				hasFirstTokenMs,
 				firstTokenMs,
@@ -1030,7 +1030,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	firstOutputTimeout := time.Duration(0)
 	if reqStream && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
+		firstOutputTimeout = s.openAIFirstOutputTimeoutForSettings(reasoningEffortValue, firstOutputSettings)
 	}
 
 	httpInvalidEncryptedContentRetryTried := false
