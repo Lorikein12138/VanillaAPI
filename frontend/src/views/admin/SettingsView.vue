@@ -7201,6 +7201,30 @@
                 data-testid="smart-scheduling-toggle"
               />
             </div>
+            <div class="mt-5 max-w-sm">
+              <label
+                for="smart-scheduling-first-output-timeout"
+                class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutLabel') }}
+              </label>
+              <input
+                id="smart-scheduling-first-output-timeout"
+                v-model.number="form.openai_first_output_timeout_seconds"
+                type="number"
+                min="0"
+                max="300"
+                step="1"
+                data-testid="smart-scheduling-first-output-timeout"
+                class="form-input w-full"
+              />
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutHint') }}
+              </p>
+              <p class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutRisk') }}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -9755,6 +9779,7 @@ type SettingsForm = Omit<
   force_email_on_third_party_signup: boolean;
   openai_low_upstream_rate_priority_enabled: boolean;
   smart_scheduling_enabled: boolean;
+  openai_first_output_timeout_seconds: number;
   openai_oauth_scheduling_rate_multiplier: number | "" | null;
   openai_advanced_scheduler_enabled: boolean;
   openai_advanced_scheduler_sticky_weighted_enabled: boolean;
@@ -9999,6 +10024,7 @@ const form = reactive<SettingsForm>({
   allow_ungrouped_key_scheduling: false,
   openai_low_upstream_rate_priority_enabled: false,
   smart_scheduling_enabled: false,
+  openai_first_output_timeout_seconds: 30,
   openai_oauth_scheduling_rate_multiplier: 1,
   openai_advanced_scheduler_enabled: false,
   openai_advanced_scheduler_sticky_weighted_enabled: false,
@@ -11043,6 +11069,12 @@ async function loadSettings() {
     ) {
       form.smart_scheduling_enabled = false;
     }
+    if (
+      !Object.prototype.hasOwnProperty.call(settings, "openai_first_output_timeout_seconds") ||
+      settings.openai_first_output_timeout_seconds == null
+    ) {
+      form.openai_first_output_timeout_seconds = 30;
+    }
     // Only assign non-null values from backend (null means unconfigured, keep defaults)
     for (const [key, value] of Object.entries(settings)) {
       if (value !== null && value !== undefined) {
@@ -11306,6 +11338,14 @@ const siteBillingModeHint = computed(() =>
 async function saveSettings() {
   saving.value = true;
   try {
+    if (
+      !Number.isInteger(form.openai_first_output_timeout_seconds) ||
+      form.openai_first_output_timeout_seconds < 0 ||
+      form.openai_first_output_timeout_seconds > 300
+    ) {
+      appStore.showError(t("admin.settings.features.smartScheduling.firstOutputTimeoutInvalid"));
+      return;
+    }
     const normalizedTableDefaultPageSize = Math.floor(
       Number(form.table_default_page_size),
     );
@@ -11723,6 +11763,8 @@ async function saveSettings() {
       openai_low_upstream_rate_priority_enabled:
         form.openai_low_upstream_rate_priority_enabled,
       smart_scheduling_enabled: form.smart_scheduling_enabled,
+      openai_first_output_timeout_seconds:
+        form.openai_first_output_timeout_seconds,
       openai_oauth_scheduling_rate_multiplier:
         oauthSchedulingRate === "" ? null : oauthSchedulingRate,
       openai_advanced_scheduler_enabled: form.openai_advanced_scheduler_enabled,

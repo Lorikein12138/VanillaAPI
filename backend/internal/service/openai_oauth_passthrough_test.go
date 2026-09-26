@@ -2672,7 +2672,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_InfoWhenStreamEndsWithoutDone(t *
 	require.EqualError(t, err, "stream usage incomplete: missing terminal event")
 	require.True(t, logSink.ContainsMessage("上游流在未收到 [DONE] 时结束，疑似断流"))
 	require.True(t, logSink.ContainsMessageAtLevel("上游流在未收到 [DONE] 时结束，疑似断流", "info"))
-	require.True(t, logSink.ContainsFieldValue("upstream_request_id", "rid-truncate"))
+	require.False(t, logSink.ContainsField("upstream_request_id"))
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_DefaultFiltersTimeoutHeaders(t *testing.T) {

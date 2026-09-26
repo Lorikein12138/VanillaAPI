@@ -113,10 +113,6 @@ var codexCLIOnlyDebugHeaderWhitelist = []string{
 	"Accept-Language",
 	"OpenAI-Beta",
 	"Originator",
-	"Session_ID",
-	"Conversation_ID",
-	"X-Request-ID",
-	"X-Client-Request-ID",
 	"X-Forwarded-For",
 	"X-Real-IP",
 }
@@ -1162,11 +1158,10 @@ func appendCodexCLIOnlyRejectedRequestFields(fields []zap.Field, c *gin.Context,
 	}
 
 	req := c.Request
-	requestModel, requestStream, promptCacheKey := extractOpenAIRequestMetaFromBody(body)
+	requestModel, requestStream, _ := extractOpenAIRequestMetaFromBody(body)
 	fields = append(fields,
 		zap.String("request_method", strings.TrimSpace(req.Method)),
 		zap.String("request_path", strings.TrimSpace(req.URL.Path)),
-		zap.String("request_query", strings.TrimSpace(req.URL.RawQuery)),
 		zap.String("request_host", strings.TrimSpace(req.Host)),
 		zap.String("request_client_ip", strings.TrimSpace(ip.GetClientIP(c))),
 		zap.String("request_remote_addr", strings.TrimSpace(req.RemoteAddr)),
@@ -1178,10 +1173,6 @@ func appendCodexCLIOnlyRejectedRequestFields(fields []zap.Field, c *gin.Context,
 	if requestModel != "" {
 		fields = append(fields, zap.String("request_model", requestModel))
 	}
-	if promptCacheKey != "" {
-		fields = append(fields, zap.String("request_prompt_cache_key_sha256", hashSensitiveValueForLog(promptCacheKey)))
-	}
-
 	if headers := snapshotCodexCLIOnlyHeaders(req.Header); len(headers) > 0 {
 		fields = append(fields, zap.Any("request_headers", headers))
 	}

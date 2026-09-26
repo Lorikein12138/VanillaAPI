@@ -11,6 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSmartSchedulingStall_SettingsAPIPartialPayload(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
+		service.SettingKeyOpenAIFirstOutputTimeoutSeconds: "45",
+	})
+
+	rec := doUpdateSettings(t, h, map[string]any{"risk_control_enabled": true}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "45", repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
+
+	rec = doUpdateSettings(t, h, map[string]any{
+		"openai_first_output_timeout_seconds": 0,
+	}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "0", repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
+}
+
 // Saving settings is a whole-document PUT. A client that sends only the field it
 // cares about must not reset everything else: a payload as small as
 // `{"risk_control_enabled":true}` used to clear site_name, after which

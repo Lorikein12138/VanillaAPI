@@ -183,6 +183,10 @@ func TestLogCodexCLIOnlyDetection_RejectedIncludesRequestDetails(t *testing.T) {
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Set("X-Real-IP", "203.0.113.42")
 	c.Request.Header.Set("OpenAI-Beta", "assistants=v2")
+	c.Request.Header.Set("Session_ID", "session-id-secret")
+	c.Request.Header.Set("Conversation_ID", "response-id-secret")
+	c.Request.Header.Set("X-Request-ID", "upstream-request-id-secret")
+	c.Request.Header.Set("X-Client-Request-ID", "client-request-id-secret")
 
 	body := []byte(`{"model":"gpt-5.2","stream":false,"prompt_cache_key":"pc-123","access_token":"secret-token","input":[{"type":"text","text":"hello"}]}`)
 	account := &Account{ID: 1001}
@@ -194,11 +198,15 @@ func TestLogCodexCLIOnlyDetection_RejectedIncludesRequestDetails(t *testing.T) {
 
 	require.True(t, logSink.ContainsFieldValue("request_user_agent", "codex_cli_rs/0.98.0 (Windows 10.0.19045; x86_64) unknown"))
 	require.True(t, logSink.ContainsFieldValue("request_model", "gpt-5.2"))
-	require.True(t, logSink.ContainsFieldValue("request_query", "trace=1"))
+	require.False(t, logSink.ContainsField("request_query"))
 	require.True(t, logSink.ContainsFieldValue("request_client_ip", "203.0.113.42"))
 	require.True(t, logSink.ContainsFieldValue("request_remote_addr", "172.18.0.1:54321"))
-	require.True(t, logSink.ContainsFieldValue("request_prompt_cache_key_sha256", hashSensitiveValueForLog("pc-123")))
+	require.False(t, logSink.ContainsField("request_prompt_cache_key_sha256"))
 	require.True(t, logSink.ContainsFieldValue("request_headers", "openai-beta"))
+	require.False(t, logSink.ContainsFieldValue("request_headers", "session-id-secret"))
+	require.False(t, logSink.ContainsFieldValue("request_headers", "response-id-secret"))
+	require.False(t, logSink.ContainsFieldValue("request_headers", "upstream-request-id-secret"))
+	require.False(t, logSink.ContainsFieldValue("request_headers", "client-request-id-secret"))
 	require.True(t, logSink.ContainsField("request_body_size"))
 	require.False(t, logSink.ContainsField("request_body_preview"))
 }
@@ -231,7 +239,7 @@ func TestLogOpenAIInstructionsRequiredDebug_LogsRequestDetails(t *testing.T) {
 	require.True(t, logSink.ContainsMessageAtLevel("OpenAI 上游返回 Instructions are required，已记录请求详情用于排查", "warn"))
 	require.True(t, logSink.ContainsFieldValue("request_user_agent", "curl/8.0"))
 	require.True(t, logSink.ContainsFieldValue("request_model", "gpt-5.1-codex"))
-	require.True(t, logSink.ContainsFieldValue("request_query", "trace=1"))
+	require.False(t, logSink.ContainsField("request_query"))
 	require.True(t, logSink.ContainsFieldValue("account_name", "codex max套餐"))
 	require.True(t, logSink.ContainsFieldValue("request_headers", "openai-beta"))
 	require.True(t, logSink.ContainsField("request_body_size"))

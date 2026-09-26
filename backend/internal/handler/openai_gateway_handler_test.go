@@ -2482,6 +2482,7 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 		}
 
 		writeCtx, cancelWrite := context.WithTimeout(r.Context(), 3*time.Second)
+		_ = conn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.created","response":{}}`))
 		_ = conn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"error","error":{"code":"rate_limit_exceeded","type":"usage_limit_reached","message":"The usage limit has been reached"}}`))
 		cancelWrite()
 	}))
@@ -2657,7 +2658,7 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 	require.Equal(t, []int64{int64(9902)}, accountRepo.rateLimitedIDs)
 }
 
-func TestOpenAIResponsesWebSocket_FirstOutputTimeoutWithoutDownstreamReusesClientForOneFailover(t *testing.T) {
+func TestSmartSchedulingStall_WSFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	firstHitCh := make(chan []byte, 1)
@@ -2678,6 +2679,12 @@ func TestOpenAIResponsesWebSocket_FirstOutputTimeoutWithoutDownstreamReusesClien
 		cancelRead()
 		if readErr == nil {
 			firstHitCh <- payload
+		}
+		writeCtx, cancelWrite := context.WithTimeout(r.Context(), time.Second)
+		writeErr := conn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.created","response":{"id":"resp_ws_timeout_a","model":"gpt-5.1"}}`))
+		cancelWrite()
+		if writeErr != nil {
+			return
 		}
 
 		select {

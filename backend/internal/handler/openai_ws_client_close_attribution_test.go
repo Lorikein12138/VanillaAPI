@@ -63,6 +63,22 @@ func TestOpenAIWSIngressEndedByClient_ClientCancelDuringTurnIsNotAccountFailure(
 	require.True(t, openAIWSIngressEndedByClient(err))
 }
 
+func TestSmartSchedulingStall_Cancel(t *testing.T) {
+	clientCancel := service.NewOpenAIWSClientCloseError(
+		coderws.StatusGoingAway, "websocket request canceled", context.Canceled)
+	cleanClientClose := coderws.CloseError{Code: coderws.StatusNormalClosure}
+
+	require.True(t, openAIWSIngressEndedByClient(clientCancel))
+	require.True(t, openAIWSIngressEndedByClient(cleanClientClose))
+}
+
+func TestSmartSchedulingStall_WS(t *testing.T) {
+	firstOutputTimeout := service.NewOpenAIWSClientCloseError(
+		coderws.StatusGoingAway, "upstream produced no semantic output; please reconnect", context.DeadlineExceeded)
+	require.False(t, openAIWSIngressEndedByClient(firstOutputTimeout), "a gateway first-output timeout is not a client close")
+	require.True(t, shouldReportOpenAIWSProxyAccountFailure(firstOutputTimeout), "the attributed timeout remains an account failure")
+}
+
 // 既有行为不得回退：网关自己用 1000 收尾（inter-turn idle timeout 就是这条）
 // 原本就被认作正常关闭。
 func TestOpenAIWSIngressEndedByClient_GatewayNormalClosureStillRecognised(t *testing.T) {

@@ -499,7 +499,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		reqLog = reqLog.With(
 			zap.Bool("has_previous_response_id", true),
 			zap.String("previous_response_id_kind", previousResponseIDKind),
-			zap.Int("previous_response_id_len", len(previousResponseID)),
 		)
 		if previousResponseIDKind == service.OpenAIPreviousResponseIDKindMessageID {
 			reqLog.Warn("openai.request_validation_failed",
@@ -1106,13 +1105,6 @@ func (h *OpenAIGatewayHandler) logOpenAIRemoteCompactOutcome(c *gin.Context, sta
 		if v, ok := c.Get(opsAccountIDKey); ok {
 			if accountID, ok := v.(int64); ok && accountID > 0 {
 				fields = append(fields, zap.Int64("account_id", accountID))
-			}
-		}
-		if c.Writer != nil {
-			if upstreamRequestID := strings.TrimSpace(c.Writer.Header().Get("x-request-id")); upstreamRequestID != "" {
-				fields = append(fields, zap.String("upstream_request_id", upstreamRequestID))
-			} else if upstreamRequestID := strings.TrimSpace(c.Writer.Header().Get("X-Request-Id")); upstreamRequestID != "" {
-				fields = append(fields, zap.String("upstream_request_id", upstreamRequestID))
 			}
 		}
 	}
@@ -3013,7 +3005,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					}); err != nil {
 						reqLog.Error("openai.websocket_record_usage_failed",
 							zap.Int64("account_id", account.ID),
-							zap.String("request_id", result.RequestID),
 							zap.Error(err),
 						)
 					}

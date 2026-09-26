@@ -55,8 +55,7 @@ const (
 	openAIAccountLegacyProbeCooldown          = 30 * time.Second
 	openAIAccountHealthProbeLease             = 30 * time.Second
 	openAIAccountSmartTTFTThreshold           = 10 * time.Second
-	openAIAccountSmartErrorRateThreshold      = 0.10
-	openAIAccountSmartWindowSize              = 10
+	openAIAccountSmartWindowSize              = 3
 	openAIAccountSmartWindowDuration          = 10 * time.Minute
 	openAIAccountSmartProbeBatchLimit         = 10
 	openAIAccountSmartProbeBatchTimeout       = 10 * time.Minute
@@ -89,6 +88,7 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 	lowUpstreamRatePriorityEnabled bool
 	smartEnabled                   bool
 	smartEnabledKnown              bool
+	firstOutputTimeoutSeconds      int
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
@@ -103,6 +103,7 @@ type openAIAdvancedSchedulerRuntimeSettings struct {
 	lowUpstreamRatePriorityEnabled bool
 	smartEnabled                   bool
 	smartEnabledKnown              bool
+	firstOutputTimeoutSeconds      int
 	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
@@ -127,6 +128,7 @@ func cachedOpenAIAdvancedSchedulerRuntimeSettings(cached *cachedOpenAIAdvancedSc
 		lowUpstreamRatePriorityEnabled: cached.lowUpstreamRatePriorityEnabled,
 		smartEnabled:                   cached.smartEnabled,
 		smartEnabledKnown:              cached.smartEnabledKnown,
+		firstOutputTimeoutSeconds:      cached.firstOutputTimeoutSeconds,
 		oauthSchedulingRateMultiplier:  cached.oauthSchedulingRateMultiplier,
 		enabled:                        cached.enabled,
 		stickyWeightedEnabled:          cached.stickyWeightedEnabled,
@@ -166,6 +168,7 @@ func publishOpenAIAdvancedSchedulerSettingsAfterWrite(settings *SystemSettings) 
 		lowUpstreamRatePriorityEnabled: settings.OpenAILowUpstreamRatePriorityEnabled,
 		smartEnabled:                   settings.SmartSchedulingEnabled,
 		smartEnabledKnown:              true,
+		firstOutputTimeoutSeconds:      settings.OpenAIFirstOutputTimeoutSeconds,
 		oauthSchedulingRateMultiplier:  settings.OpenAIOAuthSchedulingRateMultiplier,
 		enabled:                        settings.OpenAIAdvancedSchedulerEnabled,
 		stickyWeightedEnabled:          settings.OpenAIAdvancedSchedulerStickyWeightedEnabled,
@@ -1128,7 +1131,7 @@ func (s *openAIAccountRuntimeStats) appendSmartHealthObservationLocked(stat *ope
 		errorValue = 1
 	}
 	stat.smartErrorWindow = appendBoundedSmartSample(stat.smartErrorWindow, openAISmartTimedSample{at: now, value: errorValue})
-	if success && firstTokenMs != nil && *firstTokenMs > 0 {
+	if firstTokenMs != nil && *firstTokenMs > 0 {
 		stat.smartTTFTWindow = appendBoundedSmartSample(stat.smartTTFTWindow, openAISmartTimedSample{at: now, value: float64(*firstTokenMs)})
 	}
 	stat.smartLastObserved = now
@@ -1178,13 +1181,14 @@ func (s *openAIAccountRuntimeStats) recomputeSmartHealthLocked(stat *openAIAccou
 	}
 	errorsMature := len(stat.smartErrorWindow) >= openAIAccountSmartWindowSize
 	ttftMature := len(stat.smartTTFTWindow) >= openAIAccountSmartWindowSize
-	errorRate := 0.0
 	if errorsMature {
+		failures := 0
 		for _, sample := range stat.smartErrorWindow {
-			errorRate += sample.value
+			if sample.value > 0 {
+				failures++
+			}
 		}
-		errorRate /= float64(len(stat.smartErrorWindow))
-		if errorRate > openAIAccountSmartErrorRateThreshold {
+		if failures >= 2 {
 			stat.smartLevel = openAIAccountHealthDegraded
 			stat.smartReason = openAIAccountHealthReasonErrorRate
 		}
@@ -1241,7 +1245,8 @@ func (s *openAIAccountRuntimeStats) finishSmartProbeSampleLocked(stat *openAIAcc
 			failures++
 		}
 	}
-	if failures >= 2 || (ttftCount > 0 && ttftSum > int(openAIAccountSmartTTFTThreshold.Milliseconds())*openAIAccountSmartProbeBatchLimit) {
+	if failures >= 2 || (stat.smartReason == openAIAccountHealthReasonTTFT && ttftCount > 0 &&
+		ttftSum > int(openAIAccountSmartTTFTThreshold.Milliseconds())*openAIAccountSmartProbeBatchLimit) {
 		s.rescheduleSmartProbeBatchLocked(stat, now, true)
 		return
 	}
@@ -1249,7 +1254,8 @@ func (s *openAIAccountRuntimeStats) finishSmartProbeSampleLocked(stat *openAIAcc
 		return
 	}
 	passed := failures <= 1
-	if ttftCount > 0 && float64(ttftSum)/float64(ttftCount) > float64(openAIAccountSmartTTFTThreshold.Milliseconds()) {
+	if stat.smartReason == openAIAccountHealthReasonTTFT && ttftCount > 0 &&
+		float64(ttftSum)/float64(ttftCount) > float64(openAIAccountSmartTTFTThreshold.Milliseconds()) {
 		passed = false
 	}
 	if stat.smartReason == openAIAccountHealthReasonTTFT && ttftCount != successes {
@@ -2022,7 +2028,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	escapeCfg := s.service.openAIStickyEscapeConfig()
 	if req.SmartHealthEnabled && s.stats != nil {
 		assessment := s.stats.health(accountID, now, escapeCfg)
-		if assessment.level == openAIAccountHealthDegraded && escapeCfg.enabled && !req.DisableStickyEscape {
+		if assessment.level == openAIAccountHealthDegraded && !req.DisableStickyEscape {
 			healthEscapeReason := openAIAccountHealthReasonName(assessment.reason)
 			if healthEscapeReasonTarget != nil {
 				*healthEscapeReasonTarget = healthEscapeReason
@@ -3693,6 +3699,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettingsWithFlightR
 			generation := openAIAdvancedSchedulerSettingGeneration.Load()
 			lowUpstreamRatePriorityEnabled := false
 			smartEnabled := false
+			firstOutputTimeoutSeconds := 30
 			oauthSchedulingRateMultiplier := parseOpenAIOAuthSchedulingRateMultiplier(nil)
 			enabled := false
 			stickyWeightedEnabled := false
@@ -3708,6 +3715,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettingsWithFlightR
 					smartEnabledKnown = true
 					lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
 					smartEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeySmartSchedulingEnabled]), "true")
+					firstOutputTimeoutSeconds = parseOpenAIFirstOutputTimeoutSeconds(values[SettingKeyOpenAIFirstOutputTimeoutSeconds], settingValuePresent(values, SettingKeyOpenAIFirstOutputTimeoutSeconds))
 					oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
 					enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
 					stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
@@ -3729,6 +3737,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettingsWithFlightR
 					}
 					lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
 					smartEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeySmartSchedulingEnabled]), "true")
+					firstOutputTimeoutSeconds = parseOpenAIFirstOutputTimeoutSeconds(fallbackValues[SettingKeyOpenAIFirstOutputTimeoutSeconds], settingValuePresent(fallbackValues, SettingKeyOpenAIFirstOutputTimeoutSeconds))
 					oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues)
 					enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
 					stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
@@ -3742,6 +3751,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettingsWithFlightR
 				lowUpstreamRatePriorityEnabled: lowUpstreamRatePriorityEnabled,
 				smartEnabled:                   smartEnabled,
 				smartEnabledKnown:              smartEnabledKnown,
+				firstOutputTimeoutSeconds:      firstOutputTimeoutSeconds,
 				oauthSchedulingRateMultiplier:  oauthSchedulingRateMultiplier,
 				enabled:                        enabled,
 				stickyWeightedEnabled:          stickyWeightedEnabled,
@@ -3822,6 +3832,7 @@ func openAIAdvancedSchedulerRuntimeSettingKeys() []string {
 	keys := []string{
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled,
 		SettingKeySmartSchedulingEnabled,
+		SettingKeyOpenAIFirstOutputTimeoutSeconds,
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier,
 		openAIAdvancedSchedulerSettingKey,
 		SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled,
@@ -4341,37 +4352,41 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	}
 	accountID := account.ID
 	healthTripped := false
+	clientCanceled := !success && len(observedErr) > 0 && errors.Is(observedErr[0], context.Canceled)
+	attributable := success
+	if !success {
+		attributable = false
+		if !clientCanceled && len(observedErr) > 0 && observedErr[0] != nil {
+			var failoverErr *UpstreamFailoverError
+			if errors.As(observedErr[0], &failoverErr) {
+				attributable = failoverErr.ShouldReportAccountScheduleFailure() && failoverErr.claimAccountScheduleFailureReport()
+			} else {
+				attributable = true
+			}
+		}
+	}
 	if s != nil && s.rateLimitService != nil {
 		if success {
 			s.rateLimitService.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), account)
-		} else if len(observedErr) > 0 && observedErr[0] != nil {
+		} else if attributable {
 			healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, observedErr[0])
 		}
 	}
-	if success {
+	if success && s != nil {
 		s.openaiOAuth429RetryStartedAt.Delete(accountID)
 		s.clearOpenAIAccountModelTransientState(accountID, normalizeOpenAIAccountModelTransientModel(model))
 	}
-	scheduler := s.getOpenAIAccountScheduler(context.Background())
+	var scheduler OpenAIAccountScheduler
+	if s != nil {
+		scheduler = s.getOpenAIAccountScheduler(context.Background())
+	}
 	if scheduler == nil {
-		if account.smartHealthProbeID != 0 {
+		if s != nil && account.smartHealthProbeID != 0 {
 			if stats := s.openaiAccountStatsPublished.Load(); stats != nil {
 				stats.cancelProbeLeaseForID(accountID, account.smartHealthProbeID, time.Now())
 			}
 		}
 		return healthTripped
-	}
-	attributable := success
-	if !success {
-		attributable = false
-		if len(observedErr) > 0 && observedErr[0] != nil {
-			var failoverErr *UpstreamFailoverError
-			if errors.As(observedErr[0], &failoverErr) {
-				attributable = failoverErr.ShouldReportAccountScheduleFailure()
-			} else {
-				attributable = true
-			}
-		}
 	}
 	if reporter, ok := scheduler.(*defaultOpenAIAccountScheduler); ok {
 		reporter.reportAccountResult(account, success, firstTokenMs, attributable)
@@ -4384,24 +4399,37 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
-	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil {
+	if s == nil || account == nil || observedErr == nil {
 		return false
 	}
-	healthTripped := s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
-	if account.smartHealthProbeID == 0 {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errors.Is(observedErr, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+		if stats := s.openaiAccountStatsPublished.Load(); stats != nil && account.smartHealthProbeID != 0 {
+			stats.cancelProbeLeaseForID(account.ID, account.smartHealthProbeID, time.Now())
+		}
+		return false
+	}
+	attributable := true
+	var failoverErr *UpstreamFailoverError
+	if errors.As(observedErr, &failoverErr) {
+		attributable = failoverErr.ShouldReportAccountScheduleFailure() && failoverErr.claimAccountScheduleFailureReport()
+	}
+	healthTripped := false
+	if attributable && s.rateLimitService != nil {
+		healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
+	}
+	smartEnabled := s.isSmartSchedulingEnabled(ctx)
+	if !smartEnabled && account.smartHealthProbeID == 0 {
 		return healthTripped
 	}
 	stats := s.openaiAccountStatsPublished.Load()
-	if !s.isSmartSchedulingEnabled(ctx) {
+	if !smartEnabled {
 		if stats != nil {
 			stats.cancelProbeLeaseForID(account.ID, account.smartHealthProbeID, time.Now())
 		}
 		return healthTripped
-	}
-	attributable := observedErr != nil && ctx.Err() == nil
-	var failoverErr *UpstreamFailoverError
-	if errors.As(observedErr, &failoverErr) {
-		attributable = failoverErr.ShouldReportAccountScheduleFailure() && ctx.Err() == nil
 	}
 	if stats == nil {
 		return healthTripped

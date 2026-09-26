@@ -433,12 +433,44 @@ func TestLoadOpenAIFirstOutputTimeoutsFromEnv(t *testing.T) {
 	require.Equal(t, 240, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
 }
 
-func TestValidateOpenAIFirstOutputTimeoutMinimum(t *testing.T) {
+func TestSmartSchedulingStall_ConfigBounds(t *testing.T) {
 	resetViperWithJWTSecret(t)
-	cfg, err := Load()
+	base, err := Load()
 	require.NoError(t, err)
-	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 30
+	for _, test := range []struct {
+		name    string
+		seconds int
+		valid   bool
+	}{
+		{name: "negative", seconds: -1},
+		{name: "disabled", seconds: 0, valid: true},
+		{name: "one second", seconds: 1, valid: true},
+		{name: "thirty seconds", seconds: 30, valid: true},
+		{name: "maximum", seconds: 300, valid: true},
+		{name: "above maximum", seconds: 301},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := *base
+			cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = test.seconds
+			err := cfg.Validate()
+			if test.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "gateway.openai_first_output_timeout_seconds")
+			}
+		})
+	}
+
+	// The high-effort YAML override keeps its own legacy range and can exceed
+	// the standard timeout without being truncated to that value.
+	cfg := *base
+	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 1
+	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 1800
 	require.NoError(t, cfg.Validate())
+	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 29
+	require.ErrorContains(t, cfg.Validate(), "gateway.openai_high_effort_first_output_timeout_seconds")
+	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 1801
+	require.ErrorContains(t, cfg.Validate(), "gateway.openai_high_effort_first_output_timeout_seconds")
 }
 
 func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
@@ -1851,7 +1883,7 @@ func TestValidateConfigErrors(t *testing.T) {
 		},
 		{
 			name:    "gateway openai first output timeout below minimum",
-			mutate:  func(c *Config) { c.Gateway.OpenAIFirstOutputTimeoutSeconds = 29 },
+			mutate:  func(c *Config) { c.Gateway.OpenAIFirstOutputTimeoutSeconds = -1 },
 			wantErr: "gateway.openai_first_output_timeout_seconds",
 		},
 		{

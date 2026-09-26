@@ -964,7 +964,7 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
-	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
+	// OpenAIFirstOutputTimeoutSeconds: OpenAI Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。
 	// 0 表示回退到 OpenAIFirstOutputTimeoutSeconds。
@@ -3308,9 +3308,8 @@ func (c *Config) Validate() error {
 	if c.Gateway.GrokResponseHeaderTimeout < 0 || c.Gateway.GrokResponseHeaderTimeout > 1800 {
 		return fmt.Errorf("gateway.grok_response_header_timeout must be between 0-1800 seconds")
 	}
-	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 600 ||
-		(c.Gateway.OpenAIFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIFirstOutputTimeoutSeconds < 30) {
-		return fmt.Errorf("gateway.openai_first_output_timeout_seconds must be 0 or between 30-600 seconds")
+	if c.Gateway.OpenAIFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIFirstOutputTimeoutSeconds > 300 {
+		return fmt.Errorf("gateway.openai_first_output_timeout_seconds must be between 0-300 seconds")
 	}
 	if c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 0 || c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 1800 ||
 		(c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 30) {
