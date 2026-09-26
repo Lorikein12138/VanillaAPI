@@ -277,6 +277,7 @@ type UpdateSettingsRequest struct {
 	// OpenAI account scheduling
 	OpenAILowUpstreamRatePriorityEnabled               *bool    `json:"openai_low_upstream_rate_priority_enabled"`
 	SmartSchedulingEnabled                             *bool    `json:"smart_scheduling_enabled"`
+	OpenAIFirstOutputTimeoutSeconds                    *int     `json:"openai_first_output_timeout_seconds"`
 	OpenAIOAuthSchedulingRateMultiplier                *float64 `json:"openai_oauth_scheduling_rate_multiplier"`
 	OpenAIAdvancedSchedulerEnabled                     *bool    `json:"openai_advanced_scheduler_enabled"`
 	OpenAIAdvancedSchedulerStickyWeightedEnabled       *bool    `json:"openai_advanced_scheduler_sticky_weighted_enabled"`
@@ -495,6 +496,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	var req UpdateSettingsRequest
 	if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if req.OpenAIFirstOutputTimeoutSeconds != nil && (*req.OpenAIFirstOutputTimeoutSeconds < 0 || *req.OpenAIFirstOutputTimeoutSeconds > 300) {
+		response.BadRequest(c, "openai_first_output_timeout_seconds must be between 0 and 300 seconds")
 		return
 	}
 	auditReq := settingsAuditRequest(req)
@@ -1841,6 +1846,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.SmartSchedulingEnabled
 		}(),
+		OpenAIFirstOutputTimeoutSeconds: func() int {
+			if req.OpenAIFirstOutputTimeoutSeconds != nil {
+				return *req.OpenAIFirstOutputTimeoutSeconds
+			}
+			return previousSettings.OpenAIFirstOutputTimeoutSeconds
+		}(),
 		OpenAIOAuthSchedulingRateMultiplier: func() *float64 {
 			// Omitted fields preserve the override; explicit null clears it.
 			if _, sent := sentFields[service.SettingKeyOpenAIOAuthSchedulingRateMultiplier]; sent {
@@ -2358,6 +2369,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		PaymentVisibleMethodWxpayEnabled:                       updatedSettings.PaymentVisibleMethodWxpayEnabled,
 		OpenAILowUpstreamRatePriorityEnabled:                   updatedSettings.OpenAILowUpstreamRatePriorityEnabled,
 		SmartSchedulingEnabled:                                 updatedSettings.SmartSchedulingEnabled,
+		OpenAIFirstOutputTimeoutSeconds:                        updatedSettings.OpenAIFirstOutputTimeoutSeconds,
 		OpenAIOAuthSchedulingRateMultiplier:                    updatedSettings.OpenAIOAuthSchedulingRateMultiplier,
 		OpenAIAdvancedSchedulerEnabled:                         updatedSettings.OpenAIAdvancedSchedulerEnabled,
 		OpenAIAdvancedSchedulerStickyWeightedEnabled:           updatedSettings.OpenAIAdvancedSchedulerStickyWeightedEnabled,

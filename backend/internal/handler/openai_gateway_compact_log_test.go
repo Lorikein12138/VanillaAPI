@@ -66,6 +66,20 @@ func (s *handlerInMemoryLogSink) ContainsFieldValue(field, substr string) bool {
 	return false
 }
 
+func (s *handlerInMemoryLogSink) ContainsField(field string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ev := range s.events {
+		if ev == nil || ev.Fields == nil {
+			continue
+		}
+		if _, ok := ev.Fields[field]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *handlerInMemoryLogSink) FieldValueForMessage(message, field string) (any, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -153,7 +167,7 @@ func TestLogOpenAIRemoteCompactOutcome_Succeeded(t *testing.T) {
 	require.True(t, logSink.ContainsFieldValue("path", "/v1/responses/compact"))
 	require.True(t, logSink.ContainsFieldValue("request_model", "gpt-5.3-codex"))
 	require.True(t, logSink.ContainsFieldValue("account_id", "123"))
-	require.True(t, logSink.ContainsFieldValue("upstream_request_id", "rid-compact-ok"))
+	require.False(t, logSink.ContainsField("upstream_request_id"))
 }
 
 func TestLogOpenAIRemoteCompactOutcome_Failed(t *testing.T) {

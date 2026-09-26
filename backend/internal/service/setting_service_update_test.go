@@ -459,6 +459,72 @@ func TestSettingService_ParseSettingsDefaultsSmartSchedulingDisabled(t *testing.
 	require.False(t, svc.parseSettings(map[string]string{SettingKeySmartSchedulingEnabled: "TRUE"}).SmartSchedulingEnabled)
 }
 
+func TestSmartSchedulingStall_Settings(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	parseService := NewSettingService(&settingUpdateRepoStub{}, &config.Config{})
+	require.Equal(t, 30, parseService.parseSettings(map[string]string{}).OpenAIFirstOutputTimeoutSeconds)
+	require.Zero(t, parseService.parseSettings(map[string]string{
+		SettingKeyOpenAIFirstOutputTimeoutSeconds: "0",
+	}).OpenAIFirstOutputTimeoutSeconds)
+
+	repo := &settingUpdateRepoStub{}
+	service := NewSettingService(repo, &config.Config{})
+	for _, seconds := range []int{0, 1, 30, 300} {
+		err := service.UpdateSettings(context.Background(), &SystemSettings{
+			OpenAIFirstOutputTimeoutSeconds: seconds,
+		})
+		require.NoError(t, err)
+		require.Equal(t, strconv.Itoa(seconds), repo.updates[SettingKeyOpenAIFirstOutputTimeoutSeconds])
+	}
+	for _, seconds := range []int{-1, 301} {
+		previous := repo.updates[SettingKeyOpenAIFirstOutputTimeoutSeconds]
+		err := service.UpdateSettings(context.Background(), &SystemSettings{
+			OpenAIFirstOutputTimeoutSeconds: seconds,
+		})
+		require.Error(t, err)
+		require.Equal(t, "INVALID_OPENAI_FIRST_OUTPUT_TIMEOUT_SECONDS", infraerrors.Reason(err))
+		require.Equal(t, previous, repo.updates[SettingKeyOpenAIFirstOutputTimeoutSeconds])
+	}
+
+	partialRepo := &schedulerCacheTestSettingsRepo{values: map[string]string{
+		SettingKeyOpenAIFirstOutputTimeoutSeconds: "45",
+	}}
+	partialService := NewSettingService(partialRepo, &config.Config{})
+	require.NoError(t, partialService.UpdateSettingsOmitting(context.Background(), &SystemSettings{}, OmittedSettingKeys{
+		SettingKeyOpenAIFirstOutputTimeoutSeconds: {},
+	}))
+	require.Equal(t, "45", partialRepo.settingsSnapshot()[SettingKeyOpenAIFirstOutputTimeoutSeconds])
+
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	failureRepo := &schedulerCacheTestSettingsRepo{
+		values: map[string]string{
+			SettingKeySmartSchedulingEnabled:          "true",
+			SettingKeyOpenAIFirstOutputTimeoutSeconds: "30",
+		},
+		setMultipleErr: errors.New("write unavailable"),
+	}
+	failureService := NewSettingService(failureRepo, &config.Config{})
+	gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: failureService}}
+	before := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+	beforeGeneration := openAIAdvancedSchedulerSettingGeneration.Load()
+	beforeCache, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.Equal(t, 30, before.firstOutputTimeoutSeconds)
+	err := failureService.UpdateSettings(context.Background(), &SystemSettings{
+		SmartSchedulingEnabled:          true,
+		OpenAIFirstOutputTimeoutSeconds: 0,
+	})
+	require.ErrorContains(t, err, "write unavailable")
+	after := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+	afterCache, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+	require.True(t, ok)
+	require.Same(t, beforeCache, afterCache)
+	require.Equal(t, beforeGeneration, openAIAdvancedSchedulerSettingGeneration.Load())
+	require.Equal(t, 30, after.firstOutputTimeoutSeconds)
+}
+
 func TestSettingService_UpdateSettings_SmartScheduling(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()

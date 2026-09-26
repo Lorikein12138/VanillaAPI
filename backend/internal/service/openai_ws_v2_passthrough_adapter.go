@@ -362,10 +362,22 @@ type openAIWSPassthroughFirstOutputFrameConn struct {
 	resolveDeadline   func(payload []byte) openAIWSPassthroughFirstOutputDeadline
 	activeReadTimeout time.Duration
 
-	mu              sync.Mutex
-	state           openAIWSPassthroughFirstOutputDeadlineState
-	deadlineChanged chan struct{}
+	mu                   sync.Mutex
+	state                openAIWSPassthroughFirstOutputDeadlineState
+	deadlineChanged      chan struct{}
+	firstSemanticPending bool
+	pendingFrames        []openAIWSPassthroughStagedFrame
+	pendingFrameBytes    int64
 }
+
+type openAIWSPassthroughStagedFrame struct {
+	messageType coderws.MessageType
+	payload     []byte
+}
+
+var errOpenAIWSPassthroughFirstOutputStageLimit = errors.New("upstream response exceeded first-output staging limit")
+
+const openAIWSPassthroughFirstOutputStageMaxFrames = 1024
 
 func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
 	if c == nil || c.inner == nil {
@@ -374,6 +386,47 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	for {
+		if !c.isFirstSemanticPending() {
+			if msgType, payload, ok := c.popStagedFrame(); ok {
+				return msgType, payload, nil
+			}
+		}
+		msgType, payload, err := c.readUpstreamFrame(ctx)
+		if err != nil {
+			c.clearStagedFrames()
+			return msgType, payload, err
+		}
+		if msgType == coderws.MessageText && openAIWSPassthroughIsFailureTerminalOutput(payload) {
+			c.clearStagedFrames()
+			c.observeUpstreamActivity(msgType, payload)
+			return msgType, payload, nil
+		}
+		if !c.isFirstSemanticPending() {
+			c.observeUpstreamActivity(msgType, payload)
+			return msgType, payload, nil
+		}
+		if msgType == coderws.MessageText && openAIWSPassthroughStartsSemanticOutput(payload) {
+			c.finishFirstSemanticOutput()
+			c.observeUpstreamActivity(msgType, payload)
+			if c.hasStagedFrames() {
+				if err := c.appendStagedFrame(msgType, payload); err != nil {
+					c.clearStagedFrames()
+					return coderws.MessageText, nil, err
+				}
+				stagedType, stagedPayload, _ := c.popStagedFrame()
+				return stagedType, stagedPayload, nil
+			}
+			return msgType, payload, nil
+		}
+		if err := c.appendStagedFrame(msgType, payload); err != nil {
+			c.clearStagedFrames()
+			return coderws.MessageText, nil, err
+		}
+	}
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) readUpstreamFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
 
 	type readResult struct {
 		msgType coderws.MessageType
@@ -425,9 +478,6 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context)
 	for {
 		select {
 		case result := <-readResultCh:
-			if result.err == nil {
-				c.observeUpstreamActivity(result.msgType, result.payload)
-			}
 			return result.msgType, result.payload, result.err
 		case <-c.deadlineChanged:
 			resetTimer()
@@ -456,19 +506,117 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context)
 	}
 }
 
+func (c *openAIWSPassthroughFirstOutputFrameConn) isFirstSemanticPending() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.firstSemanticPending
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) finishFirstSemanticOutput() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.firstSemanticPending = false
+	c.mu.Unlock()
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) appendStagedFrame(msgType coderws.MessageType, payload []byte) error {
+	if c == nil {
+		return errOpenAIFirstOutputStageLimit
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pendingFrames) >= openAIWSPassthroughFirstOutputStageMaxFrames || int64(len(payload)) > openAIFirstOutputStageMaxBytes-c.pendingFrameBytes {
+		return errOpenAIWSPassthroughFirstOutputStageLimit
+	}
+	frame := openAIWSPassthroughStagedFrame{messageType: msgType, payload: append([]byte(nil), payload...)}
+	c.pendingFrames = append(c.pendingFrames, frame)
+	c.pendingFrameBytes += int64(len(frame.payload))
+	return nil
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) popStagedFrame() (coderws.MessageType, []byte, bool) {
+	if c == nil {
+		return coderws.MessageText, nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pendingFrames) == 0 {
+		return coderws.MessageText, nil, false
+	}
+	frame := c.pendingFrames[0]
+	c.pendingFrames[0] = openAIWSPassthroughStagedFrame{}
+	c.pendingFrames = c.pendingFrames[1:]
+	c.pendingFrameBytes -= int64(len(frame.payload))
+	if len(c.pendingFrames) == 0 {
+		c.pendingFrames = nil
+		c.pendingFrameBytes = 0
+	}
+	return frame.messageType, frame.payload, true
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) hasStagedFrames() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pendingFrames) > 0
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) clearStagedFrames() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.pendingFrames = nil
+	c.pendingFrameBytes = 0
+	c.mu.Unlock()
+}
+
 func (c *openAIWSPassthroughFirstOutputFrameConn) WriteFrame(ctx context.Context, msgType coderws.MessageType, payload []byte) error {
 	if c == nil || c.inner == nil {
 		return errOpenAIWSConnClosed
 	}
 	generation := uint64(0)
 	if msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
+		c.beginFirstSemanticOutput()
 		generation = c.armDeadline(payload)
 	}
 	if err := c.inner.WriteFrame(ctx, msgType, payload); err != nil {
 		c.disarmDeadline(generation)
+		if generation != 0 || msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
+			c.cancelFirstSemanticOutput()
+		}
 		return err
 	}
 	return nil
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) beginFirstSemanticOutput() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.firstSemanticPending = true
+	c.pendingFrames = nil
+	c.pendingFrameBytes = 0
+	c.mu.Unlock()
+}
+
+func (c *openAIWSPassthroughFirstOutputFrameConn) cancelFirstSemanticOutput() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.firstSemanticPending = false
+	c.pendingFrames = nil
+	c.pendingFrameBytes = 0
+	c.mu.Unlock()
 }
 
 func (c *openAIWSPassthroughFirstOutputFrameConn) Close() error {
@@ -593,6 +741,15 @@ func openAIWSPassthroughIsTerminalOutput(payload []byte) bool {
 	}
 }
 
+func openAIWSPassthroughIsFailureTerminalOutput(payload []byte) bool {
+	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
+	case "error", "response.failed", "response.incomplete":
+		return true
+	default:
+		return false
+	}
+}
+
 var _ openaiwsv2.FrameConn = (*openAIWSClientFrameConn)(nil)
 var _ openaiwsv2.FrameConn = (*openAIWSPassthroughFirstOutputFrameConn)(nil)
 
@@ -688,6 +845,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
+	firstOutputSettings := s.openAIFirstOutputRuntimeSettings(ctx, c)
 	if isOpenAIResponsesLiteWebSocketPayload(firstClientMessage) {
 		liteFirstMessage, _, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(firstClientMessage, account)
 		if liteErr != nil {
@@ -705,10 +863,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	requestPreviousResponseID := strings.TrimSpace(gjson.GetBytes(firstClientMessage, "previous_response_id").String())
 	promptCacheKey := strings.TrimSpace(gjson.GetBytes(firstClientMessage, "prompt_cache_key").String())
 	logOpenAIWSV2Passthrough(
-		"relay_start account_id=%d model=%s previous_response_id=%s first_message_type=%s first_message_bytes=%d",
+		"relay_start account_id=%d model=%s has_previous_response_id=%v first_message_type=%s first_message_bytes=%d",
 		account.ID,
 		truncateOpenAIWSLogValue(requestModel, openAIWSLogValueMaxLen),
-		truncateOpenAIWSLogValue(requestPreviousResponseID, openAIWSIDValueMaxLen),
+		requestPreviousResponseID != "",
 		openaiwsv2RelayMessageTypeName(coderws.MessageText),
 		len(firstClientMessage),
 	)
@@ -895,10 +1053,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			continue
 		}
 		logOpenAIWSV2Passthrough(
-			"relay_dial_failed account_id=%d status_code=%d err=%s",
+			"relay_dial_failed account_id=%d status_code=%d error_type=%T",
 			account.ID,
 			statusCode,
-			truncateOpenAIWSLogValue(err.Error(), openAIWSLogValueMaxLen),
+			err,
 		)
 		s.handleOpenAIWSDialTransientFailure(ctx, account, capturedSessionModel, dialErr)
 		if statusCode == http.StatusTooManyRequests {
@@ -911,10 +1069,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		_ = upstreamConn.Close()
 	}()
 	logOpenAIWSV2Passthrough(
-		"relay_dial_ok account_id=%d status_code=%d upstream_request_id=%s",
+		"relay_dial_ok account_id=%d status_code=%d",
 		account.ID,
 		statusCode,
-		openAIWSHeaderValueForLog(handshakeHeaders, "x-request-id"),
 	)
 
 	upstreamFrameConn, ok := upstreamConn.(openaiwsv2.FrameConn)
@@ -930,10 +1087,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if current := usageMeta.reasoningEffort.Load(); current != nil {
 				reasoningEffort = *current
 			}
-			timeout := s.openAIFirstOutputTimeout(reasoningEffort)
-			if timeout <= 0 {
-				timeout = s.openAIWSPassthroughIdleTimeout()
-			}
+			timeout := s.openAIFirstOutputTimeoutForSettings(reasoningEffort, firstOutputSettings)
 			model := openAIWSPassthroughRequestModelForFrame(payload)
 			if model == "" {
 				model = usageMeta.requestModelForFrame(payload)
@@ -1156,7 +1310,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if (msgType == coderws.MessageText || msgType == coderws.MessageBinary) && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
 				return msgType, payload, nil
 			}
-			if writeErr := upstreamFrameConn.WriteFrame(readCtx, msgType, payload); writeErr != nil {
+			if writeErr := relayUpstreamFrameConn.WriteFrame(readCtx, msgType, payload); writeErr != nil {
 				return msgType, payload, writeErr
 			}
 		}
@@ -1183,18 +1337,17 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				return *startedAt
 			},
 			// Passthrough idle is enforced only after a completed turn by
-			// clientFrameConn. The relay-wide activity watchdog would also
-			// terminate a healthy active upstream turn.
+			// clientFrameConn. Start the client reader immediately so cancel and
+			// disconnect still stop a turn while pre-semantic frames are staged.
 			IdleTimeout:                     0,
 			FirstMessageType:                coderws.MessageText,
 			FirstMessageSent:                upstreamFirstMessageSent,
-			StartClientAfterFirstDownstream: true,
+			StartClientAfterFirstDownstream: false,
 			ReadClientFrame:                 readNextClientFrame,
-			OnUsageParseFailure: func(eventType string, usageRaw string) {
+			OnUsageParseFailure: func(eventType string, _ string) {
 				logOpenAIWSV2Passthrough(
-					"usage_parse_failed event_type=%s usage_raw=%s",
+					"usage_parse_failed event_type=%s",
 					truncateOpenAIWSLogValue(eventType, openAIWSLogValueMaxLen),
-					truncateOpenAIWSLogValue(usageRaw, openAIWSLogValueMaxLen),
 				)
 			},
 			OnTurnComplete: func(turn openaiwsv2.RelayTurnResult) {
@@ -1228,10 +1381,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					FirstTokenMs:                  turn.FirstTokenMs,
 				}
 				logOpenAIWSV2Passthrough(
-					"relay_turn_completed account_id=%d turn=%d request_id=%s terminal_event=%s turn_requested_model=%s turn_upstream_model=%s duration_ms=%d first_token_ms=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d",
+					"relay_turn_completed account_id=%d turn=%d terminal_event=%s turn_requested_model=%s turn_upstream_model=%s duration_ms=%d first_token_ms=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d",
 					account.ID,
 					turnNo,
-					truncateOpenAIWSLogValue(turnResult.RequestID, openAIWSIDValueMaxLen),
 					truncateOpenAIWSLogValue(turn.TerminalEventType, openAIWSLogValueMaxLen),
 					truncateOpenAIWSLogValue(turnRequestModel, openAIWSLogValueMaxLen),
 					truncateOpenAIWSLogValue(turnUpstreamModel, openAIWSLogValueMaxLen),
@@ -1298,11 +1450,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				}
 				s.persistOpenAIWSRateLimitSignal(ctx, account, handshakeHeaders, payload, errCodeRaw, errTypeRaw, errMsgRaw, capturedSessionModel)
 				logOpenAIWSV2Passthrough(
-					"relay_rate_limit_failover account_id=%d err_code=%s err_type=%s err_message=%s",
+					"relay_rate_limit_failover account_id=%d err_code=%s err_type=%s",
 					account.ID,
 					truncateOpenAIWSLogValue(errCodeRaw, openAIWSLogValueMaxLen),
 					truncateOpenAIWSLogValue(errTypeRaw, openAIWSLogValueMaxLen),
-					truncateOpenAIWSLogValue(errMsgRaw, openAIWSLogValueMaxLen),
 				)
 				if completedTurns.Load() > 0 {
 					return NewOpenAIWSClientCloseError(
@@ -1315,7 +1466,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			},
 			OnTrace: func(event openaiwsv2.RelayTraceEvent) {
 				logOpenAIWSV2Passthrough(
-					"relay_trace account_id=%d stage=%s direction=%s msg_type=%s bytes=%d graceful=%v wrote_downstream=%v err=%s",
+					"relay_trace account_id=%d stage=%s direction=%s msg_type=%s bytes=%d graceful=%v wrote_downstream=%v error_present=%v",
 					account.ID,
 					truncateOpenAIWSLogValue(event.Stage, openAIWSLogValueMaxLen),
 					truncateOpenAIWSLogValue(event.Direction, openAIWSLogValueMaxLen),
@@ -1323,7 +1474,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					event.PayloadBytes,
 					event.Graceful,
 					event.WroteDownstream,
-					truncateOpenAIWSLogValue(event.Error, openAIWSLogValueMaxLen),
+					event.Error != "",
 				)
 			},
 		},
@@ -1372,9 +1523,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	turnCount := int(completedTurns.Load())
 	if relayExit == nil {
 		logOpenAIWSV2Passthrough(
-			"relay_completed account_id=%d request_id=%s terminal_event=%s duration_ms=%d c2u_frames=%d u2c_frames=%d dropped_frames=%d turns=%d",
+			"relay_completed account_id=%d terminal_event=%s duration_ms=%d c2u_frames=%d u2c_frames=%d dropped_frames=%d turns=%d",
 			account.ID,
-			truncateOpenAIWSLogValue(result.RequestID, openAIWSIDValueMaxLen),
 			truncateOpenAIWSLogValue(relayResult.TerminalEventType, openAIWSLogValueMaxLen),
 			result.Duration.Milliseconds(),
 			relayResult.ClientToUpstreamFrames,
@@ -1392,11 +1542,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		return nil
 	}
 	logOpenAIWSV2Passthrough(
-		"relay_failed account_id=%d stage=%s wrote_downstream=%v err=%s duration_ms=%d c2u_frames=%d u2c_frames=%d dropped_frames=%d turns=%d",
+		"relay_failed account_id=%d stage=%s wrote_downstream=%v error_type=%T duration_ms=%d c2u_frames=%d u2c_frames=%d dropped_frames=%d turns=%d",
 		account.ID,
 		truncateOpenAIWSLogValue(relayExit.Stage, openAIWSLogValueMaxLen),
 		relayExit.WroteDownstream,
-		truncateOpenAIWSLogValue(relayErrorText(relayExit.Err), openAIWSLogValueMaxLen),
+		relayExit.Err,
 		result.Duration.Milliseconds(),
 		relayResult.ClientToUpstreamFrames,
 		relayResult.UpstreamToClientFrames,
@@ -1405,6 +1555,23 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	)
 
 	relayErr := relayExit.Err
+	if errors.Is(relayErr, errOpenAIWSPassthroughFirstOutputStageLimit) {
+		if turnCount == 0 && !relayExit.WroteDownstream {
+			relayErr = &UpstreamFailoverError{
+				StatusCode:               http.StatusBadGateway,
+				ResponseBody:             []byte(`{"error":{"type":"upstream_error","message":"Upstream response exceeded first-output staging limit"}}`),
+				Stage:                    GatewayFailureStageInference,
+				Scope:                    GatewayFailureScopeAccount,
+				SafeToFailoverAfterWrite: true,
+			}
+		} else {
+			relayErr = NewOpenAIWSClientCloseError(
+				coderws.StatusGoingAway,
+				"upstream response exceeded first-output staging limit; please reconnect",
+				relayErr,
+			)
+		}
+	}
 	var firstOutputTimeoutErr *openAIWSPassthroughFirstOutputTimeoutError
 	if errors.As(relayErr, &firstOutputTimeoutErr) {
 		deadline := firstOutputTimeoutErr.deadline
@@ -1479,6 +1646,12 @@ func openAIWSPassthroughRelayClientClose(exit openaiwsv2.RelayExit, completedTur
 	if errors.As(exit.Err, &firstOutputTimeoutErr) {
 		if completedTurns > 0 || exit.WroteDownstream {
 			return coderws.StatusGoingAway, "upstream produced no semantic output; please reconnect", true
+		}
+		return 0, "", false
+	}
+	if errors.Is(exit.Err, errOpenAIWSPassthroughFirstOutputStageLimit) {
+		if completedTurns > 0 || exit.WroteDownstream {
+			return coderws.StatusGoingAway, "upstream response exceeded first-output staging limit; please reconnect", true
 		}
 		return 0, "", false
 	}
@@ -1561,13 +1734,6 @@ func openaiwsv2RelayMessageTypeName(msgType coderws.MessageType) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", msgType)
 	}
-}
-
-func relayErrorText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
 
 func openAIWSFirstTokenMsForLog(firstTokenMs *int) int {

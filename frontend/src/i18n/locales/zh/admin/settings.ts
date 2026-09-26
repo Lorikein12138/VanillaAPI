@@ -19,6 +19,10 @@ export default {
           description: '在保留模型、能力、传输、配额和熔断等既有硬门槛的前提下，优先选择近期健康观测已成熟的账号。',
           enabled: '启用智能调度',
           enabledHint: '此开关与 OpenAI 实验调度策略相互独立。开启后启用健康感知路由；实验调度仍可单独选择。',
+          firstOutputTimeoutLabel: '首个语义输出超时（秒）',
+          firstOutputTimeoutHint: '请输入 0–300 的整数，默认 30；0 表示关闭。仅智能调度开启时使用此值，关闭时继续使用 config.yaml。',
+          firstOutputTimeoutRisk: '超时发生在语义输出前可能触发一次换号；上游可能已处理请求并计费，重试可能重复计费。',
+          firstOutputTimeoutInvalid: '首个语义输出超时必须是 0–300 的整数。',
         },
         channelMonitor: {
           title: '渠道监控',

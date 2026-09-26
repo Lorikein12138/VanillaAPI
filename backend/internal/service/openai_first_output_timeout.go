@@ -20,12 +20,18 @@ import (
 )
 
 const (
+	openAIFirstOutputSettingsContextKey      = "openai_first_output_settings_snapshot"
 	openAIFirstOutputStageMemoryLimit        = 64 * 1024
 	openAIFirstOutputStageMaxBytes           = 8 * 1024 * 1024
 	openAIFirstOutputScannerFramingAllowance = 64
 	openAIFirstOutputGuardQueueSize          = 1
 	openAIDefaultStreamQueueSize             = 16
 )
+
+type openAIFirstOutputRequestOptions struct {
+	reasoningEffort string
+	timeout         time.Duration
+}
 
 var (
 	errOpenAIFirstOutputStageLimit   = errors.New("openai first-output staging limit exceeded")
@@ -230,10 +236,52 @@ func (s *openAIFirstOutputStage) Close() error {
 }
 
 func (s *OpenAIGatewayService) openAIFirstOutputTimeout(reasoningEffort string) time.Duration {
-	if s == nil || s.cfg == nil || s.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds <= 0 {
+	return s.openAIFirstOutputTimeoutForSettings(reasoningEffort, openAIAdvancedSchedulerRuntimeSettings{})
+}
+
+func (s *OpenAIGatewayService) openAIFirstOutputRuntimeSettings(ctx context.Context, c *gin.Context) openAIAdvancedSchedulerRuntimeSettings {
+	if c != nil {
+		if value, ok := c.Get(openAIFirstOutputSettingsContextKey); ok {
+			if settings, ok := value.(openAIAdvancedSchedulerRuntimeSettings); ok {
+				return settings
+			}
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings := s.openAIAdvancedSchedulerRuntimeSettings(ctx)
+	if c != nil {
+		c.Set(openAIFirstOutputSettingsContextKey, settings)
+	}
+	return settings
+}
+
+func (s *OpenAIGatewayService) openAIFirstOutputTimeoutForRequest(ctx context.Context, c *gin.Context, reasoningEffort string) time.Duration {
+	return s.openAIFirstOutputTimeoutForSettings(reasoningEffort, s.openAIFirstOutputRuntimeSettings(ctx, c))
+}
+
+func (s *OpenAIGatewayService) openAIFirstOutputTimeoutForSettings(
+	reasoningEffort string,
+	settings openAIAdvancedSchedulerRuntimeSettings,
+) time.Duration {
+	if s == nil {
+		return 0
+	}
+	if settings.smartEnabled {
+		seconds := settings.firstOutputTimeoutSeconds
+		if seconds < 0 || seconds > 300 {
+			seconds = 30
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if s.cfg == nil {
 		return 0
 	}
 	seconds := s.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds
+	if seconds <= 0 {
+		return 0
+	}
 	switch strings.ToLower(strings.TrimSpace(reasoningEffort)) {
 	case "high", "xhigh", "max":
 		if override := s.cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds; override > 0 {
@@ -266,13 +314,12 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 		"OpenAI first output timeout: account=%d model=%s effort=%s phase=%s elapsed=%s limit=%s",
 		account.ID, originalModel, reasoningEffort, phase, elapsed, timeout,
 	)
-	requestID := strings.TrimSpace(responseHeaders.Get("x-request-id"))
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		ProxyID:   proxyID,
 		ProxyName: proxyName,
 		Platform:  account.Platform, AccountID: account.ID, AccountName: account.Name,
-		UpstreamStatusCode: http.StatusGatewayTimeout, UpstreamRequestID: requestID,
-		Kind: "first_output_timeout", Message: "OpenAI upstream produced no semantic output before the deadline",
+		UpstreamStatusCode: http.StatusGatewayTimeout,
+		Kind:               "first_output_timeout", Message: "OpenAI upstream produced no semantic output before the deadline",
 		Detail: fmt.Sprintf("phase=%s elapsed_ms=%d timeout_ms=%d", phase, elapsed.Milliseconds(), timeout.Milliseconds()),
 	})
 	if s.rateLimitService != nil {

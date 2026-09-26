@@ -235,7 +235,7 @@ func openAIProxyStreamCircuitProxyID(account *Account) (int64, bool) {
 	return *account.ProxyID, true
 }
 
-func (s *OpenAIGatewayService) recordOpenAIProxyStreamDisconnect(account *Account, streamErr error, upstreamRequestID string) {
+func (s *OpenAIGatewayService) recordOpenAIProxyStreamDisconnect(account *Account, streamErr error, _ string) {
 	proxyID, ok := openAIProxyStreamCircuitProxyID(account)
 	if !ok || streamErr == nil || errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
 		return
@@ -250,8 +250,7 @@ func (s *OpenAIGatewayService) recordOpenAIProxyStreamDisconnect(account *Accoun
 		zap.Int64("proxy_id", proxyID),
 		zap.Int64("account_id", account.ID),
 		zap.Time("until", until),
-		zap.String("upstream_request_id", upstreamRequestID),
-		zap.String("error", sanitizeUpstreamErrorMessage(streamErr.Error())),
+		zap.String("result", "stream_disconnect"),
 	)
 }
 

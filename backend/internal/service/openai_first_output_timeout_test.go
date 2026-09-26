@@ -51,15 +51,23 @@ func (u *blockingOpenAIResponseHeaderUpstream) DoWithTLS(req *http.Request, _ st
 	return u.Do(req, "", 0, 0)
 }
 
-func TestOpenAIForwardFirstOutputTimeoutIncludesResponseHeaderWait(t *testing.T) {
+func TestSmartSchedulingStall_HTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	repo := &openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
+		SettingKeySmartSchedulingEnabled:          "true",
+		SettingKeyOpenAIFirstOutputTimeoutSeconds: "1",
+	}}
 	upstream := &blockingOpenAIResponseHeaderUpstream{canceled: make(chan struct{})}
+	cfg := &config.Config{Gateway: config.GatewayConfig{
+		OpenAIFirstOutputTimeoutSeconds: 0,
+		MaxLineSize:                     defaultMaxLineSize,
+	}}
 	svc := &OpenAIGatewayService{
-		cfg: &config.Config{Gateway: config.GatewayConfig{
-			OpenAIFirstOutputTimeoutSeconds: 1,
-			MaxLineSize:                     defaultMaxLineSize,
-		}},
-		httpUpstream: upstream,
+		cfg:              cfg,
+		httpUpstream:     upstream,
+		rateLimitService: &RateLimitService{settingService: NewSettingService(repo, cfg)},
 	}
 	body := []byte(`{"model":"gpt-5.5","stream":true,"reasoning":{"effort":"low"},"input":"hello"}`)
 	rec := httptest.NewRecorder()
@@ -189,6 +197,208 @@ func TestOpenAIFirstOutputTimeoutForReasoningEffort(t *testing.T) {
 	require.Equal(t, 300*time.Second, svc.openAIFirstOutputTimeout("high"))
 	require.Equal(t, 300*time.Second, svc.openAIFirstOutputTimeout("xhigh"))
 	require.Equal(t, 300*time.Second, svc.openAIFirstOutputTimeout("max"))
+}
+
+func TestSmartSchedulingStall_TimeoutModes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	newContext := func() *gin.Context {
+		t.Helper()
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		return c
+	}
+	newGateway := func(values map[string]string, static, high int) (*OpenAIGatewayService, *openAIAdvancedSchedulerSettingRepoStub) {
+		repo := &openAIAdvancedSchedulerSettingRepoStub{values: values}
+		cfg := &config.Config{Gateway: config.GatewayConfig{
+			OpenAIFirstOutputTimeoutSeconds:           static,
+			OpenAIHighEffortFirstOutputTimeoutSeconds: high,
+		}}
+		gateway := &OpenAIGatewayService{
+			cfg:              cfg,
+			rateLimitService: &RateLimitService{settingService: NewSettingService(repo, cfg)},
+		}
+		return gateway, repo
+	}
+
+	t.Run("smart backend values include absent default and explicit boundaries", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			value   string
+			want    time.Duration
+			present bool
+		}{
+			{name: "missing defaults to thirty", want: 30 * time.Second},
+			{name: "zero disables", value: "0", present: true},
+			{name: "one second", value: "1", want: time.Second, present: true},
+			{name: "thirty seconds", value: "30", want: 30 * time.Second, present: true},
+			{name: "three hundred seconds", value: "300", want: 300 * time.Second, present: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetOpenAIAdvancedSchedulerSettingCacheForTest()
+				values := map[string]string{SettingKeySmartSchedulingEnabled: "true"}
+				if tc.present {
+					values[SettingKeyOpenAIFirstOutputTimeoutSeconds] = tc.value
+				}
+				gateway, _ := newGateway(values, 0, 900)
+				require.Equal(t, tc.want, gateway.openAIFirstOutputTimeoutForRequest(context.Background(), newContext(), "max"))
+			})
+		}
+	})
+
+	t.Run("legacy config and high effort override remain isolated to smart off", func(t *testing.T) {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		gateway, _ := newGateway(map[string]string{
+			SettingKeySmartSchedulingEnabled:          "false",
+			SettingKeyOpenAIFirstOutputTimeoutSeconds: "0",
+		}, 30, 300)
+		c := newContext()
+		require.Equal(t, 30*time.Second, gateway.openAIFirstOutputTimeoutForRequest(context.Background(), c, "low"))
+		require.Equal(t, 300*time.Second, gateway.openAIFirstOutputTimeoutForRequest(context.Background(), c, "xhigh"))
+	})
+
+	t.Run("in flight context retains its setting generation", func(t *testing.T) {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		gateway, repo := newGateway(map[string]string{
+			SettingKeySmartSchedulingEnabled:          "true",
+			SettingKeyOpenAIFirstOutputTimeoutSeconds: "1",
+		}, 30, 300)
+		inFlight := newContext()
+		require.Equal(t, time.Second, gateway.openAIFirstOutputTimeoutForRequest(context.Background(), inFlight, "high"))
+
+		repo.values[SettingKeySmartSchedulingEnabled] = "false"
+		repo.values[SettingKeyOpenAIFirstOutputTimeoutSeconds] = "300"
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		require.Equal(t, time.Second, gateway.openAIFirstOutputTimeoutForRequest(context.Background(), inFlight, "high"))
+		fresh := newContext()
+		require.Equal(t, 300*time.Second, gateway.openAIFirstOutputTimeoutForRequest(context.Background(), fresh, "high"))
+	})
+}
+
+func TestSmartSchedulingStall_Passthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	upstream := &blockingOpenAIResponseHeaderUpstream{canceled: make(chan struct{})}
+	repo := &openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
+		SettingKeySmartSchedulingEnabled:          "true",
+		SettingKeyOpenAIFirstOutputTimeoutSeconds: "1",
+	}}
+	cfg := &config.Config{Gateway: config.GatewayConfig{OpenAIFirstOutputTimeoutSeconds: 0, MaxLineSize: defaultMaxLineSize}}
+	svc := &OpenAIGatewayService{
+		cfg:              cfg,
+		httpUpstream:     upstream,
+		rateLimitService: &RateLimitService{settingService: NewSettingService(repo, cfg)},
+	}
+	body := []byte(`{"model":"gpt-5.5","stream":true,"input":"hello"}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive,
+		Schedulable: true, Concurrency: 1, Credentials: map[string]any{"api_key": "test-token"}}
+
+	started := time.Now()
+	_, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.5", false, nil, true, started)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
+	require.Less(t, time.Since(started), 1300*time.Millisecond)
+	select {
+	case <-upstream.canceled:
+	default:
+		t.Fatal("passthrough response-header timeout did not cancel the upstream request")
+	}
+}
+
+func TestSmartSchedulingStall_PassthroughSemanticTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	body := &firstOutputCloseTrackingBody{ReadCloser: pr, closed: make(chan struct{})}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		_, _ = io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n")
+		// A short test deadline models long generation after semantic output.
+		time.Sleep(250 * time.Millisecond)
+		_, _ = io.WriteString(pw, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+		_ = pw.Close()
+	}()
+
+	result, err := svc.handleStreamingResponsePassthrough(ctx, resp, c, &Account{ID: 2, Platform: PlatformOpenAI}, time.Now(), "model", "model",
+		openAIFirstOutputRequestOptions{timeout: 100 * time.Millisecond})
+	require.NoError(t, err, "the first semantic event disarms the watchdog for long generation")
+	require.NotNil(t, result)
+	require.Contains(t, rec.Body.String(), "response.output_text.delta")
+	require.Contains(t, rec.Body.String(), "response.completed")
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("passthrough stream writer did not finish")
+	}
+}
+
+func TestSmartSchedulingStall_PassthroughTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	pr, pw := io.Pipe()
+	body := &firstOutputCloseTrackingBody{ReadCloser: pr, closed: make(chan struct{})}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		_, _ = io.WriteString(pw, ": keepalive\n\n")
+		time.Sleep(250 * time.Millisecond)
+		_, _ = io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n")
+		_ = pw.Close()
+	}()
+
+	started := time.Now()
+	_, err := svc.handleStreamingResponsePassthrough(context.Background(), resp, c, &Account{ID: 3, Platform: PlatformOpenAI}, started, "model", "model",
+		openAIFirstOutputRequestOptions{timeout: 100 * time.Millisecond})
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
+	require.Empty(t, rec.Body.String(), "a heartbeat does not become semantic output or restart the clock")
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("passthrough semantic-output timeout did not close the upstream body")
+	}
+	select {
+	case <-writerDone:
+	case <-time.After(time.Second):
+		t.Fatal("passthrough blocked reader did not stop after timeout")
+	}
+}
+
+func TestSmartSchedulingStall_PassthroughStagingLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	upstreamPayload := "data: " + strings.Repeat("x", int(openAIFirstOutputStageMaxBytes+1024))
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(upstreamPayload))}
+
+	_, err := svc.handleStreamingResponsePassthrough(context.Background(), resp, c, &Account{ID: 4, Platform: PlatformOpenAI}, time.Now(), "model", "model")
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+	require.True(t, failoverErr.SafeToFailoverAfterWrite)
+	require.Empty(t, rec.Body.String(), "overflowing pre-output data is not exposed before failover")
 }
 
 func TestOpenAIFirstOutputStageDefaultLimitIsIndependentFromScannerLimit(t *testing.T) {

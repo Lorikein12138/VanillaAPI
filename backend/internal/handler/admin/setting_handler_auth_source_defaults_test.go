@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -258,7 +259,7 @@ func TestSettingHandler_UpdateSettings_PersistsPaymentVisibleMethodsAndAdvancedS
 	require.Equal(t, true, data["openai_advanced_scheduler_subscription_priority_enabled"])
 }
 
-func TestSettingHandler_UpdateSettings_PersistsSmartScheduling(t *testing.T) {
+func TestSmartSchedulingStall_SettingsAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	repo := &settingHandlerRepoStub{
 		values: map[string]string{
@@ -280,6 +281,7 @@ func TestSettingHandler_UpdateSettings_PersistsSmartScheduling(t *testing.T) {
 	getData, ok := getResp.Data.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, false, getData["smart_scheduling_enabled"])
+	require.Equal(t, float64(30), getData["openai_first_output_timeout_seconds"])
 	require.Equal(t, true, getData["openai_advanced_scheduler_enabled"])
 
 	update := func(body map[string]any) map[string]any {
@@ -299,18 +301,60 @@ func TestSettingHandler_UpdateSettings_PersistsSmartScheduling(t *testing.T) {
 	}
 
 	data := update(map[string]any{
-		"promo_code_enabled":       true,
-		"smart_scheduling_enabled": true,
+		"promo_code_enabled":                  true,
+		"smart_scheduling_enabled":            true,
+		"openai_first_output_timeout_seconds": 0,
 	})
 	require.Equal(t, "true", repo.values[service.SettingKeySmartSchedulingEnabled])
+	require.Equal(t, "0", repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
 	require.Equal(t, "true", repo.values["openai_advanced_scheduler_enabled"])
 	require.Equal(t, true, data["smart_scheduling_enabled"])
+	require.Equal(t, float64(0), data["openai_first_output_timeout_seconds"])
 	require.Equal(t, true, data["openai_advanced_scheduler_enabled"])
 
 	data = update(map[string]any{"promo_code_enabled": false})
 	require.Equal(t, "true", repo.values[service.SettingKeySmartSchedulingEnabled])
 	require.Equal(t, true, data["smart_scheduling_enabled"])
+	require.Equal(t, "0", repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
+	require.Equal(t, float64(0), data["openai_first_output_timeout_seconds"])
 	require.Equal(t, "true", repo.values["openai_advanced_scheduler_enabled"])
+
+	for _, seconds := range []int{1, 30, 300} {
+		data = update(map[string]any{"openai_first_output_timeout_seconds": seconds})
+		require.Equal(t, strconv.Itoa(seconds), repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
+		require.Equal(t, float64(seconds), data["openai_first_output_timeout_seconds"])
+	}
+
+	data = update(map[string]any{"openai_first_output_timeout_seconds": 0})
+	require.Equal(t, float64(0), data["openai_first_output_timeout_seconds"])
+	valuesBeforeInvalid := make(map[string]string, len(repo.values))
+	for key, value := range repo.values {
+		valuesBeforeInvalid[key] = value
+	}
+	updatesBeforeInvalid := make(map[string]string, len(repo.lastUpdates))
+	for key, value := range repo.lastUpdates {
+		updatesBeforeInvalid[key] = value
+	}
+	for _, raw := range []any{-1, 301, 1.5} {
+		rawBody, err := json.Marshal(map[string]any{"openai_first_output_timeout_seconds": raw})
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(rawBody))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(c)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, valuesBeforeInvalid, repo.values)
+		require.Equal(t, updatesBeforeInvalid, repo.lastUpdates)
+	}
+
+	require.Contains(t, diffSettings(
+		&service.SystemSettings{OpenAIFirstOutputTimeoutSeconds: 30},
+		&service.SystemSettings{OpenAIFirstOutputTimeoutSeconds: 0},
+		nil,
+		nil,
+		UpdateSettingsRequest{},
+	), "openai_first_output_timeout_seconds")
 }
 
 func TestSettingHandler_UpdateSettings_PreservesLegacyBlankPaymentVisibleMethodSource(t *testing.T) {

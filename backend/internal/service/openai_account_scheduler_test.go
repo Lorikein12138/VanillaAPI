@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,8 +272,9 @@ func (c schedulerTestConcurrencyCache) GetAccountWaitingCount(ctx context.Contex
 }
 
 type schedulerTestGatewayCache struct {
-	sessionBindings map[string]int64
-	deletedSessions map[string]int
+	sessionBindings   map[string]int64
+	deletedSessions   map[string]int
+	refreshedSessions map[string]int
 }
 
 func (c *schedulerTestGatewayCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
@@ -291,6 +293,10 @@ func (c *schedulerTestGatewayCache) SetSessionAccountID(ctx context.Context, gro
 }
 
 func (c *schedulerTestGatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
+	if c.refreshedSessions == nil {
+		c.refreshedSessions = make(map[string]int)
+	}
+	c.refreshedSessions[sessionHash]++
 	return nil
 }
 
@@ -1237,69 +1243,101 @@ func TestOpenAIAccountRuntimeStats_ProbeRecoveryInvariant(t *testing.T) {
 	stat.mu.Unlock()
 }
 
-func TestOpenAIAccountRuntimeStats_SmartHealthMaturityAndThresholds(t *testing.T) {
+func TestSmartSchedulingStall_ThreeSamples(t *testing.T) {
 	now := time.Unix(1771000000, 0).UTC()
+	report := func(stats *openAIAccountRuntimeStats, accountID int64, success bool, ttft *int, at time.Time) {
+		stats.reportAtForRequest(accountID, success, ttft, at, openAIStickyEscapeConfig{}, false, true, 0, true)
+	}
 
-	t.Run("ErrorRate", func(t *testing.T) {
-		stats := newOpenAIAccountRuntimeStats()
-		for index := 0; index < openAIAccountSmartWindowSize-1; index++ {
-			stats.reportAtForRequest(7101, true, nil, now.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
-		}
-		assessment := stats.health(7101, now.Add(8*time.Second), openAIStickyEscapeConfig{})
-		require.Equal(t, openAIAccountHealthUnknown, assessment.level, "nine completed outcomes are immature")
-
-		stats.reportAtForRequest(7101, false, nil, now.Add(9*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
-		assessment = stats.health(7101, now.Add(9*time.Second), openAIStickyEscapeConfig{})
-		require.InDelta(t, 0.1, assessment.errorRate, 1e-12)
-		require.Equal(t, openAIAccountHealthUnknown, assessment.level, "the error signal is mature at exactly 10%, while TTFT is not")
-
-		stats.reportAtForRequest(7101, true, nil, now.Add(10*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
-		assessment = stats.health(7101, now.Add(10*time.Second), openAIStickyEscapeConfig{})
-		require.InDelta(t, 0.1, assessment.errorRate, 1e-12)
+	t.Run("two_of_three_errors_degrade_but_one_of_three_does_not", func(t *testing.T) {
+		oneOfThree := newOpenAIAccountRuntimeStats()
+		report(oneOfThree, 7101, false, nil, now)
+		report(oneOfThree, 7101, true, nil, now.Add(time.Second))
+		report(oneOfThree, 7101, true, nil, now.Add(2*time.Second))
+		assessment := oneOfThree.health(7101, now.Add(2*time.Second), openAIStickyEscapeConfig{})
 		require.Equal(t, openAIAccountHealthUnknown, assessment.level)
+		require.InDelta(t, 1.0/3.0, assessment.errorRate, 1e-12)
+		require.False(t, assessment.hasTTFT, "missing TTFT leaves that signal immature")
 
-		stats.reportAtForRequest(7101, false, nil, now.Add(11*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
-		assessment = stats.health(7101, now.Add(11*time.Second), openAIStickyEscapeConfig{})
-		require.InDelta(t, 0.2, assessment.errorRate, 1e-12)
-		require.Equal(t, openAIAccountHealthDegraded, assessment.level, "two failures in the exact ten-result window exceed 10%")
+		twoOfThree := newOpenAIAccountRuntimeStats()
+		report(twoOfThree, 7102, false, nil, now)
+		report(twoOfThree, 7102, true, nil, now.Add(time.Second))
+		report(twoOfThree, 7102, false, nil, now.Add(2*time.Second))
+		assessment = twoOfThree.health(7102, now.Add(2*time.Second), openAIStickyEscapeConfig{})
+		require.Equal(t, openAIAccountHealthDegraded, assessment.level)
 		require.Equal(t, openAIAccountHealthReasonErrorRate, assessment.reason)
+		require.InDelta(t, 2.0/3.0, assessment.errorRate, 1e-12)
 	})
 
-	t.Run("TTFT", func(t *testing.T) {
-		stats := newOpenAIAccountRuntimeStats()
+	t.Run("positive_ttft_is_independent_and_strictly_over_ten_seconds", func(t *testing.T) {
+		boundaryStats := newOpenAIAccountRuntimeStats()
 		boundary := 10000
-		for index := 0; index < openAIAccountSmartWindowSize-1; index++ {
-			stats.reportAtForRequest(7102, true, &boundary, now.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
+		for index := 0; index < openAIAccountSmartWindowSize; index++ {
+			report(boundaryStats, 7103, true, &boundary, now.Add(time.Duration(index)*time.Second))
 		}
-		assessment := stats.health(7102, now.Add(8*time.Second), openAIStickyEscapeConfig{})
-		require.Equal(t, openAIAccountHealthUnknown, assessment.level, "nine positive TTFT samples are immature")
-		stats.reportAtForRequest(7102, true, &boundary, now.Add(9*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
-		assessment = stats.health(7102, now.Add(9*time.Second), openAIStickyEscapeConfig{})
+		assessment := boundaryStats.health(7103, now.Add(2*time.Second), openAIStickyEscapeConfig{})
 		require.True(t, assessment.hasTTFT)
 		require.InDelta(t, 10000, assessment.ttft, 1e-9)
 		require.Equal(t, openAIAccountHealthHealthy, assessment.level, "exactly 10 seconds is not degraded")
 
 		slowStats := newOpenAIAccountRuntimeStats()
-		slow := 10001
-		for index := 0; index < openAIAccountSmartWindowSize; index++ {
-			slowStats.reportAtForRequest(7103, true, &slow, now.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
+		slowValues := []int{10000, 10000, 10001}
+		for index, sample := range slowValues {
+			report(slowStats, 7104, true, &sample, now.Add(time.Duration(index)*time.Second))
 		}
-		assessment = slowStats.health(7103, now.Add(9*time.Second), openAIStickyEscapeConfig{})
-		require.True(t, assessment.hasTTFT)
+		assessment = slowStats.health(7104, now.Add(2*time.Second), openAIStickyEscapeConfig{})
 		require.Greater(t, assessment.ttft, float64(openAIAccountSmartTTFTThreshold.Milliseconds()))
 		require.Equal(t, openAIAccountHealthDegraded, assessment.level)
 		require.Equal(t, openAIAccountHealthReasonTTFT, assessment.reason)
 
-		stale := newOpenAIAccountRuntimeStats()
+		failureWithTTFT := newOpenAIAccountRuntimeStats()
+		observedTTFT := 9000
+		report(failureWithTTFT, 7105, false, &observedTTFT, now)
+		report(failureWithTTFT, 7105, true, &observedTTFT, now.Add(time.Second))
+		report(failureWithTTFT, 7105, true, &observedTTFT, now.Add(2*time.Second))
+		stat := openAIAccountRuntimeStatForTest(t, failureWithTTFT, 7105)
+		require.Len(t, stat.smartTTFTWindow, 3, "a post-first-output failure contributes its positive TTFT")
+	})
+
+	t.Run("success_replaces_old_failure_and_expired_window_is_unknown", func(t *testing.T) {
+		stats := newOpenAIAccountRuntimeStats()
+		report(stats, 7106, false, nil, now)
+		report(stats, 7106, true, nil, now.Add(time.Second))
+		report(stats, 7106, true, nil, now.Add(2*time.Second))
+		report(stats, 7106, true, nil, now.Add(3*time.Second))
+		assessment := stats.health(7106, now.Add(3*time.Second), openAIStickyEscapeConfig{})
+		require.Equal(t, openAIAccountHealthUnknown, assessment.level)
+		require.Zero(t, assessment.errorRate, "the latest three results replace an older failure")
+		require.Equal(t, openAIAccountHealthUnknown,
+			stats.health(7106, now.Add(openAIAccountSmartWindowDuration+time.Second), openAIStickyEscapeConfig{}).level,
+			"results outside the rolling ten-minute window are pruned")
+	})
+
+	t.Run("long_generation_uses_first_token_time_only", func(t *testing.T) {
+		stats := newOpenAIAccountRuntimeStats()
+		firstToken := 1300
 		for index := 0; index < openAIAccountSmartWindowSize; index++ {
-			stale.reportAtForRequest(7104, true, &boundary, now.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
+			report(stats, 7107, true, &firstToken, now.Add(time.Duration(index)*time.Second))
 		}
-		require.Equal(t, openAIAccountHealthUnknown, stale.health(7104, now.Add(10*time.Minute+time.Second), openAIStickyEscapeConfig{}).level)
-		require.Equal(t, openAIAccountHealthUnknown, newOpenAIAccountRuntimeStats().health(7104, now, openAIStickyEscapeConfig{}).level, "a new process starts with empty windows")
+		assessment := stats.health(7107, now.Add(166*time.Second), openAIStickyEscapeConfig{})
+		require.Equal(t, openAIAccountHealthHealthy, assessment.level)
+		require.InDelta(t, 1300, assessment.ttft, 1e-9)
 	})
 }
 
-func TestOpenAIAccountRuntimeStats_ProbeBackoffLadder(t *testing.T) {
+func TestSmartSchedulingStall_Legacy(t *testing.T) {
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Unix(1771000100, 0).UTC()
+	for index := 0; index < 3; index++ {
+		stats.reportAtForRequest(7110, false, nil, now.Add(time.Duration(index)*time.Second), defaultOpenAIAccountHealthThresholds(), false, false, 0, true)
+	}
+	require.Equal(t, openAIAccountHealthHealthy, stats.health(7110, now.Add(2*time.Second), defaultOpenAIAccountHealthThresholds()).level)
+	stats.reportAtForRequest(7110, false, nil, now.Add(3*time.Second), defaultOpenAIAccountHealthThresholds(), false, false, 0, true)
+	require.Equal(t, openAIAccountHealthDegraded, stats.health(7110, now.Add(3*time.Second), defaultOpenAIAccountHealthThresholds()).level,
+		"S=false retains the legacy EWMA/error threshold")
+}
+
+func TestSmartSchedulingStall_RecoveryBackoffLadder(t *testing.T) {
 	base := time.Unix(1772000000, 0).UTC()
 	stats := newOpenAIAccountRuntimeStats()
 	for index := 0; index < openAIAccountSmartWindowSize; index++ {
@@ -1309,7 +1347,7 @@ func TestOpenAIAccountRuntimeStats_ProbeBackoffLadder(t *testing.T) {
 	stat := openAIAccountRuntimeStatForTest(t, stats, 7201)
 	require.Equal(t, openAIAccountHealthDegraded, stats.health(7201, base.Add(9*time.Second), openAIStickyEscapeConfig{}).level)
 	require.Equal(t, 0, stat.backoffIndex)
-	require.Equal(t, base.Add(9*time.Second+time.Minute).UnixNano(), stat.nextProbeAt.Load())
+	require.Equal(t, base.Add(2*time.Second+time.Minute).UnixNano(), stat.nextProbeAt.Load())
 
 	// An unattributable terminal ends the live lease without counting a batch result or advancing backoff.
 	probeID := stats.probeSequence.Add(1)
@@ -1357,7 +1395,7 @@ func TestOpenAIAccountRuntimeStats_ProbeBackoffLadder(t *testing.T) {
 	require.Equal(t, recoveryStart.Add(21*time.Second+time.Minute).UnixNano(), stat.nextProbeAt.Load())
 }
 
-func TestOpenAIAccountRuntimeStats_TenProbeBatchRecovery(t *testing.T) {
+func TestSmartSchedulingStall_Recovery(t *testing.T) {
 	base := time.Unix(1773000000, 0).UTC()
 	stats := newOpenAIAccountRuntimeStats()
 	seedSmartDegradedAccount(t, stats, 7301, "error_rate", base)
@@ -1371,17 +1409,7 @@ func TestOpenAIAccountRuntimeStats_TenProbeBatchRecovery(t *testing.T) {
 			require.True(t, stats.probeEligible(7301, probeAt), "the next real request can continue immediately")
 		}
 		success := index != 3
-		var ttft *int
-		if success {
-			value := 10000
-			if index == 0 {
-				value = 11000 // One slow sample is acceptable when the nine-sample mean is exactly 10 seconds.
-			} else if index > 0 {
-				value = 9875
-			}
-			ttft = &value
-		}
-		acquireAndReportSmartProbe(t, stats, 7301, success, ttft, probeAt)
+		acquireAndReportSmartProbe(t, stats, 7301, success, nil, probeAt)
 		if index < openAIAccountSmartProbeBatchLimit-1 {
 			stat.mu.Lock()
 			require.Equal(t, openAIAccountHealthDegraded, stat.smartLevel, "the first nine results cannot recover")
@@ -1390,15 +1418,15 @@ func TestOpenAIAccountRuntimeStats_TenProbeBatchRecovery(t *testing.T) {
 		}
 	}
 	assessment := stats.health(7301, firstProbe.Add(9*time.Second), openAIStickyEscapeConfig{})
-	require.Equal(t, openAIAccountHealthUnknown, assessment.level, "the batch clears degraded but only has nine positive TTFT samples")
-	require.InDelta(t, 0.1, assessment.errorRate, 1e-12)
+	require.Equal(t, openAIAccountHealthUnknown, assessment.level, "the error-reason batch clears degraded; the independent TTFT signal has no samples")
+	require.Zero(t, assessment.errorRate)
 	require.False(t, assessment.hasTTFT)
 	stat.mu.Lock()
 	require.Zero(t, stat.backoffIndex)
 	require.Zero(t, stat.nextProbeAt.Load())
 	require.Empty(t, stat.probeBatchSamples)
 	require.Len(t, stat.smartErrorWindow, openAIAccountSmartWindowSize)
-	require.Len(t, stat.smartTTFTWindow, openAIAccountSmartWindowSize-1)
+	require.Empty(t, stat.smartTTFTWindow)
 	stat.mu.Unlock()
 
 	// With all ten positive TTFT values, exactly 10 seconds is healthy; an old degraded history is replaced.
@@ -4676,6 +4704,60 @@ func TestOpenAIAdvancedSchedulerSettingsCache_StaleFlightCannotOverrideSave(t *t
 	repo.mu.Unlock()
 }
 
+func TestSmartSchedulingStall_CacheGeneration(t *testing.T) {
+	t.Run("missing setting defaults to thirty", func(t *testing.T) {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+		repo := &schedulerCacheTestSettingsRepo{
+			values: schedulerCacheTestSettingsValues(true, false, "2", "1", "1"),
+		}
+		gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: NewSettingService(repo, &config.Config{})}}
+		settings := gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background())
+		require.True(t, settings.smartEnabled)
+		require.Equal(t, 30, settings.firstOutputTimeoutSeconds)
+	})
+
+	t.Run("late old read cannot mix smart switch and timeout generations", func(t *testing.T) {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+		releaseBatch := make(chan struct{})
+		var releaseOnce sync.Once
+		defer releaseOnce.Do(func() { close(releaseBatch) })
+		values := schedulerCacheTestSettingsValues(false, false, "2", "1", "1")
+		values[SettingKeyOpenAIFirstOutputTimeoutSeconds] = "30"
+		repo := &schedulerCacheTestSettingsRepo{
+			values:         values,
+			blockBatchCall: 1,
+			batchStarted:   make(chan struct{}),
+			releaseBatch:   releaseBatch,
+		}
+		settingService := NewSettingService(repo, &config.Config{})
+		gateway := &OpenAIGatewayService{rateLimitService: &RateLimitService{settingService: settingService}}
+		readResult := make(chan openAIAdvancedSchedulerRuntimeSettings, 1)
+		go func() { readResult <- gateway.openAIAdvancedSchedulerRuntimeSettings(context.Background()) }()
+		<-repo.batchStarted
+
+		updated := schedulerCacheTestSystemSettings(true, false, false, "2", "1", "1")
+		updated.OpenAIFirstOutputTimeoutSeconds = 0
+		require.NoError(t, settingService.UpdateSettings(context.Background(), updated))
+		releaseOnce.Do(func() { close(releaseBatch) })
+
+		settings := <-readResult
+		require.True(t, settings.smartEnabled)
+		require.Zero(t, settings.firstOutputTimeoutSeconds)
+		cached, ok := openAIAdvancedSchedulerSettingCache.Load().(*cachedOpenAIAdvancedSchedulerSetting)
+		require.True(t, ok)
+		require.Equal(t, openAIAdvancedSchedulerSettingGeneration.Load(), cached.generation)
+		require.True(t, cached.smartEnabled)
+		require.Zero(t, cached.firstOutputTimeoutSeconds)
+		repo.mu.Lock()
+		require.Equal(t, 1, repo.getMultipleCalls, "the late pre-write read is discarded in favor of the published snapshot")
+		repo.mu.Unlock()
+	})
+}
+
 func TestOpenAIAdvancedSchedulerSettingsCache_StaleWaiterCannotUseOldResult(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
@@ -4925,7 +5007,105 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthEscapesDegra
 	}
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthSingleHalfOpenProbe(t *testing.T) {
+func TestSmartSchedulingStall_Sticky(t *testing.T) {
+	t.Run("degraded_sticky_yields_to_primary_without_refresh", func(t *testing.T) {
+		groupID := int64(54101)
+		const stickyID int64 = 5411
+		cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"smart-stall-sticky": stickyID}}
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(stickyID, groupID, 0),
+			newSmartSchedulerTestAccount(5412, groupID, 10),
+		}, schedulerTestConcurrencyCache{})
+		svc.cache = cache
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		now := time.Now()
+		seedSmartDegradedAccount(t, scheduler.stats, stickyID, "error_rate", now)
+		openAIAccountRuntimeStatForTest(t, scheduler.stats, stickyID).nextProbeAt.Store(now.Add(time.Hour).UnixNano())
+
+		selection, _, err := svc.SelectAccountWithScheduler(context.Background(), &groupID, "", "smart-stall-sticky", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.Equal(t, int64(5412), selection.Account.ID)
+		require.Equal(t, stickyID, cache.sessionBindings["smart-stall-sticky"], "escape does not rewrite the existing sticky binding")
+		require.Zero(t, cache.refreshedSessions["smart-stall-sticky"], "the degraded sticky lease must not be renewed")
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	})
+
+	t.Run("all_degraded_uses_priority_first_without_creating_sticky", func(t *testing.T) {
+		groupID := int64(54102)
+		const stickyID int64 = 5422
+		cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"smart-stall-all-degraded": stickyID}}
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(5421, groupID, 10),
+			newSmartSchedulerTestAccount(stickyID, groupID, 90),
+		}, schedulerTestConcurrencyCache{})
+		svc.cache = cache
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		now := time.Now()
+		for _, accountID := range []int64{5421, stickyID} {
+			seedSmartDegradedAccount(t, scheduler.stats, accountID, "error_rate", now)
+			openAIAccountRuntimeStatForTest(t, scheduler.stats, accountID).nextProbeAt.Store(now.Add(time.Hour).UnixNano())
+		}
+
+		selection, _, err := svc.SelectAccountWithScheduler(context.Background(), &groupID, "", "smart-stall-all-degraded", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+		require.NoError(t, err)
+		require.Equal(t, int64(5421), selection.Account.ID, "the non-probe fail-open pool remains priority-first")
+		require.Equal(t, stickyID, cache.sessionBindings["smart-stall-all-degraded"], "fail-open does not rewrite a degraded sticky binding")
+		require.Zero(t, cache.refreshedSessions["smart-stall-all-degraded"])
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	})
+}
+
+func TestSmartSchedulingStall_Attribution(t *testing.T) {
+	schedulerService := &OpenAIGatewayService{
+		rateLimitService:   newOpenAISchedulerModeRateLimitService(true, false),
+		openaiAccountStats: newOpenAIAccountRuntimeStats(),
+	}
+	scheduler, ok := schedulerService.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	timeoutErr := &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout, SafeToFailoverAfterWrite: true}
+	account := &Account{ID: 7801, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	schedulerService.ReportOpenAIAccountScheduleResult(account, "model", false, nil, timeoutErr)
+	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, account.ID)
+	stat.mu.Lock()
+	require.Len(t, stat.smartErrorWindow, 1, "an attributable first-output timeout adds one failed attempt")
+	require.Equal(t, 1.0, stat.smartErrorWindow[0].value)
+	stat.mu.Unlock()
+
+	schedulerService.ObserveOpenAIAccountHealthFailure(context.Background(), account, timeoutErr)
+	stat.mu.Lock()
+	require.Len(t, stat.smartErrorWindow, 1, "the same failover error cannot be counted a second time")
+	stat.mu.Unlock()
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	schedulerService.ObserveOpenAIAccountHealthFailure(cancelCtx, account, errors.New("upstream ended after client cancellation"))
+	stat.mu.Lock()
+	require.Len(t, stat.smartErrorWindow, 1, "client cancellation takes precedence over an account failure")
+	stat.mu.Unlock()
+
+	canceledAccount := &Account{ID: 7802, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	schedulerService.ReportOpenAIAccountScheduleResult(canceledAccount, "model", false, nil, context.Canceled)
+	canceledStat := openAIAccountRuntimeStatForTest(t, scheduler.stats, canceledAccount.ID)
+	canceledStat.mu.Lock()
+	require.Empty(t, canceledStat.smartErrorWindow, "a canceled first-output attempt does not enter the sample window")
+	canceledStat.mu.Unlock()
+
+	postOutputAccount := &Account{ID: 7803, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	schedulerService.ObserveOpenAIAccountHealthFailure(context.Background(), postOutputAccount, errors.New("attributable stream failure"))
+	postOutputStat := openAIAccountRuntimeStatForTest(t, scheduler.stats, postOutputAccount.ID)
+	postOutputStat.mu.Lock()
+	require.Len(t, postOutputStat.smartErrorWindow, 1, "an attributable failure after semantic output is counted once")
+	postOutputStat.mu.Unlock()
+}
+
+func TestSmartSchedulingStall_RecoveryLease(t *testing.T) {
 	groupID := int64(40101)
 	accounts := []Account{
 		newSmartSchedulerTestAccount(5501, groupID, 0),
@@ -4981,7 +5161,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthSingleHalfOp
 			stat.mu.Unlock()
 			continue
 		}
-		require.Equal(t, openAIAccountHealthHealthy, assessment.level, "the qualifying tenth identity-matched probe result completes recovery")
+		require.Equal(t, openAIAccountHealthHealthy, assessment.level, "the tenth identity-matched result clears degraded and its positive TTFT samples are healthy")
 		stat.mu.Lock()
 		require.Empty(t, stat.probeBatchSamples)
 		require.Zero(t, stat.probeID)
