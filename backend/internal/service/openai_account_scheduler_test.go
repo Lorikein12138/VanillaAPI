@@ -6915,3 +6915,527 @@ func TestOpenAIAccountProbeTraceCorrelationFallbackAndSchedulerModes(t *testing.
 		require.Empty(t, openAIProbeTraceLogRecords(logHandler.snapshot()))
 	})
 }
+
+type schedulerProbeAfterFuncEntry struct {
+	callback func()
+	finished chan struct{}
+}
+
+type schedulerProbeAfterFuncContext struct {
+	context.Context
+	done            chan struct{}
+	callbackGate    <-chan struct{}
+	callbackStarted chan struct{}
+	mu              sync.Mutex
+	canceled        bool
+	callbacks       []schedulerProbeAfterFuncEntry
+}
+
+func newSchedulerProbeAfterFuncContext(gate <-chan struct{}) *schedulerProbeAfterFuncContext {
+	return &schedulerProbeAfterFuncContext{
+		Context:         context.Background(),
+		done:            make(chan struct{}),
+		callbackGate:    gate,
+		callbackStarted: make(chan struct{}, 1),
+	}
+}
+
+func (c *schedulerProbeAfterFuncContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *schedulerProbeAfterFuncContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c *schedulerProbeAfterFuncContext) AfterFunc(callback func()) func() bool {
+	entry := schedulerProbeAfterFuncEntry{callback: callback, finished: make(chan struct{})}
+	c.mu.Lock()
+	c.callbacks = append(c.callbacks, entry)
+	canceled := c.canceled
+	c.mu.Unlock()
+	if canceled {
+		c.startCallback(entry)
+	}
+	return func() bool { return false }
+}
+
+func (c *schedulerProbeAfterFuncContext) startCallback(entry schedulerProbeAfterFuncEntry) {
+	go func() {
+		select {
+		case c.callbackStarted <- struct{}{}:
+		default:
+		}
+		if c.callbackGate != nil {
+			<-c.callbackGate
+		}
+		entry.callback()
+		close(entry.finished)
+	}()
+}
+
+func (c *schedulerProbeAfterFuncContext) cancel() {
+	c.mu.Lock()
+	if c.canceled {
+		c.mu.Unlock()
+		return
+	}
+	c.canceled = true
+	close(c.done)
+	callbacks := append([]schedulerProbeAfterFuncEntry(nil), c.callbacks...)
+	c.mu.Unlock()
+	for _, entry := range callbacks {
+		c.startCallback(entry)
+	}
+}
+
+func (c *schedulerProbeAfterFuncContext) waitCallbacks(t *testing.T) {
+	t.Helper()
+	c.mu.Lock()
+	callbacks := append([]schedulerProbeAfterFuncEntry(nil), c.callbacks...)
+	c.mu.Unlock()
+	for _, entry := range callbacks {
+		select {
+		case <-entry.finished:
+		case <-time.After(time.Second):
+			t.Fatal("request-context cleanup callback did not finish")
+		}
+	}
+}
+
+func selectSmartAccountForTestWithContext(t *testing.T, svc *OpenAIGatewayService, ctx context.Context, groupID int64) *AccountSelectionResult {
+	t.Helper()
+	selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	return selection
+}
+
+func selectSmartProbeDirectForTest(t *testing.T, svc *OpenAIGatewayService, ctx context.Context, account Account, groupID int64) *AccountSelectionResult {
+	t.Helper()
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	budget := newOpenAISelectionProbeBudget()
+	budget.enableLimit()
+	selection, _, err := scheduler.tryAcquireOpenAISelectionOrderWithBudget(
+		ctx,
+		OpenAIAccountScheduleRequest{
+			GroupID:            &groupID,
+			Platform:           PlatformOpenAI,
+			SmartHealthEnabled: true,
+			RequestedModel:     "gpt-5.1",
+			RequiredTransport:  OpenAIUpstreamTransportAny,
+		},
+		[]openAIAccountCandidateScore{{account: &account, healthProbe: true}},
+		budget,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
+	return selection
+}
+
+func openAIProbeLeaseStateForTest(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64) (uint64, int, int, int) {
+	t.Helper()
+	stat, release, ok := stats.acquire(accountID, false, false)
+	require.True(t, ok)
+	defer release()
+	stat.mu.Lock()
+	defer stat.mu.Unlock()
+	return stat.probeID, len(stat.probeBatchSamples), int(stat.sampleCount.Load()), stat.backoffIndex
+}
+
+func TestOpenAIAccountProbeReleaseBeforeSuccessReport(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	const groupID, degradedID, primaryID int64 = 82101, 82111, 82112
+	var acquiredIDs, releasedIDs []int64
+	svc := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(degradedID, groupID, 10),
+		newSmartSchedulerTestAccount(primaryID, groupID, 20),
+	}, schedulerTestConcurrencyCache{acquiredIDs: &acquiredIDs, releasedIDs: &releasedIDs})
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	selection := selectSmartAccountForTestWithContext(t, svc, ctx, groupID)
+	require.Equal(t, degradedID, selection.Account.ID)
+	probeID := selection.Account.smartHealthProbeID
+	require.NotZero(t, probeID)
+
+	selection.ReleaseFunc()
+	selection.ReleaseFunc()
+	require.Equal(t, []int64{degradedID}, releasedIDs, "physical slot must be released once")
+	activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+	require.Equal(t, probeID, activeID, "releasing the physical slot must preserve the pending probe")
+	require.Zero(t, batchCount)
+	traceRecords := openAIProbeTraceLogRecords(logHandler.snapshot())
+	require.Len(t, traceRecords, 1)
+	require.Equal(t, "start", traceRecords[0].attrs["phase"])
+
+	ttft := 250
+	svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, &ttft)
+	activeID, batchCount, _, _ = openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+	require.Zero(t, activeID)
+	require.Equal(t, 1, batchCount)
+	traceRecords = openAIProbeTraceLogRecords(logHandler.snapshot())
+	require.Len(t, traceRecords, 2)
+	require.Equal(t, "finish", traceRecords[1].attrs["phase"])
+	require.Equal(t, "qualified", traceRecords[1].attrs["outcome"])
+}
+
+func TestOpenAIAccountProbeReleaseBeforeBatchRecovery(t *testing.T) {
+	const groupID, degradedID, primaryID int64 = 82201, 82211, 82212
+	svc := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(degradedID, groupID, 10),
+		newSmartSchedulerTestAccount(primaryID, groupID, 20),
+	}, schedulerTestConcurrencyCache{})
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+
+	for ordinal := 1; ordinal <= openAIAccountSmartProbeBatchLimit; ordinal++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		selection := selectSmartAccountForTestWithContext(t, svc, ctx, groupID)
+		require.Equal(t, degradedID, selection.Account.ID)
+		require.NotZero(t, selection.Account.smartHealthProbeID)
+		selection.ReleaseFunc()
+		activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Equal(t, selection.Account.smartHealthProbeID, activeID)
+		require.Equal(t, ordinal-1, batchCount)
+
+		ttft := 1000
+		svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, &ttft)
+		activeID, batchCount, _, _ = openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Zero(t, activeID)
+		if ordinal < openAIAccountSmartProbeBatchLimit {
+			require.Equal(t, ordinal, batchCount)
+			require.Equal(t, openAIAccountHealthDegraded, scheduler.stats.health(degradedID, time.Now(), svc.openAIStickyEscapeConfig()).level)
+		}
+		if ordinal == openAIAccountSmartProbeBatchLimit {
+			require.Zero(t, batchCount, "the completed batch is reset on recovery")
+			require.NotEqual(t, openAIAccountHealthDegraded, scheduler.stats.health(degradedID, time.Now(), svc.openAIStickyEscapeConfig()).level)
+		}
+		cancel()
+	}
+}
+
+func TestOpenAIAccountProbeAbortAndAttribution(t *testing.T) {
+	t.Run("non_cancellable_context_release_cleans_lease", func(t *testing.T) {
+		logHandler := captureOpenAIProbeTraceLogs(t)
+		const groupID, degradedID, primaryID int64 = 82301, 82311, 82312
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(degradedID, groupID, 10),
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		selection := selectSmartAccountForTest(t, svc, groupID, "")
+		_, beforeBatchCount, _, beforeBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		selection.ReleaseFunc()
+		activeID, batchCount, _, afterBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Zero(t, activeID)
+		require.Equal(t, beforeBatchCount, batchCount)
+		require.Equal(t, beforeBackoff, afterBackoff)
+		traceRecords := openAIProbeTraceLogRecords(logHandler.snapshot())
+		require.Len(t, traceRecords, 2)
+		require.Equal(t, "cancel", traceRecords[1].attrs["phase"])
+	})
+
+	t.Run("reported_client_cancellation", func(t *testing.T) {
+		const groupID, degradedID, primaryID int64 = 82321, 82331, 82332
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(degradedID, groupID, 10),
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		selection := selectSmartAccountForTestWithContext(t, svc, ctx, groupID)
+		_, beforeBatchCount, _, beforeBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", false, nil, context.Canceled)
+		activeID, batchCount, _, afterBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Zero(t, activeID)
+		require.Equal(t, beforeBatchCount, batchCount)
+		require.Equal(t, beforeBackoff, afterBackoff)
+		selection.ReleaseFunc()
+	})
+
+	t.Run("non_account_error", func(t *testing.T) {
+		const groupID, degradedID, primaryID int64 = 82401, 82411, 82412
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(degradedID, groupID, 10),
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		selection := selectSmartAccountForTest(t, svc, groupID, "")
+		_, beforeBatchCount, _, beforeBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		requestErr := &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeRequest}
+		svc.ObserveOpenAIAccountHealthFailure(context.Background(), selection.Account, requestErr)
+		activeID, batchCount, _, afterBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Zero(t, activeID)
+		require.Equal(t, beforeBatchCount, batchCount)
+		require.Equal(t, beforeBackoff, afterBackoff)
+		selection.ReleaseFunc()
+	})
+
+	t.Run("request_context_ends_without_terminal", func(t *testing.T) {
+		const groupID, degradedID, primaryID int64 = 82501, 82511, 82512
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(degradedID, groupID, 10),
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		ctx, cancel := context.WithCancel(context.Background())
+		selection := selectSmartAccountForTestWithContext(t, svc, ctx, groupID)
+		_, beforeBatchCount, _, beforeBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		cancel()
+		require.Eventually(t, func() bool {
+			activeID, _, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+			return activeID == 0
+		}, time.Second, time.Millisecond)
+		activeID, batchCount, _, afterBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Zero(t, activeID)
+		require.Equal(t, beforeBatchCount, batchCount)
+		require.Equal(t, beforeBackoff, afterBackoff)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	})
+
+	t.Run("profit_terminal_veto_cancels_immediately", func(t *testing.T) {
+		const groupID, degradedID, primaryID int64 = 82601, 82611, 82612
+		degraded := newSmartSchedulerTestAccount(degradedID, groupID, 10)
+		degraded.RateMultiplier = float64PtrForTest(1)
+		svc := newSmartSchedulerTestService([]Account{
+			degraded,
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		selection := selectSmartAccountForTest(t, svc, groupID, "")
+		_, beforeBatchCount, _, beforeBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		gateCtx := context.WithValue(context.Background(), openAIProfitControlGateCtxKey{}, &openAIProfitControlGate{threshold: 0.1, pricingAt: time.Now()})
+		_, vetoed, _ := svc.ProfitControlVetoLatest(gateCtx, selection.Account)
+		require.True(t, vetoed)
+		activeID, batchCount, _, afterBackoff := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Zero(t, activeID)
+		require.Equal(t, beforeBatchCount, batchCount)
+		require.Equal(t, beforeBackoff, afterBackoff)
+		selection.ReleaseFunc()
+	})
+}
+
+func TestOpenAIAccountProbeLongRequestAndStaleResult(t *testing.T) {
+	t.Run("request_over_thirty_seconds_stays_single_probe", func(t *testing.T) {
+		const groupID, degradedID, primaryID int64 = 82701, 82711, 82712
+		svc := newSmartSchedulerTestService([]Account{
+			newSmartSchedulerTestAccount(degradedID, groupID, 10),
+			newSmartSchedulerTestAccount(primaryID, groupID, 20),
+		}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		ctx, cancel := context.WithCancel(context.Background())
+		first := selectSmartAccountForTestWithContext(t, svc, ctx, groupID)
+		firstProbeID := first.Account.smartHealthProbeID
+		require.NotZero(t, firstProbeID)
+		first.ReleaseFunc()
+		stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, degradedID)
+		stat.mu.Lock()
+		stat.probeStartedAt = time.Now().Add(-31 * time.Second)
+		stat.mu.Unlock()
+
+		second := selectSmartAccountForTest(t, svc, groupID, "")
+		require.NotEqual(t, firstProbeID, second.Account.smartHealthProbeID)
+		activeID, _, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Equal(t, firstProbeID, activeID)
+		if second.ReleaseFunc != nil {
+			second.ReleaseFunc()
+		}
+		cancel()
+		require.Eventually(t, func() bool {
+			activeID, _, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+			return activeID == 0
+		}, time.Second, time.Millisecond)
+	})
+
+	t.Run("report_and_cancel_have_one_terminal", func(t *testing.T) {
+		for _, scenario := range []struct {
+			name             string
+			wantBatchCount   int
+			assertBatchCount bool
+		}{
+			{name: "report_first", wantBatchCount: 1, assertBatchCount: true},
+			{name: "cancel_first", wantBatchCount: 0, assertBatchCount: true},
+			{name: "unplanned_race"},
+		} {
+			t.Run(scenario.name, func(t *testing.T) {
+				const groupID, degradedID int64 = 82801, 82811
+				account := newSmartSchedulerTestAccount(degradedID, groupID, 10)
+				svc := newSmartSchedulerTestService([]Account{account}, schedulerTestConcurrencyCache{})
+				scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+				require.True(t, ok)
+				seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+				ctx := newSchedulerProbeAfterFuncContext(nil)
+				selection := selectSmartProbeDirectForTest(t, svc, ctx, account, groupID)
+				probeID := selection.Account.smartHealthProbeID
+				require.NotZero(t, probeID)
+				selection.ReleaseFunc()
+				waitForCleanup := func() {
+					t.Helper()
+					select {
+					case <-ctx.callbackStarted:
+					case <-time.After(time.Second):
+						t.Fatal("request cleanup callback did not start")
+					}
+					ctx.waitCallbacks(t)
+				}
+				ttft := 1000
+				reportDone := make(chan struct{})
+				report := func() {
+					svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, &ttft)
+					close(reportDone)
+				}
+				waitForReport := func() {
+					t.Helper()
+					select {
+					case <-reportDone:
+					case <-time.After(time.Second):
+						t.Fatal("probe result report did not finish")
+					}
+				}
+				switch scenario.name {
+				case "report_first":
+					go report()
+					waitForReport()
+					ctx.cancel()
+					waitForCleanup()
+				case "cancel_first":
+					ctx.cancel()
+					waitForCleanup()
+					activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+					require.Zero(t, activeID, "probe lease must be cleared before the late report")
+					require.Zero(t, batchCount, "cancellation must not add a batch sample")
+					go report()
+					waitForReport()
+				default:
+					start := make(chan struct{})
+					cancelDone := make(chan struct{})
+					go func() {
+						<-start
+						report()
+					}()
+					go func() {
+						<-start
+						ctx.cancel()
+						close(cancelDone)
+					}()
+					close(start)
+					waitForReport()
+					select {
+					case <-cancelDone:
+					case <-time.After(time.Second):
+						t.Fatal("request cancellation did not finish")
+					}
+					waitForCleanup()
+				}
+
+				activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+				require.Zero(t, activeID)
+				stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, degradedID)
+				stat.mu.Lock()
+				traceStarted := stat.probeTraceStarted
+				stat.mu.Unlock()
+				require.False(t, traceStarted)
+				if scenario.assertBatchCount {
+					require.Equal(t, scenario.wantBatchCount, batchCount)
+				} else {
+					require.GreaterOrEqual(t, batchCount, 0)
+					require.LessOrEqual(t, batchCount, 1)
+				}
+			})
+		}
+	})
+
+	t.Run("old_cancellation_callback_cannot_clear_new_identity", func(t *testing.T) {
+		const groupID, degradedID int64 = 82901, 82911
+		account := newSmartSchedulerTestAccount(degradedID, groupID, 10)
+		svc := newSmartSchedulerTestService([]Account{account}, schedulerTestConcurrencyCache{})
+		scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+		require.True(t, ok)
+		seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+		gate := make(chan struct{})
+		oldCtx := newSchedulerProbeAfterFuncContext(gate)
+		first := selectSmartProbeDirectForTest(t, svc, oldCtx, account, groupID)
+		firstProbeID := first.Account.smartHealthProbeID
+		first.ReleaseFunc()
+		ttft := 1000
+		svc.ReportOpenAIAccountScheduleResult(first.Account, "gpt-5.1", true, &ttft)
+		second := selectSmartProbeDirectForTest(t, svc, context.Background(), account, groupID)
+		secondProbeID := second.Account.smartHealthProbeID
+		require.NotZero(t, secondProbeID)
+		require.NotEqual(t, firstProbeID, secondProbeID)
+
+		oldCtx.cancel()
+		select {
+		case <-oldCtx.callbackStarted:
+		case <-time.After(time.Second):
+			t.Fatal("old request cleanup callback did not start")
+		}
+		close(gate)
+		oldCtx.waitCallbacks(t)
+		activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Equal(t, secondProbeID, activeID)
+		require.Equal(t, 1, batchCount)
+		svc.ReportOpenAIAccountScheduleResult(first.Account, "gpt-5.1", true, &ttft)
+		activeID, batchCount, _, _ = openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
+		require.Equal(t, secondProbeID, activeID)
+		require.Equal(t, 1, batchCount)
+		second.ReleaseFunc()
+	})
+}
+
+func TestOpenAIAccountProbeTraceRedactionAfterRelease(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	const groupID, degradedID, primaryID int64 = 83001, 83011, 83012
+	svc := newSmartSchedulerTestService([]Account{
+		newSmartSchedulerTestAccount(degradedID, groupID, 10),
+		newSmartSchedulerTestAccount(primaryID, groupID, 20),
+	}, schedulerTestConcurrencyCache{})
+	scheduler, ok := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+	require.True(t, ok)
+	seedSmartDegradedAccount(t, scheduler.stats, degradedID, "error_rate", time.Now().Add(-2*time.Minute))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	selection := selectSmartAccountForTestWithContext(t, svc, ctx, groupID)
+	require.Equal(t, degradedID, selection.Account.ID)
+	require.NotZero(t, selection.Account.smartHealthProbeID)
+	selection.ReleaseFunc()
+	ttft := 750
+	svc.ReportOpenAIAccountScheduleResult(selection.Account, "gpt-5.1", true, &ttft)
+
+	traceRecords := openAIProbeTraceLogRecords(logHandler.snapshot())
+	require.Len(t, traceRecords, 2)
+	require.Equal(t, "start", traceRecords[0].attrs["phase"])
+	require.Equal(t, "finish", traceRecords[1].attrs["phase"])
+	require.Equal(t, "qualified", traceRecords[1].attrs["outcome"])
+	for _, record := range traceRecords {
+		requireOpenAIProbeTraceFieldWhitelist(t, record)
+	}
+}
