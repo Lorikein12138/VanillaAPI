@@ -173,6 +173,19 @@ func TestListPlazaGroups_AutomaticAccountUnionFiltersExistingChannelCandidates(t
 	}
 }
 
+func TestListPlazaGroups_MappedKeyDisplayAndPricing(t *testing.T) {
+	channels := []Channel{{ID: 1, Status: StatusActive, GroupIDs: []int64{10}, ModelPricing: []ChannelModelPricing{{Platform: PlatformAnthropic, Models: []string{"client-name"}, InputPrice: testPtrFloat64(3e-6)}}, ModelMapping: map[string]map[string]string{PlatformAnthropic: {"client-name": "upstream-name"}}}}
+	groups := []Group{{ID: 10, Platform: PlatformAnthropic, RateMultiplier: 1, ModelAllowlist: GroupModelAllowlist{Enabled: true}}}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {{Credentials: map[string]any{"model_mapping": map[string]any{"client-name": "upstream-name"}}}}}}
+	svc := NewModelPlazaService(&mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return channels, nil }}, &stubGroupRepoForAvailable{activeGroups: groups}, members, nil, nil, nil)
+	out, err := svc.ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].Models, 1)
+	require.Equal(t, "client-name", out[0].Models[0].Name)
+	require.NotNil(t, out[0].Models[0].Pricing)
+}
+
 func TestListPlazaGroups_AutomaticAccountReadFailureFailsClosed(t *testing.T) {
 	sentinel := errors.New("member read failed")
 	groups := []Group{{ID: 10, Platform: PlatformAnthropic, ModelAllowlist: GroupModelAllowlist{Enabled: true}}}

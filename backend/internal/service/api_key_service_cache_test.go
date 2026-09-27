@@ -583,6 +583,21 @@ func TestAPIKeyService_InvalidateAuthCacheByKey(t *testing.T) {
 	require.Len(t, cache.deleteAuthKeys, 1)
 }
 
+func TestAPIKeyService_MappedKeyUnionInvalidatesAndReloads(t *testing.T) {
+	cache := &authCacheStub{}
+	var current = "client-old"
+	repo := &authRepoStub{getByKeyForAuth: func(context.Context, string) (*APIKey, error) {
+		return &APIKey{ID: 1, Status: StatusActive, User: &User{ID: 1, Status: StatusActive, Role: RoleUser, Balance: 10, Concurrency: 1}, Group: &Group{ID: 1, Status: StatusActive, Platform: PlatformOpenAI, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{current}}}}, nil
+	}}
+	svc := NewAPIKeyService(repo, nil, nil, nil, nil, cache, &config.Config{APIKeyAuth: config.APIKeyAuthCacheConfig{L2TTLSeconds: 60}})
+	svc.InvalidateAuthCacheByKey(context.Background(), "mapped-key")
+	current = "client-new"
+	require.Len(t, cache.deleteAuthKeys, 1)
+	got, err := svc.GetByKey(context.Background(), "mapped-key")
+	require.NoError(t, err)
+	require.Equal(t, []string{"client-new"}, got.Group.ModelAllowlist.Models)
+}
+
 func TestAPIKeyService_GetByKey_CachesNegativeOnRepoMiss(t *testing.T) {
 	var repoCalls atomic.Int32
 	cache := &authCacheStub{}

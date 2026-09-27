@@ -26,7 +26,9 @@ func TestGroupEntityToServiceWithAccountsResolvesAutomaticAllowlist(t *testing.T
 
 	got := groupEntityToServiceWithAccounts(group, accounts)
 	require.True(t, got.ModelAllowlist.Enabled)
-	require.Equal(t, []string{"gpt-5.4", "gpt-5.5-*"}, got.ModelAllowlist.Models)
+	require.Equal(t, []string{"alias", "gpt-5.4", "gpt-5.5-*"}, got.ModelAllowlist.Models)
+	require.NotContains(t, got.ModelAllowlist.Models, "upstream")
+	require.NotContains(t, got.ModelAllowlist.Models, "legacy")
 	require.Equal(t, []string{"legacy"}, group.ModelAllowlist.Models, "projection must not mutate the Ent group")
 }
 

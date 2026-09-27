@@ -143,7 +143,7 @@ func TestAdminService_GetGroupReturnsReadOnlyAllowlistSummary(t *testing.T) {
 
 	got, err := svc.GetGroup(context.Background(), group.ID)
 	require.NoError(t, err)
-	require.Equal(t, []string{"claude-sonnet-4.5", "GPT-5.4", "gpt-5.5"}, got.ModelAllowlist.Models)
+	require.Equal(t, []string{"claude-sonnet-4.5", "GPT-5.4", "gpt-5.5", "renamed"}, got.ModelAllowlist.Models)
 	require.Equal(t, 2, got.ModelAllowlistSourceAccountCount)
 	require.Equal(t, 1, members.calls)
 }
