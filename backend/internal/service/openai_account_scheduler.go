@@ -1424,8 +1424,8 @@ func (s *openAIAccountRuntimeStats) tryAcquireProbeLeaseWithID(accountID int64, 
 			return false
 		}
 	}
-	// The 30 second lease deadline remains observable for compatibility, but an
-	// in-flight request owns the lease until its result or ReleaseFunc arrives.
+	// The 30 second lease deadline remains observable for compatibility, while
+	// an in-flight request owns the lease until its result or request context ends.
 	stat.probeLeaseUntil.Store(now.Add(openAIAccountHealthProbeLease).UnixNano())
 	stat.probeID = probeID
 	stat.probeStartedAt = now
@@ -2856,12 +2856,22 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 		if probe {
 			baseRelease := releaseFunc
 			var releaseOnce sync.Once
+			probeStats := s.stats
+			probeAccountID := fresh.ID
+			cancelOnRelease := ctx == nil || ctx.Done() == nil
+			if !cancelOnRelease {
+				context.AfterFunc(ctx, func() {
+					probeStats.cancelProbeLeaseForID(probeAccountID, probeID, time.Now())
+				})
+			}
 			releaseFunc = func() {
 				releaseOnce.Do(func() {
 					if baseRelease != nil {
 						baseRelease()
 					}
-					s.stats.cancelProbeLeaseForID(fresh.ID, probeID, time.Now())
+					if cancelOnRelease {
+						probeStats.cancelProbeLeaseForID(probeAccountID, probeID, time.Now())
+					}
 				})
 			}
 		}
