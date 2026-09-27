@@ -7201,10 +7201,10 @@
                 data-testid="smart-scheduling-toggle"
               />
             </div>
-            <div class="mt-5 max-w-sm">
+            <div class="mt-5">
               <label
                 for="smart-scheduling-first-output-timeout"
-                class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300"
+                class="input-label"
               >
                 {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutLabel') }}
               </label>
@@ -7216,9 +7216,9 @@
                 max="300"
                 step="1"
                 data-testid="smart-scheduling-first-output-timeout"
-                class="form-input w-full"
+                class="input"
               />
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              <p class="input-hint">
                 {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutHint') }}
               </p>
               <p class="mt-1 text-xs text-amber-700 dark:text-amber-300">
