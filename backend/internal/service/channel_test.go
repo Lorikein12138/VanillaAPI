@@ -734,9 +734,8 @@ func TestSupportedModels_PricingOnlyNoMapping(t *testing.T) {
 	require.Equal(t, int64(1), got[1].Pricing.ID)
 }
 
-func TestSupportedModels_ExactMappingUsesTargetPricing(t *testing.T) {
-	// 精确 mapping `src → target`：定价应按 target 查（实际计费的是 target），
-	// 而不是按 src 自查。
+func TestSupportedModels_ExactMappingUsesClientKeyPricing(t *testing.T) {
+	// 精确 mapping `src → target`：展示与定价均按客户端 key，target 只用于转发。
 	ch := &Channel{
 		ModelPricing: []ChannelModelPricing{
 			{ID: 100, Platform: "anthropic", Models: []string{"req-model"}, InputPrice: testPtrFloat64(3e-6)},
@@ -749,12 +748,10 @@ func TestSupportedModels_ExactMappingUsesTargetPricing(t *testing.T) {
 		},
 	}
 	got := ch.SupportedModels()
-	require.Len(t, got, 2)
+	require.Len(t, got, 1)
 	require.Equal(t, "req-model", got[0].Name)
 	require.NotNil(t, got[0].Pricing)
-	require.Equal(t, int64(200), got[0].Pricing.ID, "req-model 显示但定价是 served-model 的（mapping target）")
-	require.Equal(t, "served-model", got[1].Name)
-	require.Equal(t, int64(200), got[1].Pricing.ID)
+	require.Equal(t, int64(100), got[0].Pricing.ID)
 }
 
 func TestSupportedModels_ExactMappingTargetMissingFromPricing(t *testing.T) {
@@ -776,4 +773,15 @@ func TestSupportedModels_ExactMappingTargetMissingFromPricing(t *testing.T) {
 	require.Nil(t, got[0].Pricing, "target 在渠道定价中缺失时不虚假填充，留给 ListAvailable 走 LiteLLM 回落")
 	require.Equal(t, "some-priced-model", got[1].Name)
 	require.NotNil(t, got[1].Pricing)
+}
+
+func TestSupportedModels_MappedValueIsNotStandaloneCandidate(t *testing.T) {
+	ch := &Channel{
+		ModelPricing: []ChannelModelPricing{{ID: 1, Platform: "openai", Models: []string{"client-name", "upstream-name"}}},
+		ModelMapping: map[string]map[string]string{"openai": {"client-name": "upstream-name"}},
+	}
+	got := ch.SupportedModels()
+	require.Len(t, got, 1)
+	require.Equal(t, "client-name", got[0].Name)
+	require.Equal(t, int64(1), got[0].Pricing.ID)
 }

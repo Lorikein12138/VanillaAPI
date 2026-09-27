@@ -460,65 +460,78 @@ func TestGatewayServiceRecordUsage_UsesExplicitPricingAtForPeakRate(t *testing.T
 	}
 }
 
-func TestGatewayServiceRecordUsage_DeepSeekAccountStatsUsesRequestPricingAtAndUpstreamModel(t *testing.T) {
-	for _, model := range []struct {
-		name        string
-		offPeakCost float64
-	}{
-		{"deepseek-v4-flash", 1000*1.5e-7 + 500*6e-7 + 1000*3e-9},
-		{"deepseek-v4-pro", 1000*6.6e-7 + 500*1.98e-6 + 1000*2.2e-8},
-	} {
+func TestGatewayServiceRecordUsage_DeepSeekAccountStatsUsesClientKeyPricingAtAndUpstreamModel(t *testing.T) {
+	alias := "customer-chat"
+	for _, model := range []string{"deepseek-v4-flash", "deepseek-v4-pro"} {
 		for _, slot := range []struct {
-			name       string
-			pricingAt  time.Time
-			multiplier float64
+			name      string
+			pricingAt time.Time
 		}{
-			{"peak", time.Date(2026, time.August, 24, 2, 0, 0, 0, time.UTC), 2},
-			{"off_peak", time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC), 1},
+			{"peak", time.Date(2026, time.August, 24, 2, 0, 0, 0, time.UTC)},
+			{"off_peak", time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)},
 		} {
-			t.Run(model.name+"/"+slot.name, func(t *testing.T) {
-				usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
-				userRepo := &openAIRecordUsageUserRepoStub{}
-				svc := newGatewayRecordUsageServiceForTest(usageRepo, userRepo, &openAIRecordUsageSubRepoStub{})
-				groupID := int64(905)
-				svc.channelService = newTestChannelServiceForStats(t, &Channel{ID: 1, Status: StatusActive}, groupID, PlatformDeepseek)
-				svc.resolver = NewModelPricingResolver(svc.channelService, svc.billingService)
-				alias := "customer-chat"
-				inputPrice, outputPrice, cachePrice := 1e-6, 2e-6, 1e-7
-				group := &Group{ID: groupID, Platform: PlatformDeepseek, RateMultiplier: 0.8,
-					ModelPricing: []ChannelModelPricing{{
-						Models: []string{alias}, BillingMode: BillingModeToken,
-						InputPrice: &inputPrice, OutputPrice: &outputPrice, CacheReadPrice: &cachePrice,
-					}},
-				}
-				err := svc.RecordUsage(context.Background(), &RecordUsageInput{
-					Result: &ForwardResult{
-						RequestID: "gateway_deepseek_account_stats_" + model.name + "_" + slot.name,
-						Model:     alias, UpstreamModel: model.name,
-						Usage: ClaudeUsage{InputTokens: 1000, OutputTokens: 500, CacheReadInputTokens: 1000},
-					},
-					APIKey: &APIKey{ID: 805, GroupID: &groupID, Group: group},
-					User:   &User{ID: 605}, Account: &Account{ID: 705, Platform: PlatformDeepseek},
-					PricingAt:          slot.pricingAt,
-					ChannelUsageFields: ChannelUsageFields{OriginalModel: alias, BillingModelSource: BillingModelSourceRequested},
+			for _, pricingCase := range []struct {
+				name  string
+				model string
+			}{
+				{name: "key_only", model: alias},
+				{name: "value_only", model: model},
+			} {
+				t.Run(model+"/"+slot.name+"/"+pricingCase.name, func(t *testing.T) {
+					usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+					userRepo := &openAIRecordUsageUserRepoStub{}
+					svc := newGatewayRecordUsageServiceForTest(usageRepo, userRepo, &openAIRecordUsageSubRepoStub{})
+					groupID := int64(905)
+					channelInputPrice, channelOutputPrice, channelCachePrice := 3e-6, 5e-6, 4e-7
+					channel := &Channel{
+						ID: 1, Status: StatusActive,
+						ModelPricing: []ChannelModelPricing{{
+							Platform: PlatformDeepseek, Models: []string{pricingCase.model}, BillingMode: BillingModeToken,
+							InputPrice: &channelInputPrice, OutputPrice: &channelOutputPrice, CacheReadPrice: &channelCachePrice,
+						}},
+					}
+					svc.channelService = newTestChannelServiceForStats(t, channel, groupID, PlatformDeepseek)
+					svc.resolver = NewModelPricingResolver(svc.channelService, svc.billingService)
+					inputPrice, outputPrice, cachePrice := 1e-6, 2e-6, 1e-7
+					group := &Group{ID: groupID, Platform: PlatformDeepseek, RateMultiplier: 0.8,
+						ModelPricing: []ChannelModelPricing{{
+							Models: []string{alias}, BillingMode: BillingModeToken,
+							InputPrice: &inputPrice, OutputPrice: &outputPrice, CacheReadPrice: &cachePrice,
+						}},
+					}
+					err := svc.RecordUsage(context.Background(), &RecordUsageInput{
+						Result: &ForwardResult{
+							RequestID: "gateway_deepseek_account_stats_" + model + "_" + slot.name,
+							Model:     alias, UpstreamModel: model,
+							Usage: ClaudeUsage{InputTokens: 1000, OutputTokens: 500, CacheReadInputTokens: 1000},
+						},
+						APIKey: &APIKey{ID: 805, GroupID: &groupID, Group: group},
+						User:   &User{ID: 605}, Account: &Account{ID: 705, Platform: PlatformDeepseek},
+						PricingAt:          slot.pricingAt,
+						ChannelUsageFields: ChannelUsageFields{OriginalModel: alias, BillingModelSource: BillingModelSourceRequested},
+					})
+					require.NoError(t, err)
+					require.NotNil(t, usageRepo.lastLog)
+					log := usageRepo.lastLog
+					require.Equal(t, alias, log.RequestedModel)
+					require.NotNil(t, log.UpstreamModel)
+					require.Equal(t, model, *log.UpstreamModel)
+					require.WithinDuration(t, time.Now(), log.CreatedAt, time.Minute)
+					require.False(t, log.CreatedAt.Equal(slot.pricingAt), "request pricing time must differ from record creation")
+					customerTotal := 1000*inputPrice + 500*outputPrice + 1000*cachePrice
+					require.InDelta(t, customerTotal, log.TotalCost, 1e-12)
+					require.InDelta(t, customerTotal*0.8, log.ActualCost, 1e-12)
+					require.Equal(t, 1, userRepo.deductCalls)
+					require.InDelta(t, customerTotal*0.8, userRepo.lastAmount, 1e-12)
+					if pricingCase.name == "key_only" {
+						require.NotNil(t, log.AccountStatsCost)
+						expectedStatsCost := 1000*channelInputPrice + 500*channelOutputPrice + 1000*channelCachePrice
+						require.InDelta(t, expectedStatsCost, *log.AccountStatsCost, 1e-12)
+					} else {
+						require.Nil(t, log.AccountStatsCost, "value-only channel pricing must not price the client key")
+					}
 				})
-				require.NoError(t, err)
-				require.NotNil(t, usageRepo.lastLog)
-				log := usageRepo.lastLog
-				require.Equal(t, alias, log.RequestedModel)
-				require.NotNil(t, log.UpstreamModel)
-				require.Equal(t, model.name, *log.UpstreamModel)
-				require.WithinDuration(t, time.Now(), log.CreatedAt, time.Minute)
-				require.False(t, log.CreatedAt.Equal(slot.pricingAt), "request pricing time must differ from record creation")
-				customerTotal := 1000*inputPrice + 500*outputPrice + 1000*cachePrice
-				require.InDelta(t, customerTotal, log.TotalCost, 1e-12)
-				require.InDelta(t, customerTotal*0.8, log.ActualCost, 1e-12)
-				require.Equal(t, 1, userRepo.deductCalls)
-				require.InDelta(t, customerTotal*0.8, userRepo.lastAmount, 1e-12)
-				require.NotNil(t, log.AccountStatsCost)
-				require.InDelta(t, model.offPeakCost*slot.multiplier, *log.AccountStatsCost, 1e-12,
-					"account cost must use the upstream model and historical PricingAt")
-			})
+			}
 		}
 	}
 }

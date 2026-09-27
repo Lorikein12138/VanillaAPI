@@ -58,6 +58,11 @@ function mountTable(
 }
 
 describe('PlazaModelPricingTable', () => {
+	it('uses the client model key as the displayed model name', () => {
+		const wrapper = mountTable([tokenModel({ name: 'client-name' })], 1)
+		expect(wrapper.find('tbody tr').text()).toContain('client-name')
+		expect(wrapper.find('tbody tr').text()).not.toContain('upstream-name')
+	})
   it('倍率为 1 时展示渠道单价原值($/1M),价格保底 2 位小数', () => {
     const wrapper = mountTable([tokenModel()], 1)
     const text = wrapper.text()

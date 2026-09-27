@@ -107,13 +107,30 @@ func TestBuildAccountModelAllowlistUnion(t *testing.T) {
 		{ID: 6, Credentials: map[string]any{"model_mapping": json.RawMessage(`{"raw-model":"raw-model","alias":"target"}`)}},
 	}
 
-	want := []string{"claude-sonnet-4.5", "GPT-5.4", "gpt-5.5-*", "raw-model"}
+	want := []string{"alias", "claude-sonnet-4.5", "GPT-5.4", "gpt-5.5-*", "raw-model", "renamed"}
 	got := BuildAccountModelAllowlistUnion(accounts)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("BuildAccountModelAllowlistUnion() = %#v, want %#v", got, want)
 	}
 	if count := CountAccountModelAllowlistSources(accounts); count != 3 {
 		t.Fatalf("CountAccountModelAllowlistSources() = %d, want 3", count)
+	}
+}
+
+func TestBuildAccountModelAllowlistUnion_MappedKeysOnly(t *testing.T) {
+	accounts := []Account{{Credentials: map[string]any{"model_mapping": map[string]any{
+		"gemini-2.5-pro": "gcli-gemini-2.5-pro",
+		"identity":       "identity",
+		"":               "ignored",
+		"empty-value":    " ",
+		"bad-value":      42,
+	}}}}
+	got := BuildAccountModelAllowlistUnion(accounts)
+	if !reflect.DeepEqual(got, []string{"gemini-2.5-pro", "identity"}) {
+		t.Fatalf("mapped union = %#v", got)
+	}
+	if CountAccountModelAllowlistSources(accounts) != 1 {
+		t.Fatal("account with valid mapped key must count once")
 	}
 }
 
