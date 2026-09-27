@@ -111,7 +111,7 @@ func accountModelAllowlistIdentityKeys(raw any) []string {
 		}
 		key = strings.TrimSpace(key)
 		model = strings.TrimSpace(model)
-		if key == "" || model != key {
+		if key == "" || model == "" {
 			continue
 		}
 		keys = append(keys, key)

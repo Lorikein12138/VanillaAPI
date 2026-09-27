@@ -62,7 +62,7 @@ func TestGetByKeyForAuthComputesCurrentAccountModelAllowlistUnion(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, got.Group)
 	require.True(t, got.Group.ModelAllowlist.Enabled)
-	require.Equal(t, []string{"gpt-5.4", "gpt-5.5-*", "gpt-5.6"}, got.Group.ModelAllowlist.Models)
+	require.Equal(t, []string{"gpt-5.4", "gpt-5.5-*", "gpt-5.6", "renamed"}, got.Group.ModelAllowlist.Models)
 
 	require.NoError(t, accountRepo.UpdateCredentials(ctx, memberA.ID, map[string]any{
 		"model_mapping": map[string]any{"gpt-5.7": "gpt-5.7"},

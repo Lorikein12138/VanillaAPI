@@ -572,6 +572,7 @@ func (c *Channel) SupportedModels() []SupportedModel {
 		name     string
 	}
 	seen := make(map[dedupKey]struct{})
+	mappedValues := make(map[string]map[string]struct{})
 	result := make([]SupportedModel, 0)
 
 	// lookup 在 platform pricing index 中按精确名查定价，命中时返回定价大小写。
@@ -605,7 +606,14 @@ func (c *Channel) SupportedModels() []SupportedModel {
 			continue
 		}
 		pidx := idx[platform]
-		for src, target := range mapping {
+		values := make(map[string]struct{}, len(mapping))
+		for _, target := range mapping {
+			if strings.TrimSpace(target) != "" {
+				values[strings.ToLower(strings.TrimSpace(target))] = struct{}{}
+			}
+		}
+		mappedValues[platform] = values
+		for src := range mapping {
 			prefix, isWild := splitWildcardSuffix(src)
 			if isWild {
 				if pidx == nil {
@@ -620,17 +628,8 @@ func (c *Channel) SupportedModels() []SupportedModel {
 				}
 				continue
 			}
-			// 精确 mapping：定价按 target 查；target 缺失/通配则退化按 src 查
-			pricingKey := target
-			if pricingKey == "" {
-				pricingKey = src
-			}
-			if _, targetWild := splitWildcardSuffix(pricingKey); targetWild {
-				pricingKey = src
-			}
-			_, pricing := lookup(pidx, pricingKey)
-			// 显示名优先用 src 在定价里的原始大小写（若 src 本身是个定价模型名）
-			displayName, _ := lookup(pidx, src)
+			// 精确 mapping 的客户端 key 同时决定展示名和定价键；target 只用于转发。
+			displayName, pricing := lookup(pidx, src)
 			add(platform, displayName, pricing)
 		}
 	}
@@ -638,6 +637,11 @@ func (c *Channel) SupportedModels() []SupportedModel {
 	// Pass B：从 pricing 补齐 mapping 未覆盖的具体模型（修复"定价存在但没配映射 → 不显示"）
 	for platform, pidx := range idx {
 		for _, name := range pidx.names {
+			if values, ok := mappedValues[platform]; ok {
+				if _, isMappedValue := values[strings.ToLower(name)]; isMappedValue {
+					continue
+				}
+			}
 			display, pricing := lookup(pidx, name)
 			add(platform, display, pricing)
 		}

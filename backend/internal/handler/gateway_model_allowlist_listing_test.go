@@ -63,6 +63,22 @@ func TestGatewayModels_ModelAllowlistWildcardExpandsAgainstSource(t *testing.T) 
 	require.Equal(t, []string{"gpt-5.5-codex", "gpt-5.5-mini", "gpt-5.4"}, modelIDsForTest(got.Data))
 }
 
+func TestGatewayModels_ModelAllowlistMappedKeyAllowsClientName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := newGatewayModelsHandlerForTest(&gatewayModelsAccountRepoStub{byGroup: map[int64][]service.Account{32: {{Platform: service.PlatformOpenAI, Status: service.StatusActive, Schedulable: true, Credentials: map[string]any{"model_mapping": map[string]any{"client-name": "upstream-name"}}}}}})
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{Group: &service.Group{ID: 32, Platform: service.PlatformOpenAI, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"client-name"}}}})
+	h.Models(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got gatewayModelsResponseForTest
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ids := modelIDsForTest(got.Data)
+	require.Contains(t, ids, "client-name")
+	require.NotContains(t, ids, "upstream-name")
+}
+
 // geminiAllowlistAccountRepoStub 在 gatewayModelsAccountRepoStub 之上补充
 // Gemini 兼容层用到的按平台过滤查询（分组内无任何账号，触发 fallback 列表）。
 type geminiAllowlistAccountRepoStub struct {
