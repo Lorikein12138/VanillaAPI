@@ -1802,7 +1802,62 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("重复计费");
     expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("30");
     expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("300");
-    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("duplicate billing");
+    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("bill twice");
+  });
+
+  it("uses shared full-width input styles and preserves all smart-scheduling copy points", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await openFeaturesTab(wrapper);
+
+    const input = wrapper.get<HTMLInputElement>(
+      '[data-testid="smart-scheduling-first-output-timeout"]',
+    );
+    const label = wrapper.get('label[for="smart-scheduling-first-output-timeout"]');
+    expect(input.classes()).toContain("input");
+    expect(input.classes()).not.toContain("form-input");
+    expect(label.classes()).toContain("input-label");
+    expect(input.element.parentElement?.classList.contains("max-w-sm")).toBe(false);
+    const card = wrapper
+      .findAll(".card")
+      .find((candidate) => candidate.text().includes("admin.settings.features.smartScheduling.title"));
+    expect(card).toBeDefined();
+    expect(card!.find(".input-hint").exists()).toBe(true);
+    expect(card!.text()).toContain("admin.settings.features.smartScheduling.firstOutputTimeoutRisk");
+
+    const zh = zhSettings.settings.features.smartScheduling;
+    const en = enSettings.settings.features.smartScheduling;
+    expect(Object.keys(zh)).toEqual(Object.keys(en));
+    expect(zh.description).toContain("模型、能力、传输、配额和熔断门槛");
+    expect(zh.description).toContain("近期健康数据充足");
+    expect(zh.enabledHint).toContain("按健康状态选账");
+    expect(zh.enabledHint).toContain("独立");
+    expect(zh.enabledHint).toContain("分别开启");
+    expect(zh.firstOutputTimeoutHint).toContain("0–300 的整数");
+    expect(zh.firstOutputTimeoutHint).toContain("默认 30");
+    expect(zh.firstOutputTimeoutHint).toContain("0 为关闭");
+    expect(zh.firstOutputTimeoutHint).toContain("仅开启智能调度时生效");
+    expect(zh.firstOutputTimeoutHint).toContain("关闭后按 config.yaml");
+    expect(zh.firstOutputTimeoutRisk).toContain("换号一次");
+    expect(zh.firstOutputTimeoutRisk).toContain("上游可能已处理并计费");
+    expect(zh.firstOutputTimeoutRisk).toContain("重试可能重复计费");
+    expect(zh.firstOutputTimeoutInvalid).toContain("0–300 的整数");
+
+    expect(en.description).toContain("model, capability, transport, quota, and circuit gates");
+    expect(en.description).toContain("recent health data");
+    expect(en.enabledHint).toContain("Route by health");
+    expect(en.enabledHint).toContain("independent");
+    expect(en.enabledHint).toContain("enabled separately");
+    expect(en.firstOutputTimeoutHint).toContain("Integer 0–300");
+    expect(en.firstOutputTimeoutHint).toContain("default 30");
+    expect(en.firstOutputTimeoutHint).toContain("0 disables it");
+    expect(en.firstOutputTimeoutHint).toContain("smart scheduling on");
+    expect(en.firstOutputTimeoutHint).toContain("config.yaml");
+    expect(en.firstOutputTimeoutRisk).toContain("switch accounts once");
+    expect(en.firstOutputTimeoutRisk).toContain("processed and billed");
+    expect(en.firstOutputTimeoutRisk).toContain("bill twice");
+    expect(en.firstOutputTimeoutInvalid).toContain("integer from 0 to 300");
+    wrapper.unmount();
   });
 });
 

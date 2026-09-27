@@ -2,13 +2,21 @@
   <div class="flex items-center gap-2">
     <!-- Rate Limit Display (429) - Two-line layout -->
     <div v-if="isRateLimited" class="flex flex-col items-center gap-1">
-      <span class="badge text-xs badge-warning">{{ t('admin.accounts.status.rateLimited') }}</span>
+      <span
+        class="badge text-xs badge-warning"
+        :title="hardStatusAccessibilityText || undefined"
+        :aria-label="hardStatusAccessibilityText || undefined"
+      >{{ t('admin.accounts.status.rateLimited') }}</span>
       <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ rateLimitResumeText }}</span>
     </div>
 
     <!-- Overload Display (529) - Two-line layout -->
     <div v-else-if="isOverloaded" class="flex flex-col items-center gap-1">
-      <span class="badge text-xs badge-danger">{{ t('admin.accounts.status.overloaded') }}</span>
+      <span
+        class="badge text-xs badge-danger"
+        :title="hardStatusAccessibilityText || undefined"
+        :aria-label="hardStatusAccessibilityText || undefined"
+      >{{ t('admin.accounts.status.overloaded') }}</span>
       <span class="text-[11px] text-gray-400 dark:text-gray-500">{{ overloadCountdown }}</span>
     </div>
 
@@ -18,7 +26,8 @@
         <button
           type="button"
           :class="['badge text-xs', statusClass, 'cursor-pointer']"
-          :title="t('admin.accounts.status.viewTempUnschedDetails')"
+          :title="hardStatusAccessibilityText || t('admin.accounts.status.viewTempUnschedDetails')"
+          :aria-label="hardStatusAccessibilityText || undefined"
           @click="handleTempUnschedClick"
         >
           {{ statusText }}
@@ -27,22 +36,27 @@
           {{ tempUnschedRecoveryText }}
         </span>
       </div>
-      <span v-else :class="['badge text-xs', statusClass]">
-        {{ statusText }}
+      <div v-else-if="smartHealthNextProbeText && !hasHardStatus" class="flex flex-col items-center gap-1">
+        <span :class="['badge text-xs', primaryStatusClass]">
+          {{ primaryStatusText }}
+        </span>
+        <span
+          class="text-[11px] text-gray-400 dark:text-gray-500"
+          :title="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
+          :aria-label="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
+        >
+          {{ smartHealthNextProbeText }}
+        </span>
+      </div>
+      <span
+        v-else
+        :class="['badge text-xs', primaryStatusClass]"
+        :title="hardStatusAccessibilityText || undefined"
+        :aria-label="hardStatusAccessibilityText || undefined"
+      >
+        {{ primaryStatusText }}
       </span>
     </template>
-
-    <div v-if="smartHealthDisplayState" class="flex flex-col items-center gap-1">
-      <span class="badge text-xs badge-warning">{{ smartHealthLabel }}</span>
-      <span
-        v-if="smartHealthNextProbeText"
-        class="text-[11px] text-gray-400 dark:text-gray-500"
-        :title="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
-        :aria-label="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
-      >
-        {{ smartHealthNextProbeText }}
-      </span>
-    </div>
 
     <!-- Error Info Indicator -->
     <div v-if="hasError && account.error_message" class="group/error relative">
@@ -200,10 +214,16 @@ const smartHealthDeadline = computed(() => {
 const smartHealthDisplayState = computed(() => {
   const snapshot = props.account.smart_health
   if (!snapshot) return null
-  if (snapshot.state === 'cooldown' && smartHealthDeadline.value !== null && smartHealthDeadline.value <= smartHealthNow.value) {
-    return 'ready'
+  switch (snapshot.state) {
+    case 'cooldown':
+      if (smartHealthDeadline.value === null) return null
+      return smartHealthDeadline.value <= smartHealthNow.value ? 'ready' : 'cooldown'
+    case 'ready':
+    case 'probing':
+      return snapshot.state
+    default:
+      return null
   }
-  return snapshot.state
 })
 
 const smartHealthLabel = computed(() => {
@@ -220,6 +240,12 @@ const smartHealthNextProbeText = computed(() => {
     return ''
   }
   return formatDateTime(props.account.smart_health?.next_probe_at)
+})
+
+const smartHealthAccessibilityText = computed(() => {
+  if (!smartHealthLabel.value) return ''
+  if (!smartHealthNextProbeText.value) return smartHealthLabel.value
+  return `${smartHealthLabel.value}. ${t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText.value })}`
 })
 
 const scheduleSmartHealthExpiry = () => {
@@ -417,6 +443,39 @@ const statusText = computed(() => {
     return t('admin.accounts.status.paused')
   }
   return t(`admin.accounts.status.${props.account.status}`)
+})
+
+const hasHardStatus = computed(() => (
+  isRateLimited.value ||
+  isOverloaded.value ||
+  hasError.value ||
+  isTempUnschedulable.value ||
+  props.account.status !== 'active' ||
+  isQuotaExceeded.value ||
+  !props.account.schedulable
+))
+
+const primaryStatusText = computed(() => {
+  if (!hasHardStatus.value && smartHealthLabel.value) return smartHealthLabel.value
+  return statusText.value
+})
+
+const primaryStatusClass = computed(() => {
+  if (!hasHardStatus.value && smartHealthDisplayState.value) return 'badge-warning'
+  return statusClass.value
+})
+
+const hardStatusAccessibilityText = computed(() => {
+  if (!hasHardStatus.value || !smartHealthAccessibilityText.value) return ''
+  const statusLabel = isRateLimited.value
+    ? t('admin.accounts.status.rateLimited')
+    : isOverloaded.value
+      ? t('admin.accounts.status.overloaded')
+      : statusText.value
+  const labels = [statusLabel]
+  if (isTempUnschedulable.value) labels.push(t('admin.accounts.status.viewTempUnschedDetails'))
+  labels.push(smartHealthAccessibilityText.value)
+  return labels.join('. ')
 })
 
 const handleTempUnschedClick = () => {

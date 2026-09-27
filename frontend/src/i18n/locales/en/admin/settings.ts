@@ -16,13 +16,13 @@ export default {
       features: {
         smartScheduling: {
           title: 'Smart scheduling',
-          description: 'Prefer accounts with mature, recent health observations while preserving the existing model, capability, transport, quota, and circuit gates.',
+          description: 'Keep model, capability, transport, quota, and circuit gates; prefer accounts with enough recent health data.',
           enabled: 'Enable smart scheduling',
-          enabledHint: 'This switch is independent from the OpenAI experimental scheduler. When enabled, health-aware routing is active; the experimental scheduler remains optional.',
+          enabledHint: 'Route by health when on. This switch and the OpenAI experimental scheduler are independent and can be enabled separately.',
           firstOutputTimeoutLabel: 'First semantic output timeout (seconds)',
-          firstOutputTimeoutHint: 'Enter an integer from 0 to 300. The default is 30; 0 disables it. This value applies only while smart scheduling is enabled; otherwise config.yaml remains in effect.',
-          firstOutputTimeoutRisk: 'A timeout before semantic output may trigger one account switch. The upstream may already have processed and billed the request, so a retry can cause duplicate billing.',
-          firstOutputTimeoutInvalid: 'The first semantic output timeout must be an integer from 0 to 300.',
+          firstOutputTimeoutHint: 'Integer 0–300; default 30. 0 disables it. Applies only with smart scheduling on; otherwise use config.yaml.',
+          firstOutputTimeoutRisk: 'A timeout before semantic output may switch accounts once. Upstream may have processed and billed it; retrying may bill twice.',
+          firstOutputTimeoutInvalid: 'Enter an integer from 0 to 300 for the first semantic output timeout.',
         },
         channelMonitor: {
           title: 'Channel Monitor',
