@@ -7069,6 +7069,8 @@ func (c *schedulerProbeAfterFuncContext) cancel() {
 	}
 }
 
+// waitCallbacks waits only for the fake-context propagation callbacks; context.AfterFunc
+// may run its registered cleanup callback in a separate goroutine.
 func (c *schedulerProbeAfterFuncContext) waitCallbacks(t *testing.T) {
 	t.Helper()
 	c.mu.Lock()
@@ -7124,6 +7126,24 @@ func openAIProbeLeaseStateForTest(t *testing.T, stats *openAIAccountRuntimeStats
 	stat.mu.Lock()
 	defer stat.mu.Unlock()
 	return stat.probeID, len(stat.probeBatchSamples), int(stat.sampleCount.Load()), stat.backoffIndex
+}
+
+func waitForOpenAIProbeCancellationCleanupForTest(t *testing.T, stats *openAIAccountRuntimeStats, accountID int64) {
+	t.Helper()
+	stat, release, ok := stats.acquire(accountID, false, false)
+	require.True(t, ok)
+	defer release()
+
+	require.Eventually(t, func() bool {
+		activeID, _, _, _ := openAIProbeLeaseStateForTest(t, stats, accountID)
+		stat.mu.Lock()
+		traceStarted := stat.probeTraceStarted
+		stat.mu.Unlock()
+		stat.probeTraceQueueMu.Lock()
+		traceDrained := len(stat.probeTraceQueue) == 0 && !stat.probeTraceDraining
+		stat.probeTraceQueueMu.Unlock()
+		return activeID == 0 && !traceStarted && traceDrained
+	}, time.Second, time.Millisecond, "matching probe cancellation must clear its lease and drain its trace")
 }
 
 func TestOpenAIAccountProbeReleaseBeforeSuccessReport(t *testing.T) {
@@ -7372,12 +7392,12 @@ func TestOpenAIAccountProbeLongRequestAndStaleResult(t *testing.T) {
 				probeID := selection.Account.smartHealthProbeID
 				require.NotZero(t, probeID)
 				selection.ReleaseFunc()
-				waitForCleanup := func() {
+				waitForPropagationCallbacks := func() {
 					t.Helper()
 					select {
 					case <-ctx.callbackStarted:
 					case <-time.After(time.Second):
-						t.Fatal("request cleanup callback did not start")
+						t.Fatal("fake-context propagation callback did not start")
 					}
 					ctx.waitCallbacks(t)
 				}
@@ -7400,10 +7420,11 @@ func TestOpenAIAccountProbeLongRequestAndStaleResult(t *testing.T) {
 					go report()
 					waitForReport()
 					ctx.cancel()
-					waitForCleanup()
+					waitForPropagationCallbacks()
 				case "cancel_first":
 					ctx.cancel()
-					waitForCleanup()
+					waitForPropagationCallbacks()
+					waitForOpenAIProbeCancellationCleanupForTest(t, scheduler.stats, degradedID)
 					activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
 					require.Zero(t, activeID, "probe lease must be cleared before the late report")
 					require.Zero(t, batchCount, "cancellation must not add a batch sample")
@@ -7428,7 +7449,8 @@ func TestOpenAIAccountProbeLongRequestAndStaleResult(t *testing.T) {
 					case <-time.After(time.Second):
 						t.Fatal("request cancellation did not finish")
 					}
-					waitForCleanup()
+					waitForPropagationCallbacks()
+					waitForOpenAIProbeCancellationCleanupForTest(t, scheduler.stats, degradedID)
 				}
 
 				activeID, batchCount, _, _ := openAIProbeLeaseStateForTest(t, scheduler.stats, degradedID)
