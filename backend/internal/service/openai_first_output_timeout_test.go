@@ -343,13 +343,15 @@ func TestSmartSchedulingStall_PassthroughSemanticTimeout(t *testing.T) {
 }
 
 func TestSmartSchedulingStall_PassthroughTimeout(t *testing.T) {
-	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	cfg := &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}
+	svc, _, accountRepo, timeoutCounter := newFirstOutputTimeoutTestGateway(cfg, nil)
 	pr, pw := io.Pipe()
 	body := &firstOutputCloseTrackingBody{ReadCloser: pr, closed: make(chan struct{})}
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(openAIFirstOutputSettingsContextKey, openAIAdvancedSchedulerRuntimeSettings{smartEnabled: true})
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
@@ -365,7 +367,10 @@ func TestSmartSchedulingStall_PassthroughTimeout(t *testing.T) {
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
+	require.True(t, failoverErr.SafeToFailoverAfterWrite)
 	require.Empty(t, rec.Body.String(), "a heartbeat does not become semantic output or restart the clock")
+	require.Empty(t, timeoutCounter.increments, "a smart-mode first-output timeout is not a stream-idle penalty")
+	require.Empty(t, accountRepo.tempUnschedCalls)
 	select {
 	case <-body.closed:
 	case <-time.After(time.Second):
@@ -878,4 +883,295 @@ func TestOpenAINativeFirstOutputFailoverKeepsAttemptHeadersPrivateAfterKeepalive
 	case <-time.After(time.Second):
 		t.Fatal("first account writer did not exit after timeout")
 	}
+}
+
+type firstOutputTimeoutTestSettingRepo struct {
+	SettingRepository
+	mu     sync.RWMutex
+	values map[string]string
+}
+
+func (r *firstOutputTimeoutTestSettingRepo) GetValue(_ context.Context, key string) (string, error) {
+	r.mu.RLock()
+	value, ok := r.values[key]
+	r.mu.RUnlock()
+	if !ok {
+		return "", ErrSettingNotFound
+	}
+	return value, nil
+}
+
+func (r *firstOutputTimeoutTestSettingRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value, ok := r.values[key]; ok {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+func (r *firstOutputTimeoutTestSettingRepo) setValue(key, value string) {
+	r.mu.Lock()
+	r.values[key] = value
+	r.mu.Unlock()
+}
+
+var _ SettingRepository = (*firstOutputTimeoutTestSettingRepo)(nil)
+
+type firstOutputTimeoutTestTempUnschedCall struct {
+	accountID  int64
+	until      time.Time
+	reason     string
+	recordedAt time.Time
+}
+
+type firstOutputTimeoutTestAccountRepo struct {
+	AccountRepository
+	tempUnschedCalls []firstOutputTimeoutTestTempUnschedCall
+}
+
+func (r *firstOutputTimeoutTestAccountRepo) SetTempUnschedulable(_ context.Context, accountID int64, until time.Time, reason string) error {
+	r.tempUnschedCalls = append(r.tempUnschedCalls, firstOutputTimeoutTestTempUnschedCall{
+		accountID: accountID, until: until, reason: reason, recordedAt: time.Now(),
+	})
+	return nil
+}
+
+type firstOutputTimeoutTestCounterIncrement struct {
+	accountID     int64
+	windowMinutes int
+	count         int64
+}
+
+type firstOutputTimeoutTestCounterCache struct {
+	mu         sync.Mutex
+	counts     map[int64]int64
+	increments []firstOutputTimeoutTestCounterIncrement
+	resets     []int64
+}
+
+func (c *firstOutputTimeoutTestCounterCache) IncrementTimeoutCount(_ context.Context, accountID int64, windowMinutes int) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.counts == nil {
+		c.counts = make(map[int64]int64)
+	}
+	c.counts[accountID]++
+	count := c.counts[accountID]
+	c.increments = append(c.increments, firstOutputTimeoutTestCounterIncrement{
+		accountID: accountID, windowMinutes: windowMinutes, count: count,
+	})
+	return count, nil
+}
+
+func (c *firstOutputTimeoutTestCounterCache) GetTimeoutCount(_ context.Context, accountID int64) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.counts[accountID], nil
+}
+
+func (c *firstOutputTimeoutTestCounterCache) ResetTimeoutCount(_ context.Context, accountID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.counts, accountID)
+	c.resets = append(c.resets, accountID)
+	return nil
+}
+
+func (c *firstOutputTimeoutTestCounterCache) GetTimeoutCountTTL(context.Context, int64) (time.Duration, error) {
+	return 0, nil
+}
+
+var _ TimeoutCounterCache = (*firstOutputTimeoutTestCounterCache)(nil)
+
+const firstOutputTimeoutTestStreamSettings = `{"enabled":true,"action":"temp_unsched","temp_unsched_minutes":5,"threshold_count":3,"threshold_window_minutes":10}`
+
+func newFirstOutputTimeoutTestGateway(
+	cfg *config.Config,
+	extraSettings map[string]string,
+) (*OpenAIGatewayService, *firstOutputTimeoutTestSettingRepo, *firstOutputTimeoutTestAccountRepo, *firstOutputTimeoutTestCounterCache) {
+	values := map[string]string{SettingKeyStreamTimeoutSettings: firstOutputTimeoutTestStreamSettings}
+	for key, value := range extraSettings {
+		values[key] = value
+	}
+	settingRepo := &firstOutputTimeoutTestSettingRepo{values: values}
+	accountRepo := &firstOutputTimeoutTestAccountRepo{}
+	counter := &firstOutputTimeoutTestCounterCache{}
+	rateLimitService := &RateLimitService{
+		accountRepo:    accountRepo,
+		cfg:            cfg,
+		settingService: NewSettingService(settingRepo, cfg),
+	}
+	rateLimitService.SetTimeoutCounterCache(counter)
+	return &OpenAIGatewayService{cfg: cfg, rateLimitService: rateLimitService}, settingRepo, accountRepo, counter
+}
+
+func newFirstOutputTimeoutTestRequestContext() *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	return c
+}
+
+func TestSmartFirstOutputTimeoutSkipsStreamTimeoutPenalty(t *testing.T) {
+	cfg := &config.Config{}
+	svc, _, accountRepo, counter := newFirstOutputTimeoutTestGateway(cfg, map[string]string{
+		SettingKeySmartSchedulingEnabled: "true",
+	})
+	account := &Account{ID: 731, Name: "fixture-account", Platform: PlatformOpenAI}
+	attempts := []struct {
+		name   string
+		effort string
+		phase  string
+	}{
+		{name: "high_response_headers_one", effort: "high", phase: "response_headers"},
+		{name: "xhigh_response_headers_two", effort: "xhigh", phase: "response_headers"},
+		{name: "high_response_headers_three", effort: "high", phase: "response_headers"},
+		{name: "xhigh_semantic_output", effort: "xhigh", phase: "semantic_output"},
+	}
+	for _, attempt := range attempts {
+		t.Run(attempt.name, func(t *testing.T) {
+			c := newFirstOutputTimeoutTestRequestContext()
+			c.Set(openAIFirstOutputSettingsContextKey, openAIAdvancedSchedulerRuntimeSettings{
+				smartEnabled: true, smartEnabledKnown: true, firstOutputTimeoutSeconds: 30,
+			})
+			headers := http.Header{"X-Fixture-Header": []string{"kept"}}
+			failoverErr := svc.newOpenAIFirstOutputTimeoutError(
+				context.Background(), c, account, nil, "", time.Now(), "fixture-model",
+				attempt.effort, 30*time.Second, attempt.phase, headers,
+			)
+
+			require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
+			require.Contains(t, string(failoverErr.ResponseBody), "first_output_timeout")
+			require.True(t, failoverErr.SafeToFailoverAfterWrite)
+			require.Equal(t, headers, failoverErr.ResponseHeaders)
+			raw, ok := c.Get(OpsUpstreamErrorsKey)
+			require.True(t, ok)
+			events, ok := raw.([]*OpsUpstreamErrorEvent)
+			require.True(t, ok)
+			require.Len(t, events, 1)
+			require.Equal(t, "first_output_timeout", events[0].Kind)
+			require.Equal(t, account.ID, events[0].AccountID)
+			require.Equal(t, http.StatusGatewayTimeout, events[0].UpstreamStatusCode)
+			require.Contains(t, events[0].Detail, "phase="+attempt.phase)
+		})
+	}
+	require.Empty(t, counter.increments, "smart first-output failures must not touch the stream timeout counter")
+	require.Empty(t, accountRepo.tempUnschedCalls, "smart first-output failures must not trigger stream timeout quarantine")
+}
+
+func TestSmartFirstOutputTimeoutSnapshotAndLegacyPenalty(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	t.Run("smart_disabled_missing_and_invalid_snapshots_keep_legacy_accounting", func(t *testing.T) {
+		cfg := &config.Config{Gateway: config.GatewayConfig{
+			OpenAIFirstOutputTimeoutSeconds:           30,
+			OpenAIHighEffortFirstOutputTimeoutSeconds: 300,
+		}}
+		svc, _, accountRepo, counter := newFirstOutputTimeoutTestGateway(cfg, map[string]string{
+			SettingKeySmartSchedulingEnabled:          "false",
+			SettingKeyOpenAIFirstOutputTimeoutSeconds: "0",
+		})
+		account := &Account{ID: 732, Name: "fixture-account", Platform: PlatformOpenAI}
+
+		disabled := newFirstOutputTimeoutTestRequestContext()
+		disabled.Set(openAIFirstOutputSettingsContextKey, openAIAdvancedSchedulerRuntimeSettings{smartEnabledKnown: true})
+		require.Equal(t, 300*time.Second, svc.openAIFirstOutputTimeoutForRequest(context.Background(), disabled, "xhigh"),
+			"smart-off keeps the explicit high-effort YAML override")
+		_ = svc.newOpenAIFirstOutputTimeoutError(context.Background(), disabled, account, nil, "", time.Now(), "fixture-model", "xhigh", 300*time.Second, "response_headers", nil)
+
+		missing := newFirstOutputTimeoutTestRequestContext()
+		_ = svc.newOpenAIFirstOutputTimeoutError(context.Background(), missing, account, nil, "", time.Now(), "fixture-model", "high", 30*time.Second, "response_headers", nil)
+
+		invalid := newFirstOutputTimeoutTestRequestContext()
+		invalid.Set(openAIFirstOutputSettingsContextKey, "invalid-snapshot")
+		_ = svc.newOpenAIFirstOutputTimeoutError(context.Background(), invalid, account, nil, "", time.Now(), "fixture-model", "high", 30*time.Second, "response_headers", nil)
+
+		require.Equal(t, []int64{1, 2, 3}, firstOutputTimeoutTestIncrementCounts(counter))
+		require.Len(t, accountRepo.tempUnschedCalls, 1, "the third legacy timeout should retain the configured threshold action")
+		require.Contains(t, accountRepo.tempUnschedCalls[0].reason, "Stream data interval timeout for model: fixture-model")
+	})
+
+	t.Run("request_snapshot_survives_a_scheduler_cache_flip", func(t *testing.T) {
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		cfg := &config.Config{Gateway: config.GatewayConfig{
+			OpenAIFirstOutputTimeoutSeconds:           30,
+			OpenAIHighEffortFirstOutputTimeoutSeconds: 300,
+		}}
+		svc, settingRepo, accountRepo, counter := newFirstOutputTimeoutTestGateway(cfg, map[string]string{
+			SettingKeySmartSchedulingEnabled:          "true",
+			SettingKeyOpenAIFirstOutputTimeoutSeconds: "30",
+		})
+		account := &Account{ID: 733, Name: "fixture-account", Platform: PlatformOpenAI}
+		inFlight := newFirstOutputTimeoutTestRequestContext()
+		require.Equal(t, 30*time.Second, svc.openAIFirstOutputTimeoutForRequest(context.Background(), inFlight, "xhigh"))
+
+		settingRepo.setValue(SettingKeySmartSchedulingEnabled, "false")
+		settingRepo.setValue(SettingKeyOpenAIFirstOutputTimeoutSeconds, "0")
+		resetOpenAIAdvancedSchedulerSettingCacheForTest()
+		_ = svc.newOpenAIFirstOutputTimeoutError(context.Background(), inFlight, account, nil, "", time.Now(), "fixture-model", "xhigh", 30*time.Second, "response_headers", nil)
+		require.Empty(t, counter.increments, "the in-flight request keeps its smart-enabled snapshot")
+		require.Empty(t, accountRepo.tempUnschedCalls)
+
+		fresh := newFirstOutputTimeoutTestRequestContext()
+		require.Equal(t, 300*time.Second, svc.openAIFirstOutputTimeoutForRequest(context.Background(), fresh, "xhigh"),
+			"a fresh smart-off request uses the current high-effort YAML override")
+		_ = svc.newOpenAIFirstOutputTimeoutError(context.Background(), fresh, account, nil, "", time.Now(), "fixture-model", "xhigh", 300*time.Second, "response_headers", nil)
+		require.Equal(t, []int64{1}, firstOutputTimeoutTestIncrementCounts(counter))
+	})
+}
+
+func TestSmartFirstOutputTimeoutKeepsStreamIdlePenalty(t *testing.T) {
+	for _, smartEnabled := range []bool{true, false} {
+		mode := "smart_disabled"
+		if smartEnabled {
+			mode = "smart_enabled"
+		}
+		t.Run(mode, func(t *testing.T) {
+			extraSettings := map[string]string{
+				SettingKeySmartSchedulingEnabled: "false",
+			}
+			if smartEnabled {
+				extraSettings[SettingKeySmartSchedulingEnabled] = "true"
+			}
+			svc, _, accountRepo, counter := newFirstOutputTimeoutTestGateway(&config.Config{}, extraSettings)
+			account := &Account{ID: 734, Name: "fixture-account", Platform: PlatformOpenAI}
+
+			if smartEnabled {
+				for range 3 {
+					c := newFirstOutputTimeoutTestRequestContext()
+					c.Set(openAIFirstOutputSettingsContextKey, openAIAdvancedSchedulerRuntimeSettings{smartEnabled: true})
+					_ = svc.newOpenAIFirstOutputTimeoutError(context.Background(), c, account, nil, "", time.Now(), "fixture-model", "xhigh", 30*time.Second, "response_headers", nil)
+				}
+				require.Empty(t, counter.increments, "smart first-output events do not seed the real idle threshold")
+			}
+
+			before := time.Now()
+			for i := 0; i < 3; i++ {
+				stopped := svc.rateLimitService.HandleStreamTimeout(context.Background(), account, "fixture-model")
+				require.Equal(t, i == 2, stopped, "only the third genuine idle event reaches the threshold")
+			}
+			require.Equal(t, []int64{1, 2, 3}, firstOutputTimeoutTestIncrementCounts(counter))
+			require.Len(t, counter.resets, 1)
+			require.Len(t, accountRepo.tempUnschedCalls, 1)
+			call := accountRepo.tempUnschedCalls[0]
+			require.Equal(t, account.ID, call.accountID)
+			require.Contains(t, call.reason, "Stream data interval timeout for model: fixture-model")
+			require.WithinDuration(t, call.recordedAt.Add(5*time.Minute), call.until, time.Second)
+			require.GreaterOrEqual(t, call.recordedAt, before)
+		})
+	}
+}
+
+func firstOutputTimeoutTestIncrementCounts(counter *firstOutputTimeoutTestCounterCache) []int64 {
+	counter.mu.Lock()
+	defer counter.mu.Unlock()
+	counts := make([]int64, len(counter.increments))
+	for i, increment := range counter.increments {
+		counts[i] = increment.count
+	}
+	return counts
 }
