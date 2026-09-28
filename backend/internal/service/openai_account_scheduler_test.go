@@ -1243,7 +1243,7 @@ func TestOpenAIAccountRuntimeStats_ProbeRecoveryInvariant(t *testing.T) {
 	stat.mu.Unlock()
 }
 
-func TestSmartSchedulingStall_ThreeSamples(t *testing.T) {
+func TestSmartSchedulingStall_ThreeSampleMean(t *testing.T) {
 	now := time.Unix(1771000000, 0).UTC()
 	report := func(stats *openAIAccountRuntimeStats, accountID int64, success bool, ttft *int, at time.Time) {
 		stats.reportAtForRequest(accountID, success, ttft, at, openAIStickyEscapeConfig{}, false, true, 0, true)
@@ -1269,13 +1269,23 @@ func TestSmartSchedulingStall_ThreeSamples(t *testing.T) {
 		require.InDelta(t, 2.0/3.0, assessment.errorRate, 1e-12)
 	})
 
-	t.Run("positive_ttft_is_independent_and_strictly_over_ten_seconds", func(t *testing.T) {
+	t.Run("positive_ttft_uses_three_sample_arithmetic_mean", func(t *testing.T) {
+		meanStats := newOpenAIAccountRuntimeStats()
+		meanSamples := []int{12590, 7269, 6853}
+		for index, sample := range meanSamples {
+			report(meanStats, 7108, true, &sample, now.Add(time.Duration(index)*time.Second))
+		}
+		assessment := meanStats.health(7108, now.Add(2*time.Second), openAIStickyEscapeConfig{})
+		require.True(t, assessment.hasTTFT)
+		require.Equal(t, 8904.0, assessment.ttft)
+		require.Equal(t, openAIAccountHealthHealthy, assessment.level, "an 8904ms arithmetic mean is healthy")
+
 		boundaryStats := newOpenAIAccountRuntimeStats()
 		boundary := 10000
 		for index := 0; index < openAIAccountSmartWindowSize; index++ {
 			report(boundaryStats, 7103, true, &boundary, now.Add(time.Duration(index)*time.Second))
 		}
-		assessment := boundaryStats.health(7103, now.Add(2*time.Second), openAIStickyEscapeConfig{})
+		assessment = boundaryStats.health(7103, now.Add(2*time.Second), openAIStickyEscapeConfig{})
 		require.True(t, assessment.hasTTFT)
 		require.InDelta(t, 10000, assessment.ttft, 1e-9)
 		require.Equal(t, openAIAccountHealthHealthy, assessment.level, "exactly 10 seconds is not degraded")
@@ -1286,6 +1296,7 @@ func TestSmartSchedulingStall_ThreeSamples(t *testing.T) {
 			report(slowStats, 7104, true, &sample, now.Add(time.Duration(index)*time.Second))
 		}
 		assessment = slowStats.health(7104, now.Add(2*time.Second), openAIStickyEscapeConfig{})
+		require.InDelta(t, 10000+1.0/3.0, assessment.ttft, 1e-9)
 		require.Greater(t, assessment.ttft, float64(openAIAccountSmartTTFTThreshold.Milliseconds()))
 		require.Equal(t, openAIAccountHealthDegraded, assessment.level)
 		require.Equal(t, openAIAccountHealthReasonTTFT, assessment.reason)
@@ -1323,6 +1334,64 @@ func TestSmartSchedulingStall_ThreeSamples(t *testing.T) {
 		require.Equal(t, openAIAccountHealthHealthy, assessment.level)
 		require.InDelta(t, 1300, assessment.ttft, 1e-9)
 	})
+}
+
+func TestSmartSchedulingStall_MeanLogField(t *testing.T) {
+	logHandler := captureOpenAIProbeTraceLogs(t)
+	stats := newOpenAIAccountRuntimeStats()
+	now := time.Unix(1771000200, 0).UTC()
+	for index, sample := range []int{12000, 13000, 14000} {
+		stats.reportAtForRequest(7109, true, &sample, now.Add(time.Duration(index)*time.Second), openAIStickyEscapeConfig{}, true, true, 0, true)
+	}
+
+	var healthChanged *schedulerTestLogRecord
+	for _, record := range logHandler.snapshot() {
+		if record.message == "openai_account_health_changed" {
+			recordCopy := record
+			healthChanged = &recordCopy
+			break
+		}
+	}
+	require.NotNil(t, healthChanged, "smart degradation retains its health-change log")
+	ttft, hasTTFT := healthChanged.attrs["ttft_ms"]
+	require.True(t, hasTTFT, "the stable ttft_ms log key remains present")
+	require.Equal(t, 13000.0, ttft, "ttft_ms is the three-sample arithmetic mean")
+}
+
+func TestOpenAIAccountScheduler_SmartHealthRankingUsesMean(t *testing.T) {
+	now := time.Now()
+	stats := newOpenAIAccountRuntimeStats()
+	for index, sample := range []int{12590, 7269, 6853} {
+		stats.reportAtForRequest(7111, true, &sample, now.Add(time.Duration(index-3)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
+	}
+	for index, sample := range []int{10000, 10000, 10000} {
+		stats.reportAtForRequest(7112, true, &sample, now.Add(time.Duration(index-3)*time.Second), openAIStickyEscapeConfig{}, false, true, 0, true)
+	}
+
+	_, legacyEWMA, hasLegacyTTFT := stats.snapshot(7111)
+	require.True(t, hasLegacyTTFT)
+	require.InDelta(t, 10591.24, legacyEWMA, 1e-9, "the legacy snapshot remains EWMA")
+
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 1
+	service := &OpenAIGatewayService{cfg: cfg}
+	scheduler := &defaultOpenAIAccountScheduler{service: service, stats: stats}
+	accounts := []*Account{
+		{ID: 7111, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true},
+		{ID: 7112, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true},
+	}
+	plan := scheduler.buildOpenAIAccountLoadPlan(context.Background(), OpenAIAccountScheduleRequest{SmartHealthEnabled: true}, accounts, map[int64]*AccountLoadInfo{
+		7111: {AccountID: 7111},
+		7112: {AccountID: 7112},
+	})
+	require.Len(t, plan.allCandidates, 2)
+	byID := make(map[int64]openAIAccountCandidateScore, len(plan.allCandidates))
+	for _, candidate := range plan.allCandidates {
+		byID[candidate.account.ID] = candidate
+	}
+	require.Equal(t, 8904.0, byID[7111].ttft)
+	require.Equal(t, 10000.0, byID[7112].ttft)
+	require.Greater(t, byID[7111].score, byID[7112].score, "smart ranking favors the lower arithmetic mean")
 }
 
 func TestSmartSchedulingStall_Legacy(t *testing.T) {
@@ -1433,9 +1502,15 @@ func TestSmartSchedulingStall_Recovery(t *testing.T) {
 	allTTFTStats := newOpenAIAccountRuntimeStats()
 	seedSmartDegradedAccount(t, allTTFTStats, 7302, "ttft", base)
 	allTTFTStat := openAIAccountRuntimeStatForTest(t, allTTFTStats, 7302)
+	recoveryTTFTValues := make([]int, openAIAccountSmartProbeBatchLimit)
+	for index := range recoveryTTFTValues {
+		recoveryTTFTValues[index] = 10000
+	}
+	recoveryTTFTValues[0] = 10001
+	recoveryTTFTValues[1] = 9999
 	for index := 0; index < openAIAccountSmartProbeBatchLimit; index++ {
 		probeAt := base.Add(time.Minute + time.Duration(index)*time.Second)
-		value := 10000
+		value := recoveryTTFTValues[index]
 		acquireAndReportSmartProbe(t, allTTFTStats, 7302, true, &value, probeAt)
 	}
 	assessment = allTTFTStats.health(7302, base.Add(time.Minute+10*time.Second), openAIStickyEscapeConfig{})
@@ -1528,14 +1603,14 @@ func TestOpenAIGatewayService_SmartThresholdModeIsolation(t *testing.T) {
 		require.True(t, settings.enabled)
 		stats := newOpenAIAccountRuntimeStats()
 		now := time.Unix(1775001000, 0).UTC()
-		ttft := 12000
-		for index := 0; index < int(openAIAccountLegacyHealthMinSamples); index++ {
+		legacySamples := []int{12590, 7269, 6853}
+		for index, ttft := range legacySamples {
 			stats.reportAtForRequest(7502, true, &ttft, now.Add(time.Duration(index)*time.Second), service.openAIStickyEscapeConfig(), false, false, 0, true)
 		}
 		require.NotEqual(t, openAIAccountHealthDegraded, stats.health(7502, now.Add(3*time.Minute), service.openAIStickyEscapeConfig()).level)
-		_, ewma, hasTTFT := stats.snapshot(7502)
+		_, legacyEWMA, hasTTFT := stats.snapshot(7502)
 		require.True(t, hasTTFT)
-		require.InDelta(t, 12000, ewma, 1e-9, "legacy EWMA remains active")
+		require.InDelta(t, 10591.24, legacyEWMA, 1e-9, "legacy EWMA remains active for S=false")
 		stat := openAIAccountRuntimeStatForTest(t, stats, 7502)
 		stat.mu.Lock()
 		require.False(t, stat.smartMode, "S=false must not create smart windows")

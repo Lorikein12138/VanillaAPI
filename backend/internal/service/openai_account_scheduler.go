@@ -1158,15 +1158,17 @@ func (s *openAIAccountRuntimeStats) pruneSmartHealthWindowsLocked(stat *openAIAc
 	stat.smartTTFTWindow = keepFresh(stat.smartTTFTWindow)
 }
 
-func smartTTFTEWMA(samples []openAISmartTimedSample) float64 {
+// smartTTFTMean returns the arithmetic mean of the retained smart TTFT samples.
+// Smart-health log events keep the ttft_ms key and report this three-sample mean.
+func smartTTFTMean(samples []openAISmartTimedSample) float64 {
 	if len(samples) == 0 {
 		return math.NaN()
 	}
-	value := samples[0].value
-	for _, sample := range samples[1:] {
-		value = 0.2*sample.value + 0.8*value
+	sum := 0.0
+	for _, sample := range samples {
+		sum += sample.value
 	}
-	return value
+	return sum / float64(len(samples))
 }
 
 func (s *openAIAccountRuntimeStats) recomputeSmartHealthLocked(stat *openAIAccountRuntimeStat, now time.Time, previous openAIAccountHealthLevel) {
@@ -1193,7 +1195,7 @@ func (s *openAIAccountRuntimeStats) recomputeSmartHealthLocked(stat *openAIAccou
 			stat.smartReason = openAIAccountHealthReasonErrorRate
 		}
 	}
-	ttft := smartTTFTEWMA(stat.smartTTFTWindow)
+	ttft := smartTTFTMean(stat.smartTTFTWindow)
 	if stat.smartLevel != openAIAccountHealthDegraded && ttftMature && ttft > float64(openAIAccountSmartTTFTThreshold.Milliseconds()) {
 		stat.smartLevel = openAIAccountHealthDegraded
 		stat.smartReason = openAIAccountHealthReasonTTFT
@@ -1312,7 +1314,7 @@ func (s *openAIAccountRuntimeStats) smartHealthWindowValues(accountID int64, now
 		}
 		errorRate /= float64(len(stat.smartErrorWindow))
 	}
-	ttft := smartTTFTEWMA(stat.smartTTFTWindow)
+	ttft := smartTTFTMean(stat.smartTTFTWindow)
 	return errorRate, ttft, len(stat.smartTTFTWindow) >= openAIAccountSmartWindowSize
 }
 
@@ -1361,7 +1363,7 @@ func (s *openAIAccountRuntimeStats) health(accountID int64, now time.Time, thres
 			assessment.errorRate /= float64(len(stat.smartErrorWindow))
 		}
 		assessment.hasTTFT = len(stat.smartTTFTWindow) >= openAIAccountSmartWindowSize
-		assessment.ttft = smartTTFTEWMA(stat.smartTTFTWindow)
+		assessment.ttft = smartTTFTMean(stat.smartTTFTWindow)
 		if !assessment.hasTTFT {
 			assessment.ttft = 0
 		}
@@ -2365,6 +2367,8 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			health = assessment.level
 			healthReason = assessment.reason
 			healthProbe = req.SmartHealthProbeAccountID == account.ID
+			ttft = assessment.ttft
+			hasTTFT = assessment.hasTTFT
 		}
 		allCandidates = append(allCandidates, openAIAccountCandidateScore{
 			account:      account,
