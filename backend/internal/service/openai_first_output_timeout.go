@@ -323,7 +323,21 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 		Detail: fmt.Sprintf("phase=%s elapsed_ms=%d timeout_ms=%d", phase, elapsed.Milliseconds(), timeout.Milliseconds()),
 	})
 	if s.rateLimitService != nil {
-		s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
+		// Use the same request-start scheduler snapshot that armed the first-output
+		// deadline. A smart-mode first-output failure is already reported to smart
+		// health, but it is not a stream data interval timeout. If the snapshot is
+		// missing or malformed, preserve the legacy stream-timeout accounting.
+		smartEnabledForRequest := false
+		if c != nil {
+			if value, ok := c.Get(openAIFirstOutputSettingsContextKey); ok {
+				if settings, ok := value.(openAIAdvancedSchedulerRuntimeSettings); ok {
+					smartEnabledForRequest = settings.smartEnabled
+				}
+			}
+		}
+		if !smartEnabledForRequest {
+			s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
+		}
 	}
 	return &UpstreamFailoverError{
 		StatusCode:      http.StatusGatewayTimeout,
