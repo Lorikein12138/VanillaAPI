@@ -11,13 +11,11 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
 func TestGeminiNativeReasoningPricingUsesExplicitForwardedLevel(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, provider := range []string{"api_key", "oauth_ai_studio", "oauth_code_assist", "antigravity"} {
 		for _, stream := range []bool{false, true} {
 			for _, tc := range []struct {
@@ -138,7 +136,6 @@ func TestGeminiNativeReasoningPricingUsesExplicitForwardedLevel(t *testing.T) {
 }
 
 func TestGeminiChatCompatReasoningPricingIgnoresUnforwardedEffort(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, stream := range []bool{false, true} {
 		mode := "buffered"
 		if stream {

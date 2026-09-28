@@ -19,7 +19,6 @@ func newOpenAIWSExecutionScopeTestContext(headers map[string]string) *gin.Contex
 }
 
 func TestResolveOpenAIWSClientThreadID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cases := []struct {
 		name    string
 		headers map[string]string
@@ -83,7 +82,6 @@ func TestResolveOpenAIWSClientThreadID(t *testing.T) {
 }
 
 func TestResolveOpenAIWSExecutionLane(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cases := []struct {
 		name    string
 		headers map[string]string
@@ -177,7 +175,6 @@ func TestResolveOpenAIWSExecutionLane(t *testing.T) {
 }
 
 func TestResolveOpenAIWSExecutionScope(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	threadHeaders := map[string]string{
 		"session-id":               "root-session",
 		openAIWSTurnMetadataHeader: `{"session_id":"root-session","thread_id":"thread-a"}`,

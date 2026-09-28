@@ -52,7 +52,6 @@ func (u *blockingOpenAIResponseHeaderUpstream) DoWithTLS(req *http.Request, _ st
 }
 
 func TestSmartSchedulingStall_HTTP(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	repo := &openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
@@ -161,7 +160,6 @@ func TestOpenAINativeFirstOutputTimeoutIgnoresPreambleAndCleansReader(t *testing
 }
 
 func TestNewOpenAIFirstOutputTimeoutErrorRecordsCallerProxyAttribution(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	svc := &OpenAIGatewayService{}
 	proxyID := int64(10060)
@@ -200,7 +198,6 @@ func TestOpenAIFirstOutputTimeoutForReasoningEffort(t *testing.T) {
 }
 
 func TestSmartSchedulingStall_TimeoutModes(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
@@ -278,7 +275,6 @@ func TestSmartSchedulingStall_TimeoutModes(t *testing.T) {
 }
 
 func TestSmartSchedulingStall_Passthrough(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
 	upstream := &blockingOpenAIResponseHeaderUpstream{canceled: make(chan struct{})}
@@ -314,7 +310,6 @@ func TestSmartSchedulingStall_Passthrough(t *testing.T) {
 }
 
 func TestSmartSchedulingStall_PassthroughSemanticTimeout(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -348,7 +343,6 @@ func TestSmartSchedulingStall_PassthroughSemanticTimeout(t *testing.T) {
 }
 
 func TestSmartSchedulingStall_PassthroughTimeout(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
 	pr, pw := io.Pipe()
 	body := &firstOutputCloseTrackingBody{ReadCloser: pr, closed: make(chan struct{})}
@@ -385,7 +379,6 @@ func TestSmartSchedulingStall_PassthroughTimeout(t *testing.T) {
 }
 
 func TestSmartSchedulingStall_PassthroughStagingLimit(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
 	upstreamPayload := "data: " + strings.Repeat("x", int(openAIFirstOutputStageMaxBytes+1024))
 	rec := httptest.NewRecorder()

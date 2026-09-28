@@ -20,7 +20,6 @@ import (
 )
 
 func TestCompatibleImagesGeminiModels(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, model := range []string{"gemini-2.5-flash-image", "gemini-2.5-flash-image-preview", "gemini-3-pro-image", "gemini-3.1-flash-image"} {
 		t.Run(model, func(t *testing.T) {
 			body := []byte(fmt.Sprintf(`{"model":%q,"prompt":"draw"}`, model))
@@ -47,7 +46,6 @@ func TestCompatibleImagesGeminiModels(t *testing.T) {
 }
 
 func TestCompatibleImagesForwardGemini(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, kind := range []string{"generation", "json_edit", "multipart_edit", "composite_multipart_alias", "channel_mapping", "account_mapping"} {
 		t.Run(kind, func(t *testing.T) {
 			model := "gemini-3.1-flash-image"

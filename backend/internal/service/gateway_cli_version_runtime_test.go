@@ -26,7 +26,6 @@ func withCLIVersionResolverForTest(t *testing.T, resolver func() string) {
 // 中 cc_version 的版本号相同，且都等于运行期注入的版本号。头/体不一致会被 Anthropic
 // 判为非正版客户端。
 func TestBuildOAuthMimicRequest_RuntimeVersionConsistentBetweenHeaderAndBilling(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	const upgraded = "9.9.9"
 	withCLIVersionResolverForTest(t, func() string { return upgraded })
 

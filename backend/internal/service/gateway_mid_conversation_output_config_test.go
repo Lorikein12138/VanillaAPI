@@ -215,7 +215,6 @@ func TestBuildUpstreamRequestOAuthMimic_MidConversationOutputConfig(t *testing.T
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -288,7 +287,6 @@ func TestBuildUpstreamRequestAnthropicAPIKeyPassthrough_MidConversationOutputCon
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)

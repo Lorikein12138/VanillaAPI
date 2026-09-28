@@ -48,7 +48,6 @@ func (openAIImagesBalanceUpstream) Do(*http.Request, string, int64, int) (*http.
 }
 
 func TestForwardOpenAIImagesAPIKey_ClassifiesWrappedBalanceBeforeTransientFailover(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		name     string
 		endpoint string

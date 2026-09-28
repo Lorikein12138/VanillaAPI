@@ -114,7 +114,6 @@ func deepSeekChatHistoryWithEncryptedReasoning() []byte {
 
 func newDeepSeekChatFallbackContext(t *testing.T, body []byte) *gin.Context {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))

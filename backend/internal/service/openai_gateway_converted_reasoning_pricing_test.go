@@ -11,13 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
 func TestOpenAINativeAnthropicReasoningPricingUsesForwardedEffort(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, endpoint := range []string{"responses", "chat/completions"} {
 		for _, stream := range []bool{false, true} {
 			for _, tc := range []struct {
@@ -71,7 +69,6 @@ func TestOpenAINativeAnthropicReasoningPricingUsesForwardedEffort(t *testing.T) 
 }
 
 func TestOpenAIMessagesGLMReasoningPricingUsesForwardedEffort(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, stream := range []bool{false, true} {
 		for _, tc := range []struct {
 			effort     string

@@ -50,7 +50,6 @@ func requireGeminiTransportFailover(t *testing.T, err error) *UpstreamFailoverEr
 }
 
 func TestGeminiForwardNative_TransientTransportErrorFailsOverWithoutRetry(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc, httpStub, repo := newGeminiTransportErrorService(errors.New(`Post "https://upstream/v1beta/models/gemini-2.5-flash:generateContent": EOF`))
 	c, rec := newGeminiNativeTestContext(t)
 
@@ -76,7 +75,6 @@ func TestGeminiForwardNative_TransientTransportErrorFailsOverWithoutRetry(t *tes
 }
 
 func TestGeminiForwardNative_PersistentTransportErrorEvictsAccount(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc, httpStub, repo := newGeminiTransportErrorService(errors.New(`dial tcp 1.2.3.4:443: connect: connection refused`))
 	c, _ := newGeminiNativeTestContext(t)
 	account := geminiPoolModeAPIKeyAccount()
@@ -94,7 +92,6 @@ func TestGeminiForwardNative_PersistentTransportErrorEvictsAccount(t *testing.T)
 }
 
 func TestGeminiForwardNative_ClientCanceledReturnsOriginalError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc, httpStub, repo := newGeminiTransportErrorService(context.Canceled)
 	c, _ := newGeminiNativeTestContext(t)
 
@@ -110,7 +107,6 @@ func TestGeminiForwardNative_ClientCanceledReturnsOriginalError(t *testing.T) {
 }
 
 func TestGeminiForwardNative_CountTokensTransportErrorFallsBackToEstimate(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc, httpStub, _ := newGeminiTransportErrorService(errors.New("EOF"))
 	c, rec := newGeminiNativeTestContext(t)
 
@@ -125,7 +121,6 @@ func TestGeminiForwardNative_CountTokensTransportErrorFallsBackToEstimate(t *tes
 }
 
 func TestGeminiForward_TransportErrorFailsOverWithoutRetry(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc, httpStub, repo := newGeminiTransportErrorService(errors.New("read tcp 10.0.0.1:1234->1.2.3.4:443: read: connection reset by peer"))
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -142,7 +137,6 @@ func TestGeminiForward_TransportErrorFailsOverWithoutRetry(t *testing.T) {
 }
 
 func TestGeminiForwardAsChatCompletions_TransportErrorFailsOverWithoutRetry(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc, httpStub, repo := newGeminiTransportErrorService(errors.New("EOF"))
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
