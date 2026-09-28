@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -60,6 +61,7 @@ func setupFakeAnthropic(t *testing.T, handler *captureHandler) string {
 }
 
 type openAICaptureHandler struct {
+	mu                        sync.Mutex
 	lastBody                  map[string]any
 	lastHeaders               http.Header
 	lastPath                  string
@@ -68,26 +70,58 @@ type openAICaptureHandler struct {
 	responsesLeadingReasoning bool
 }
 
+type openAICaptureSnapshot struct {
+	lastBody    map[string]any
+	lastHeaders http.Header
+	lastPath    string
+	status      int
+}
+
+func (h *openAICaptureHandler) snapshot() openAICaptureSnapshot {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var body map[string]any
+	if h.lastBody != nil {
+		body = make(map[string]any, len(h.lastBody))
+		for key, value := range h.lastBody {
+			body[key] = value
+		}
+	}
+	return openAICaptureSnapshot{
+		lastBody:    body,
+		lastHeaders: h.lastHeaders.Clone(),
+		lastPath:    h.lastPath,
+		status:      h.status,
+	}
+}
+
 func (h *openAICaptureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.lastHeaders = r.Header.Clone()
-	h.lastPath = r.URL.Path
+	headers := r.Header.Clone()
+	path := r.URL.Path
 	defer func() { _ = r.Body.Close() }()
 	var parsed map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&parsed)
-	h.lastBody = parsed
 
+	h.mu.Lock()
+	h.lastHeaders = headers
+	h.lastPath = path
+	h.lastBody = parsed
 	if h.status == 0 {
 		h.status = http.StatusOK
 	}
+	status := h.status
+	h.mu.Unlock()
+
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(h.status)
+	w.WriteHeader(status)
 	if h.rawResponse != "" {
 		_, _ = w.Write([]byte(h.rawResponse))
 		return
 	}
 
 	answer := answerFromOpenAIRequest(parsed)
-	if h.lastPath == providerOpenAIResponsesPath {
+	if path == providerOpenAIResponsesPath {
 		output := []map[string]any{}
 		if h.responsesLeadingReasoning {
 			output = append(output, map[string]any{
@@ -175,23 +209,23 @@ func TestRunCheckForModel_OpenAI_DefaultChatRequest(t *testing.T) {
 	if res.Status != MonitorStatusOperational {
 		t.Fatalf("default chat request should pass challenge, got status=%s message=%q", res.Status, res.Message)
 	}
-	if h.lastPath != providerOpenAIPath {
-		t.Fatalf("expected chat completions path %q, got %q", providerOpenAIPath, h.lastPath)
+	if h.snapshot().lastPath != providerOpenAIPath {
+		t.Fatalf("expected chat completions path %q, got %q", providerOpenAIPath, h.snapshot().lastPath)
 	}
-	if h.lastBody["model"] != "gpt-test" {
-		t.Errorf("chat body should contain model=gpt-test, got %v", h.lastBody["model"])
+	if h.snapshot().lastBody["model"] != "gpt-test" {
+		t.Errorf("chat body should contain model=gpt-test, got %v", h.snapshot().lastBody["model"])
 	}
-	if _, ok := h.lastBody["messages"]; !ok {
+	if _, ok := h.snapshot().lastBody["messages"]; !ok {
 		t.Error("chat body should contain messages")
 	}
-	if _, ok := h.lastBody["instructions"]; ok {
+	if _, ok := h.snapshot().lastBody["instructions"]; ok {
 		t.Error("chat body must not contain top-level instructions")
 	}
-	if h.lastBody["stream"] != false {
-		t.Errorf("chat body should set stream=false, got %v", h.lastBody["stream"])
+	if h.snapshot().lastBody["stream"] != false {
+		t.Errorf("chat body should set stream=false, got %v", h.snapshot().lastBody["stream"])
 	}
-	if h.lastHeaders.Get("Authorization") != "Bearer sk-openai" {
-		t.Errorf("expected bearer auth header, got %q", h.lastHeaders.Get("Authorization"))
+	if h.snapshot().lastHeaders.Get("Authorization") != "Bearer sk-openai" {
+		t.Errorf("expected bearer auth header, got %q", h.snapshot().lastHeaders.Get("Authorization"))
 	}
 }
 
@@ -225,20 +259,20 @@ func TestRunCheckForModel_Grok_DefaultChatRequest(t *testing.T) {
 	if res.LatencyMs == nil {
 		t.Fatal("Grok request should record latency")
 	}
-	if h.lastPath != providerGrokPath {
-		t.Fatalf("expected Grok chat completions path %q, got %q", providerGrokPath, h.lastPath)
+	if h.snapshot().lastPath != providerGrokPath {
+		t.Fatalf("expected Grok chat completions path %q, got %q", providerGrokPath, h.snapshot().lastPath)
 	}
-	if h.lastBody["model"] != MonitorDefaultGrokModel {
-		t.Errorf("Grok body should contain model=%s, got %v", MonitorDefaultGrokModel, h.lastBody["model"])
+	if h.snapshot().lastBody["model"] != MonitorDefaultGrokModel {
+		t.Errorf("Grok body should contain model=%s, got %v", MonitorDefaultGrokModel, h.snapshot().lastBody["model"])
 	}
-	if _, ok := h.lastBody["messages"]; !ok {
+	if _, ok := h.snapshot().lastBody["messages"]; !ok {
 		t.Error("Grok body should contain messages")
 	}
-	if h.lastBody["stream"] != false {
-		t.Errorf("Grok body should set stream=false, got %v", h.lastBody["stream"])
+	if h.snapshot().lastBody["stream"] != false {
+		t.Errorf("Grok body should set stream=false, got %v", h.snapshot().lastBody["stream"])
 	}
-	if h.lastHeaders.Get("Authorization") != "Bearer xai-key" {
-		t.Errorf("expected Grok bearer auth header, got %q", h.lastHeaders.Get("Authorization"))
+	if h.snapshot().lastHeaders.Get("Authorization") != "Bearer xai-key" {
+		t.Errorf("expected Grok bearer auth header, got %q", h.snapshot().lastHeaders.Get("Authorization"))
 	}
 }
 
@@ -290,28 +324,28 @@ func TestRunCheckForModel_OpenAIResponses_DefaultRequest(t *testing.T) {
 	if res.Status != MonitorStatusOperational {
 		t.Fatalf("default responses request should pass challenge, got status=%s message=%q", res.Status, res.Message)
 	}
-	if h.lastPath != providerOpenAIResponsesPath {
-		t.Fatalf("expected responses path %q, got %q", providerOpenAIResponsesPath, h.lastPath)
+	if h.snapshot().lastPath != providerOpenAIResponsesPath {
+		t.Fatalf("expected responses path %q, got %q", providerOpenAIResponsesPath, h.snapshot().lastPath)
 	}
-	if h.lastBody["model"] != "gpt-test" {
-		t.Errorf("responses body should contain model=gpt-test, got %v", h.lastBody["model"])
+	if h.snapshot().lastBody["model"] != "gpt-test" {
+		t.Errorf("responses body should contain model=gpt-test, got %v", h.snapshot().lastBody["model"])
 	}
-	instructions, _ := h.lastBody["instructions"].(string)
+	instructions, _ := h.snapshot().lastBody["instructions"].(string)
 	if strings.TrimSpace(instructions) == "" {
 		t.Error("responses body should contain non-empty instructions")
 	}
-	input, _ := h.lastBody["input"].(string)
+	input, _ := h.snapshot().lastBody["input"].(string)
 	if strings.TrimSpace(input) == "" {
 		t.Error("responses body should contain non-empty input")
 	}
-	if _, ok := h.lastBody["messages"]; ok {
+	if _, ok := h.snapshot().lastBody["messages"]; ok {
 		t.Error("responses body must not contain chat messages")
 	}
-	if h.lastBody["stream"] != false {
-		t.Errorf("responses body should set stream=false, got %v", h.lastBody["stream"])
+	if h.snapshot().lastBody["stream"] != false {
+		t.Errorf("responses body should set stream=false, got %v", h.snapshot().lastBody["stream"])
 	}
-	if h.lastHeaders.Get("Authorization") != "Bearer sk-openai" {
-		t.Errorf("expected bearer auth header, got %q", h.lastHeaders.Get("Authorization"))
+	if h.snapshot().lastHeaders.Get("Authorization") != "Bearer sk-openai" {
+		t.Errorf("expected bearer auth header, got %q", h.snapshot().lastHeaders.Get("Authorization"))
 	}
 }
 
@@ -326,8 +360,8 @@ func TestRunCheckForModel_OpenAIResponses_SkipsLeadingReasoningItem(t *testing.T
 	if res.Status != MonitorStatusOperational {
 		t.Fatalf("responses request should find text after leading reasoning item, got status=%s message=%q", res.Status, res.Message)
 	}
-	if h.lastPath != providerOpenAIResponsesPath {
-		t.Fatalf("expected responses path %q, got %q", providerOpenAIResponsesPath, h.lastPath)
+	if h.snapshot().lastPath != providerOpenAIResponsesPath {
+		t.Fatalf("expected responses path %q, got %q", providerOpenAIResponsesPath, h.snapshot().lastPath)
 	}
 }
 
@@ -350,8 +384,8 @@ func TestRunCheckForModel_OpenAIResponsesReplaceMissingInstructionsFailsLocally(
 	if !strings.Contains(res.Message, "instructions and input are required") {
 		t.Errorf("expected local validation message about instructions/input, got %q", res.Message)
 	}
-	if h.lastPath != "" {
-		t.Errorf("invalid replace body should fail before HTTP request, got path %q", h.lastPath)
+	if h.snapshot().lastPath != "" {
+		t.Errorf("invalid replace body should fail before HTTP request, got path %q", h.snapshot().lastPath)
 	}
 }
 

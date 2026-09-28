@@ -92,6 +92,14 @@ function mountSection(g: ModelPlazaGroup) {
 const NOTE = 'modelPlaza.detail.longContextDisabledNote'
 
 describe('PlazaGroupSection 长上下文说明', () => {
+  it('passes video-specific rates to the pricing table', () => {
+    const wrapper = mountSection(group({ video_rate_independent: true, video_rate_multiplier: 0 }))
+    expect(wrapper.findComponent(PlazaModelPricingTable).props()).toMatchObject({
+      videoRateIndependent: true,
+      videoRateMultiplier: 0
+    })
+    wrapper.unmount()
+  })
   it('分组关闭阶梯且组内有官方阶梯模型时显示说明', () => {
     const wrapper = mountSection(group({ long_context_pricing_enabled: false }))
     expect(wrapper.text()).toContain(NOTE)

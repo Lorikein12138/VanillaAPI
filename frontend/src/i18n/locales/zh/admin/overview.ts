@@ -1140,7 +1140,7 @@ export default {
       },
       modelAllowlist: {
         title: '模型白名单',
-        hint: '开启后，白名单由绑定到此分组的账号身份映射自动计算；关闭时，下方手工选择会保存以供后续使用。',
+        hint: '开启后，不在白名单中的模型会被拒绝（404 model_not_found），模型列表接口也只展示白名单内的模型。条目支持精确模型 ID 与任意位置的 * 通配（如 gpt-*-codex）。注意：Claude Code 会用 haiku 系小模型做标题/摘要等探测，/messages/count_tokens 同样受白名单控制，请一并勾选所需的小模型。',
         autoHint: '自动合集包含所有所属账号的身份映射，包括停用或不可调度账号。开启时提交的手工条目会被忽略。',
         autoSourceCount: '来源账号：{count}',
         autoEmpty: '自动合集为空。请为绑定到此分组的账号添加身份映射。',
@@ -1151,12 +1151,11 @@ export default {
         selectAll: '全选',
         invertSelection: '反选',
         wildcardTag: '通配',
-        customPlaceholder: '自定义条目，如 claude-* 或 gpt-5.5-codex',
+        customPlaceholder: '自定义条目，如 gpt-*-codex 或 claude-*',
         addCustom: '添加',
         emptySelectionError: '模型白名单已开启，请至少选择或添加一个模型条目',
         errors: {
           empty: '请输入模型条目',
-          invalidWildcard: '通配符 * 只能出现在条目末尾',
           duplicate: '该条目已存在'
         }
       },

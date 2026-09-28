@@ -38,7 +38,7 @@ func TestAdminService_CreateGroup_AllowsEmptyAutomaticModelAllowlist(t *testing.
 	require.Empty(t, repo.created.ModelAllowlist.Models)
 }
 
-func TestAdminService_CreateGroup_IgnoresClientModelsInAutomaticMode(t *testing.T) {
+func TestAdminService_CreateGroup_AcceptsInteriorAllowlistWildcard(t *testing.T) {
 	repo := &groupRepoStubForAdmin{createID: 51}
 	svc := &adminServiceImpl{groupRepo: repo, accountRepo: &groupModelAllowlistMembersRepoStub{}}
 
@@ -46,9 +46,21 @@ func TestAdminService_CreateGroup_IgnoresClientModelsInAutomaticMode(t *testing.
 		Name:           "allowlist-wildcard-group",
 		Platform:       PlatformOpenAI,
 		RateMultiplier: 1,
-		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-*-5.4"}},
+		ModelAllowlist: GroupModelAllowlist{Enabled: false, Models: []string{"gpt-*-5.4"}},
 	})
 
+	require.NoError(t, err)
+	require.NotNil(t, repo.created)
+	require.Equal(t, []string{"gpt-*-5.4"}, repo.created.ModelAllowlist.Models)
+}
+
+func TestAdminService_CreateGroup_IgnoresClientModelsInAutomaticMode(t *testing.T) {
+	repo := &groupRepoStubForAdmin{createID: 51}
+	svc := &adminServiceImpl{groupRepo: repo, accountRepo: &groupModelAllowlistMembersRepoStub{}}
+	_, err := svc.CreateGroup(context.Background(), &CreateGroupInput{
+		Name: "allowlist-automatic-group", Platform: PlatformOpenAI, RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-*-5.4"}},
+	})
 	require.NoError(t, err)
 	require.NotNil(t, repo.created)
 	require.Empty(t, repo.created.ModelAllowlist.Models)
@@ -88,15 +100,27 @@ func TestAdminService_UpdateGroup_AllowsEmptyAutomaticModelAllowlist(t *testing.
 	require.Empty(t, repo.updated.ModelAllowlist.Models)
 }
 
-func TestAdminService_UpdateGroup_IgnoresClientModelsInAutomaticMode(t *testing.T) {
+func TestAdminService_UpdateGroup_AcceptsInteriorAllowlistWildcard(t *testing.T) {
 	existing := &Group{ID: 1, Name: "existing", Platform: PlatformOpenAI, Status: StatusActive}
 	repo := &groupRepoStubForAdmin{getByID: existing}
 	svc := &adminServiceImpl{groupRepo: repo, accountRepo: &groupModelAllowlistMembersRepoStub{}}
 
 	_, err := svc.UpdateGroup(context.Background(), existing.ID, &UpdateGroupInput{
-		ModelAllowlist: &GroupModelAllowlist{Enabled: true, Models: []string{"foo-*bar"}},
+		ModelAllowlist: &GroupModelAllowlist{Enabled: false, Models: []string{"foo-*bar"}},
 	})
 
+	require.NoError(t, err)
+	require.NotNil(t, repo.updated)
+	require.Equal(t, []string{"foo-*bar"}, repo.updated.ModelAllowlist.Models)
+}
+
+func TestAdminService_UpdateGroup_IgnoresClientModelsInAutomaticMode(t *testing.T) {
+	existing := &Group{ID: 1, Name: "existing", Platform: PlatformOpenAI, Status: StatusActive}
+	repo := &groupRepoStubForAdmin{getByID: existing}
+	svc := &adminServiceImpl{groupRepo: repo, accountRepo: &groupModelAllowlistMembersRepoStub{}}
+	_, err := svc.UpdateGroup(context.Background(), existing.ID, &UpdateGroupInput{
+		ModelAllowlist: &GroupModelAllowlist{Enabled: true, Models: []string{"foo-*bar"}},
+	})
 	require.NoError(t, err)
 	require.NotNil(t, repo.updated)
 	require.Empty(t, repo.updated.ModelAllowlist.Models)

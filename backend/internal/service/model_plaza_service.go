@@ -52,8 +52,8 @@ type PlazaGroup struct {
 	// = 档位价 × ImageRateMultiplier，不乘分组/用户专属倍率（与计费口径一致）。
 	ImageRateIndependent bool
 	ImageRateMultiplier  float64
-	// 视频按次实付倍率：VideoRateIndependent 为 true 时，视频计费模型的实付
-	// = 档位价 × VideoRateMultiplier，不乘分组/用户专属倍率（与 resolveVideoRateMultiplier 一致）。
+	// 视频和图片分别使用独立倍率；开启后对应计费模型实付倍率取各自配置，
+	// 不再乘分组/用户专属倍率。
 	VideoRateIndependent bool
 	VideoRateMultiplier  float64
 	// LongContextPricingEnabled 分组是否按上下文长度应用阶梯价；关闭时模型展示的是最低档。

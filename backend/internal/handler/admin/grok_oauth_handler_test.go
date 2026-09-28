@@ -25,6 +25,7 @@ import (
 type grokQuotaHandlerAccountRepo struct {
 	service.AccountRepository
 	account *service.Account
+	mu      sync.RWMutex
 	updates map[int64]map[string]any
 }
 
@@ -36,11 +37,27 @@ func (r *grokQuotaHandlerAccountRepo) GetByID(_ context.Context, id int64) (*ser
 }
 
 func (r *grokQuotaHandlerAccountRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.updates == nil {
 		r.updates = make(map[int64]map[string]any)
 	}
 	r.updates[id] = updates
 	return nil
+}
+
+func (r *grokQuotaHandlerAccountRepo) extraSnapshot(id int64) map[string]any {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	updates := r.updates[id]
+	if updates == nil {
+		return nil
+	}
+	snapshot := make(map[string]any, len(updates))
+	for key, value := range updates {
+		snapshot[key] = value
+	}
+	return snapshot
 }
 
 type grokQuotaHandlerUpstream struct {
@@ -159,7 +176,12 @@ func TestGrokOAuthHandlerQueryQuotaProbesUpstream(t *testing.T) {
 	}
 	require.True(t, responsesProbeSeen)
 	require.True(t, modelsSyncSeen)
-	require.NotNil(t, repo.updates[42])
+	var accountUpdates map[string]any
+	require.Eventually(t, func() bool {
+		accountUpdates = repo.extraSnapshot(42)
+		return accountUpdates != nil
+	}, time.Second, 10*time.Millisecond)
+	require.NotNil(t, accountUpdates)
 }
 
 func TestGrokOAuthHandlerResetQuotaReturnsUnsupported(t *testing.T) {
