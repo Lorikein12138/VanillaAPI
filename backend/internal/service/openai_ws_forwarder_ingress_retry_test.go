@@ -37,7 +37,6 @@ func (c *openAIWSSlowPongCaptureConn) Ping(ctx context.Context) error {
 
 // 轮次间隔后的预检 ping 经代理可能 2 秒多才回 pong：慢 pong 不应被判为连接失效而换连。
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreflightPingToleratesSlowPong(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	prevPreflightPingIdle := openAIWSIngressPreflightPingIdle
 	openAIWSIngressPreflightPingIdle = 0
 	defer func() {
@@ -165,7 +164,6 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_PreflightPingTol
 // 场景：池内两条空闲连接同批陈旧（首读即失败）。首轮拿到其一失败后重试，
 // 重试必须新建连接，而不是再从池里拿另一条同样陈旧的连接。
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_TurnRetryForcesFreshConn(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false

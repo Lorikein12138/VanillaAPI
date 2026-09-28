@@ -17,7 +17,6 @@ import (
 // turn state 必须落在执行作用域键下，而不是按 session_id 算出的会话哈希下，
 // 否则子智能体会覆盖父线程的绑定；同一线程在 WS 接入与 HTTP 路径之间也才能共享状态。
 func TestOpenAIGatewayService_Forward_WSv2_TurnStateBoundToExecutionScope(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +108,6 @@ func TestOpenAIGatewayService_Forward_WSv2_TurnStateBoundToExecutionScope(t *tes
 // session_id 的会话会落到同一个键共用 turn state，客户端自带线程标识时也会与 WS 接入路径
 // 按原始报文算出的键对不上。
 func TestOpenAIGatewayService_Forward_WSv2_ExecutionScopeUsesOriginalIdentity(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false

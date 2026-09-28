@@ -61,7 +61,6 @@ func writeOpenAIWSExecutionScopeRequest(t *testing.T, conn *coderws.Conn, body s
 // ctx_pool 下的 turn state 绑定与 store=false 的上游连接绑定必须落在执行作用域键下，
 // 不能落在按 session-id 算出的会话哈希下，否则子智能体会覆盖父线程的绑定。
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StateBoundToExecutionScope(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	cfg := newOpenAIWSExecutionScopeTestConfig()
 
 	captureConn := &openAIWSCaptureConn{
@@ -229,7 +228,6 @@ func (c *openAIWSGatedConn) Close() error {
 // 返回 A 与 B 的服务端返回值、A 客户端读结果的错误。
 func runOpenAIWSCodexThreadPair(t *testing.T, threadA, threadB string) (serverErrs []error, aReadErr error) {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	cfg := newOpenAIWSExecutionScopeTestConfig()
 
 	gatedConn := newOpenAIWSGatedConn(`{"type":"response.completed","response":{"id":"resp_thread_a","model":"gpt-5.1","usage":{"input_tokens":1,"output_tokens":1}}}`)

@@ -73,7 +73,6 @@ func TestNormalizeClaudeOAuthRequestBody_KeepsInjectedSystemBreakpoint(t *testin
 // 用 setup-token 账号构造 mimic 分支：IsOAuth 认它，取 token 只读 credentials，
 // 不碰 DB。UA 非 claude-cli 且无 metadata.user_id，于是 shouldMimicClaudeCode 成立。
 func TestForwardCountTokens_EnforcesCacheControlLimitOnMimicPath(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
