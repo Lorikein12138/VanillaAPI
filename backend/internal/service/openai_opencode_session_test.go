@@ -225,7 +225,6 @@ func TestOpenCodeSessionIDFromPayloadIgnoresEmptyBody(t *testing.T) {
 }
 
 func TestOpenCodeSessionForwardedByResponsesBuildersAfterAccountOverride(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := openCodeSessionTestAccount("https://opencode.ai/zen/v1")
 	body := []byte(`{"model":"gpt-5","input":"hello"}`)
@@ -259,7 +258,6 @@ func TestOpenCodeSessionForwardedByResponsesBuildersAfterAccountOverride(t *test
 }
 
 func TestOpenCodeSessionForwardedFromPromptCacheKeyWithoutCallerHeader(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := &Account{
 		ID:       1,
@@ -277,7 +275,6 @@ func TestOpenCodeSessionForwardedFromPromptCacheKeyWithoutCallerHeader(t *testin
 }
 
 func TestOpenCodeSessionMissingCallerValueKeepsExistingOverrideBehavior(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := openCodeSessionTestAccount("https://opencode.ai/zen/v1")
 	c := newOpenCodeSessionTestContext(t, "")
@@ -422,7 +419,6 @@ func TestOpenCodeUpstreamUserAgentCanonicalizedAfterPassthrough(t *testing.T) {
 	// 回归：客户端透传的编程库 UA（Python-urllib）会被 opencode.ai 前置
 	// Cloudflare 以 error code 1010 拦截并计入账号 403 strike，导致健康账号
 	// 被自动禁用。出站 UA 必须收敛为规范 opencode 客户端身份。
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := &Account{
 		ID:       1,
@@ -444,7 +440,6 @@ func TestOpenCodeUpstreamUserAgentCanonicalizedAfterPassthrough(t *testing.T) {
 }
 
 func TestCommandCodeUpstreamUserAgentCanonicalizedAfterPassthrough(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := &Account{
 		ID:       2,
@@ -466,7 +461,6 @@ func TestCommandCodeUpstreamUserAgentCanonicalizedAfterPassthrough(t *testing.T)
 }
 
 func TestOpenCodeUpstreamUserAgentYieldsToExplicitAccountOverride(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	account := &Account{
 		ID:       1,
@@ -490,7 +484,6 @@ func TestOpenCodeUpstreamUserAgentYieldsToExplicitAccountOverride(t *testing.T) 
 }
 
 func TestOpenCodeSessionForwardedByRawChatCompletionsAfterAccountOverride(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	upstream := &openCodeSessionHTTPUpstream{}
 	svc := openCodeSessionTestService()
 	svc.httpUpstream = upstream
@@ -509,7 +502,6 @@ func TestOpenCodeSessionForwardedByRawChatCompletionsAfterAccountOverride(t *tes
 }
 
 func TestOpenCodeSessionIsNotForwardedToOtherUpstreams(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()
 	body := []byte(`{"model":"gpt-5","input":"hello"}`)
 

@@ -37,7 +37,6 @@ func TestMappedResponseModelPreservesOtherData(t *testing.T) {
 
 // Exercise both streaming processors so substring fast paths cannot bypass the rewrite.
 func TestMappedResponseModelForwarding(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, passthrough := range []bool{false, true} {
 		for _, returned := range []string{"zhipu/glm-5.3", "glm-5.3-alias"} {
 			for _, mapped := range []string{"ZHIPU/GLM-5.3", "public"} {

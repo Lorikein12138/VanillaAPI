@@ -18,7 +18,6 @@ import (
 )
 
 func TestGatewayAnthropicCompatReasoningPricingUsesForwardedEffort(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	endpoints := []struct {
 		name string
 		path string

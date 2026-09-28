@@ -63,7 +63,6 @@ func TestMappedGPT55LiteCompatibility(t *testing.T) {
 }
 
 func TestMappedGPT55LiteBuildersPreserveIngressForFailover(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, passthrough := range []bool{false, true} {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest("POST", "/v1/responses", nil)

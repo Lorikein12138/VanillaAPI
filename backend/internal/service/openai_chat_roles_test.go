@@ -50,7 +50,6 @@ func (u *chatRoleContractUpstream) Do(req *http.Request, proxyURL string, accoun
 }
 
 func TestForwardAsChatCompletions_StrictDeveloperRole(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, stream := range []bool{false, true} {
 		for _, target := range []struct{ platform, model, base string }{
 			{PlatformDeepseek, "deepseek-flash", "https://api.deepseek.com"},

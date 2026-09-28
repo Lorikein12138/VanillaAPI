@@ -181,7 +181,6 @@ func TestIsGeminiEmptyResponseBody(t *testing.T) {
 }
 
 func TestMarkOpsStreamErrorValue_RequestScopedSkipsUpstreamSnapshot(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	newCtx := func() *gin.Context {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3.7-flash:generateContent", nil)
