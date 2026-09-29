@@ -3,9 +3,11 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -78,7 +80,7 @@ func (h *ChannelMonitorV2Handler) Dimensions(c *gin.Context) {
 	if !h.scopeFilter(c, &filter, admin) {
 		return
 	}
-	result, err := h.service.Dimensions(c.Request.Context(), filter)
+	result, err := h.service.Dimensions(c.Request.Context(), filter, admin)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -222,12 +224,37 @@ func (h *ChannelMonitorV2Handler) parseFilter(c *gin.Context) (service.ChannelMo
 		response.BadRequest(c, "invalid group_id")
 		return service.ChannelMonitorV2Filter{}, false
 	}
-	filter, err := h.service.ParseFilter(c.Query("range"), queryList(c, "platform"), queryList(c, "model"), groups)
+	asOf, err := parseChannelMonitorV2AsOf(c.Query("as_of"), time.Now().UTC())
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return service.ChannelMonitorV2Filter{}, false
+	}
+	filter, err := h.service.ParseFilterAt(c.Query("range"), queryList(c, "platform"), queryList(c, "model"), groups, asOf)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return service.ChannelMonitorV2Filter{}, false
 	}
 	return filter, true
+}
+
+func parseChannelMonitorV2AsOf(value string, now time.Time) (time.Time, error) {
+	now = now.UTC()
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return now, nil
+	}
+	asOf, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: must be an RFC3339 timestamp", service.ErrChannelMonitorV2InvalidAsOf)
+	}
+	asOf = asOf.UTC()
+	if asOf.After(now.Add(time.Minute)) {
+		return time.Time{}, fmt.Errorf("%w: timestamp is too far in the future", service.ErrChannelMonitorV2InvalidAsOf)
+	}
+	if asOf.Before(now.Add(-24 * time.Hour)) {
+		return time.Time{}, fmt.Errorf("%w: timestamp is too old", service.ErrChannelMonitorV2InvalidAsOf)
+	}
+	return asOf, nil
 }
 
 func queryList(c *gin.Context, key string) []string {

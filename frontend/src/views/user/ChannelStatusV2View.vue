@@ -568,6 +568,7 @@ const refreshing = ref(false)
 const expandedErrors = ref(new Set<string>())
 let controller: AbortController | null = null
 let sequence = 0
+let refreshAsOf = new Date().toISOString()
 let autoRefreshTimer: number | null = null
 
 const hasDimensionFilter = computed(
@@ -710,7 +711,7 @@ function syncQuery() {
   })
 }
 /** Dimensions catalog: range only — never re-filtered by platform/group/model selection. */
-async function loadDimensions(signal?: AbortSignal, id = sequence) {
+async function loadDimensions(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
   if (id === sequence) dimensionsReady.value = false
   const rangeOnly: MonitorFilter = {
     range: filter.value.range,
@@ -718,22 +719,22 @@ async function loadDimensions(signal?: AbortSignal, id = sequence) {
     groupIds: [],
     models: [],
   }
-  const next = await api.getDimensions(rangeOnly, isAdmin.value, signal)
+  const next = await api.getDimensions(rangeOnly, isAdmin.value, signal, asOf)
   if (id !== sequence) return
   dimensions.value = next
   dimensionsReady.value = true
 }
 
-async function loadMetrics(signal?: AbortSignal, id = sequence) {
+async function loadMetrics(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
   const [nextSnapshot, nextMatrix] = await Promise.all([
-    api.getSnapshot(filter.value, isAdmin.value, signal),
-    api.getMatrix(filter.value, matrixGroupBy.value, isAdmin.value, signal),
+    api.getSnapshot(filter.value, isAdmin.value, signal, asOf),
+    api.getMatrix(filter.value, matrixGroupBy.value, isAdmin.value, signal, asOf),
   ])
   if (id !== sequence) return
   snapshot.value = nextSnapshot
   matrix.value = nextMatrix
   scheduleAutoRefresh()
-  await loadTab(signal, id)
+  await loadTab(signal, id, asOf)
 }
 
 async function reload(silent = true) {
@@ -741,13 +742,15 @@ async function reload(silent = true) {
   const request = new AbortController()
   controller = request
   const id = ++sequence
+  const asOf = new Date().toISOString()
+  refreshAsOf = asOf
   refreshing.value = true
   if (!silent) loading.value = true
   try {
     // Catalog + metrics in parallel; catalog ignores dimension filters so options never shrink.
     await Promise.all([
-      loadDimensions(request.signal, id),
-      loadMetrics(request.signal, id),
+      loadDimensions(request.signal, id, asOf),
+      loadMetrics(request.signal, id, asOf),
     ])
   } catch (error) {
     if ((error as { name?: string }).name !== 'CanceledError') {
@@ -762,16 +765,21 @@ async function reload(silent = true) {
   }
 }
 
-/** When only range changes, still refresh dimensions; dimension filters only re-load metrics. */
+/** Filter and grouping changes start a fresh anchored read while dimensions stay range-only. */
 async function reloadMetricsOnly(silent = true) {
   controller?.abort()
   const request = new AbortController()
   controller = request
   const id = ++sequence
+  const asOf = new Date().toISOString()
+  refreshAsOf = asOf
   refreshing.value = true
   if (!silent) loading.value = true
   try {
-    await loadMetrics(request.signal, id)
+    await Promise.all([
+      loadDimensions(request.signal, id, asOf),
+      loadMetrics(request.signal, id, asOf),
+    ])
   } catch (error) {
     if ((error as { name?: string }).name !== 'CanceledError') {
       appStore.showError(extractApiErrorMessage(error, t('channelMonitorV2.loadFailed')))
@@ -784,15 +792,15 @@ async function reloadMetricsOnly(silent = true) {
     }
   }
 }
-async function loadTab(signal?: AbortSignal, id = sequence) {
+async function loadTab(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
   tabLoading.value = true
   try {
     if (activeTab.value === 'models') {
-      modelRows.value = (await api.getModels(filter.value, isAdmin.value, signal)).items || []
+      modelRows.value = (await api.getModels(filter.value, isAdmin.value, signal, asOf)).items || []
     } else if (activeTab.value === 'errors') {
-      errorRows.value = (await api.getErrors(filter.value, isAdmin.value, signal)).items || []
+      errorRows.value = (await api.getErrors(filter.value, isAdmin.value, signal, asOf)).items || []
     } else if (showUserRanking.value) {
-      userRows.value = (await api.getUsers(filter.value, isAdmin.value, signal)).items || []
+      userRows.value = (await api.getUsers(filter.value, isAdmin.value, signal, asOf)).items || []
     } else {
       userRows.value = []
     }

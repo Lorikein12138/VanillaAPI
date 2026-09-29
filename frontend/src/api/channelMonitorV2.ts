@@ -212,12 +212,13 @@ export interface MonitorUserRow {
   metrics: MonitorMetric
 }
 
-function params(filter: MonitorFilter) {
+function params(filter: MonitorFilter, asOf?: string) {
   return {
     range: filter.range,
     platform: filter.platforms.length ? filter.platforms : undefined,
     group_id: filter.groupIds.length ? filter.groupIds : undefined,
     model: filter.models.length ? filter.models : undefined,
+    as_of: asOf,
   }
 }
 
@@ -233,36 +234,36 @@ export function repeatedArrayParamsSerializer(values: Record<string, unknown>): 
   return search.toString()
 }
 
-const requestConfig = (filter: MonitorFilter, signal?: AbortSignal, extraParams: Record<string, unknown> = {}) => ({
-  params: { ...params(filter), ...extraParams },
+const requestConfig = (filter: MonitorFilter, signal?: AbortSignal, extraParams: Record<string, unknown> = {}, asOf?: string) => ({
+  params: { ...params(filter, asOf), ...extraParams },
   paramsSerializer: { serialize: repeatedArrayParamsSerializer },
   signal,
 })
 
 function base(admin: boolean) { return admin ? '/admin/channel-monitor-v2' : '/channel-monitor-v2' }
 
-export async function getDimensions(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<MonitorDimensions>(`${base(admin)}/dimensions`, requestConfig(filter, signal))
+export async function getDimensions(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<MonitorDimensions>(`${base(admin)}/dimensions`, requestConfig(filter, signal, {}, asOf))
   return data
 }
-export async function getSnapshot(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<MonitorSnapshot>(`${base(admin)}/snapshot`, requestConfig(filter, signal))
+export async function getSnapshot(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<MonitorSnapshot>(`${base(admin)}/snapshot`, requestConfig(filter, signal, {}, asOf))
   return data
 }
-export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, { group_by: groupBy }))
+export async function getMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, admin = false, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<MonitorMatrixResponse>(`${base(admin)}/matrix`, requestConfig(filter, signal, { group_by: groupBy }, asOf))
   return data
 }
-export async function getModels(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorModelRow[] }>(`${base(admin)}/models`, requestConfig(filter, signal))
+export async function getModels(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorModelRow[] }>(`${base(admin)}/models`, requestConfig(filter, signal, {}, asOf))
   return data
 }
-export async function getErrors(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorErrorRow[] }>(`${base(admin)}/errors`, requestConfig(filter, signal))
+export async function getErrors(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorErrorRow[] }>(`${base(admin)}/errors`, requestConfig(filter, signal, {}, asOf))
   return data
 }
-export async function getUsers(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
-  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(admin)}/users`, requestConfig(filter, signal))
+export async function getUsers(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(admin)}/users`, requestConfig(filter, signal, {}, asOf))
   return data
 }
 export async function getConfig() {
