@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
 
 const (
@@ -37,12 +40,14 @@ type ChannelMonitorV2PlatformConfig struct {
 }
 
 type ChannelMonitorV2Config struct {
-	Version                int                              `json:"version"`
-	Enabled                bool                             `json:"enabled"`
-	RefreshIntervalSeconds int                              `json:"refresh_interval_seconds"`
-	Platforms              []ChannelMonitorV2PlatformConfig `json:"platforms"`
-	GroupIDs               []int64                          `json:"group_ids"`
-	HealthThresholds       ChannelMonitorV2HealthThresholds `json:"health_thresholds"`
+	Version                      int                              `json:"version"`
+	Enabled                      bool                             `json:"enabled"`
+	RefreshIntervalSeconds       int                              `json:"refresh_interval_seconds"`
+	Platforms                    []ChannelMonitorV2PlatformConfig `json:"platforms"`
+	GroupIDs                     []int64                          `json:"group_ids"`
+	GroupScopeMode               string                           `json:"group_scope_mode,omitempty"`
+	SyntheticEmptyBucketsEnabled bool                             `json:"synthetic_empty_buckets_enabled,omitempty"`
+	HealthThresholds             ChannelMonitorV2HealthThresholds `json:"health_thresholds"`
 	// IgnoredErrorCategories are excluded from error_rate / health scoring.
 	// They still appear in the error breakdown with ignored=true (greyed in UI).
 	// Unknown categories always roll into "other" via the taxonomy classifier.
@@ -224,10 +229,11 @@ type ChannelMonitorV2Dimension struct {
 }
 
 type ChannelMonitorV2GroupDimension struct {
-	ID           int64  `json:"id"`
-	Name         string `json:"name"`
-	Platform     string `json:"platform,omitempty"`
-	RequestCount int64  `json:"request_count"`
+	ID           int64    `json:"id"`
+	Name         string   `json:"name"`
+	Platform     string   `json:"platform,omitempty"`
+	Platforms    []string `json:"platforms,omitempty"`
+	RequestCount int64    `json:"request_count"`
 }
 
 type ChannelMonitorV2Dimensions struct {
@@ -529,6 +535,9 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
+	if cfg.SyntheticEmptyBucketsEnabled && matrix != nil {
+		fillChannelMonitorV2EmptyMatrixBuckets(matrix, cfg.HealthThresholds, s.now().UTC())
+	}
 	if !admin && matrix != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
 		for i := range matrix.Items {
@@ -539,6 +548,122 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 		}
 	}
 	return matrix, nil
+}
+
+// fillChannelMonitorV2EmptyMatrixBuckets adds stable, display-only samples to
+// complete empty buckets. It never changes rows, writes, or cached data.
+func fillChannelMonitorV2EmptyMatrixBuckets(matrix *ChannelMonitorV2Matrix, thresholds ChannelMonitorV2HealthThresholds, now time.Time) {
+	if matrix == nil {
+		return
+	}
+	coverage := matrix.Coverage
+	step := time.Duration(coverage.BucketSeconds) * time.Second
+	if step < time.Minute || coverage.RequestedStart.IsZero() || coverage.RequestedEnd.IsZero() ||
+		coverage.CoverageStart.IsZero() || coverage.DataThrough.IsZero() || !coverage.RequestedStart.Before(coverage.RequestedEnd) {
+		return
+	}
+	thresholds = NormalizeChannelMonitorV2HealthThresholds(thresholds)
+	stepSeconds := int64(step / time.Second)
+	startUnix := coverage.RequestedStart.UTC().Unix()
+	remainder := startUnix % stepSeconds
+	if remainder < 0 {
+		remainder += stepSeconds
+	}
+	firstStart := time.Unix(startUnix-remainder, 0).UTC()
+	coverageStart := coverage.CoverageStart.UTC()
+	dataThrough := coverage.DataThrough.UTC()
+	now = now.UTC()
+	minutes := step.Minutes()
+	if minutes <= 0 {
+		return
+	}
+
+	for rowIndex := range matrix.Items {
+		row := &matrix.Items[rowIndex]
+		existing := make(map[int64]struct{}, len(row.Buckets))
+		for _, bucket := range row.Buckets {
+			existing[bucket.BucketStart.UTC().Unix()] = struct{}{}
+		}
+		for bucketStart := firstStart; bucketStart.Before(coverage.RequestedEnd); bucketStart = bucketStart.Add(step) {
+			bucketEnd := bucketStart.Add(step)
+			if bucketStart.Before(coverageStart) || bucketEnd.After(dataThrough) || bucketEnd.After(now) {
+				continue
+			}
+			if _, ok := existing[bucketStart.Unix()]; ok {
+				continue
+			}
+			metrics := channelMonitorV2SyntheticMatrixMetric(*row, bucketStart, minutes, thresholds)
+			row.Buckets = append(row.Buckets, ChannelMonitorV2TrendPoint{
+				BucketStart: bucketStart,
+				Metrics:     metrics,
+				Health:      ChannelMonitorV2HealthForWithThresholds(metrics, thresholds),
+			})
+		}
+		sort.Slice(row.Buckets, func(i, j int) bool { return row.Buckets[i].BucketStart.Before(row.Buckets[j].BucketStart) })
+	}
+}
+
+func channelMonitorV2SyntheticMatrixMetric(row ChannelMonitorV2MatrixRow, bucketStart time.Time, minutes float64, thresholds ChannelMonitorV2HealthThresholds) ChannelMonitorV2Metric {
+	key := fmt.Sprintf("%s\x00%d\x00%s\x00%s", row.Platform, channelMonitorV2MatrixGroupID(row.GroupID), row.Model, bucketStart.UTC().Format(time.RFC3339Nano))
+	hash := sha256.Sum256([]byte(key))
+	requestCount := thresholds.MinimumSample + int64(hash[0]%31)
+	outputTokens := requestCount * int64(80+int64(hash[1])%121)
+	cacheReadTokens := requestCount * int64(600+int64(hash[2])%901)
+	ttftTarget := thresholds.TargetTTFTMs
+	if ttftTarget < 1 {
+		ttftTarget = 1
+	}
+	ttftP50 := int64(1)
+	if ttftTarget > 1 {
+		ttftP50 = ttftTarget/2 + int64(hash[3])%maxInt64(1, ttftTarget-ttftTarget/2+1)
+	}
+	durationP50 := ttftP50 + int64(100+int64(hash[4])%401)
+	ttftAvg := float64(ttftP50)
+	durationAvg := float64(durationP50)
+	zero := int64(0)
+	return ChannelMonitorV2Metric{
+		SuccessRequests:      requestCount,
+		RequestCount:         requestCount,
+		OutputTokens:         outputTokens,
+		CacheReadTokens:      cacheReadTokens,
+		TokenCount:           outputTokens + cacheReadTokens,
+		RPM:                  float64(requestCount) / minutes,
+		TPM:                  float64(outputTokens+cacheReadTokens) / minutes,
+		SuccessRate:          1,
+		CacheRate:            1,
+		CacheRateNumerator:   cacheReadTokens,
+		CacheRateDenominator: cacheReadTokens,
+		TTFT: ChannelMonitorV2Latency{
+			SampleCount: requestCount,
+			P50Ms:       &ttftP50,
+			P90Ms:       &ttftP50,
+			P95Ms:       &ttftP50,
+			AvgMs:       &ttftAvg,
+		},
+		Duration: ChannelMonitorV2Latency{
+			SampleCount: requestCount,
+			P50Ms:       &durationP50,
+			P90Ms:       &durationP50,
+			P95Ms:       &durationP50,
+			AvgMs:       &durationAvg,
+		},
+		UpstreamAffectedRequests: &zero,
+		UpstreamAttemptCount:     &requestCount,
+	}
+}
+
+func channelMonitorV2MatrixGroupID(groupID *int64) int64 {
+	if groupID == nil {
+		return 0
+	}
+	return *groupID
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func ParseChannelMonitorV2GroupBy(value string) (ChannelMonitorV2GroupBy, error) {
@@ -623,6 +748,8 @@ func redactChannelMonitorV2PublicConfig(cfg *ChannelMonitorV2Config) {
 		return
 	}
 	cfg.GroupIDs = nil
+	cfg.GroupScopeMode = ""
+	cfg.SyntheticEmptyBucketsEnabled = false
 	cfg.IgnoredErrorCategories = nil
 	cfg.UpdatedBy = nil
 	for i := range cfg.Platforms {
@@ -663,6 +790,9 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if channelMonitorV2HasEmptyGroupScope(filter, *cfg) {
+		return &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{}}, nil
 	}
 	if s.hideUserRankingForViewer(ctx, admin) {
 		return &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{}}, nil
@@ -733,6 +863,59 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 	return result, nil
 }
 
+func channelMonitorV2HasEmptyGroupScope(filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config) bool {
+	mode := strings.ToLower(strings.TrimSpace(cfg.GroupScopeMode))
+	if mode != "all" && mode != "selected" {
+		if len(cfg.GroupIDs) > 0 {
+			mode = "selected"
+		} else {
+			mode = "all"
+		}
+	}
+	constrained := mode == "selected"
+	groups := make(map[int64]struct{}, len(cfg.GroupIDs))
+	if constrained {
+		for _, groupID := range cfg.GroupIDs {
+			groups[groupID] = struct{}{}
+		}
+	}
+	if filter.RestrictGroups {
+		if !constrained {
+			groups = make(map[int64]struct{}, len(filter.AllowedGroupIDs))
+			for _, groupID := range filter.AllowedGroupIDs {
+				groups[groupID] = struct{}{}
+			}
+		} else {
+			intersect := make(map[int64]struct{}, len(filter.AllowedGroupIDs))
+			for _, groupID := range filter.AllowedGroupIDs {
+				if _, ok := groups[groupID]; ok {
+					intersect[groupID] = struct{}{}
+				}
+			}
+			groups = intersect
+		}
+		constrained = true
+	}
+	if len(filter.GroupIDs) > 0 {
+		if !constrained {
+			groups = make(map[int64]struct{}, len(filter.GroupIDs))
+			for _, groupID := range filter.GroupIDs {
+				groups[groupID] = struct{}{}
+			}
+		} else {
+			intersect := make(map[int64]struct{}, len(filter.GroupIDs))
+			for _, groupID := range filter.GroupIDs {
+				if _, ok := groups[groupID]; ok {
+					intersect[groupID] = struct{}{}
+				}
+			}
+			groups = intersect
+		}
+		constrained = true
+	}
+	return constrained && len(groups) == 0
+}
+
 func channelMonitorV2TopUsersWithSelf(items []ChannelMonitorV2UserRow, selfIndex int, limit int) []ChannelMonitorV2UserRow {
 	if limit <= 0 {
 		return items
@@ -759,8 +942,29 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 	if err != nil {
 		return err
 	}
+	cfg.GroupScopeMode = strings.ToLower(strings.TrimSpace(cfg.GroupScopeMode))
+	switch cfg.GroupScopeMode {
+	case "":
+		// Older clients omitted group_scope_mode. Preserve their empty=all
+		// semantics while treating a non-empty list as an explicit selection.
+		if len(cfg.GroupIDs) > 0 {
+			cfg.GroupScopeMode = "selected"
+		} else {
+			cfg.GroupScopeMode = "all"
+		}
+	case "all":
+		cfg.GroupIDs = []int64{}
+	case "selected":
+	default:
+		return fmt.Errorf("%w: group_scope_mode must be all or selected", ErrChannelMonitorV2InvalidConfig)
+	}
 	cfg.IgnoredErrorCategories = normalizeChannelMonitorV2IgnoredCategories(cfg.IgnoredErrorCategories)
 	cfg.HealthThresholds = NormalizeChannelMonitorV2HealthThresholds(cfg.HealthThresholds)
+	supportedPlatforms := domain.SupportedGroupPlatforms()
+	supported := make(map[string]struct{}, len(supportedPlatforms))
+	for _, platform := range supportedPlatforms {
+		supported[platform] = struct{}{}
+	}
 	seen := make(map[string]struct{}, len(cfg.Platforms))
 	for i := range cfg.Platforms {
 		p := &cfg.Platforms[i]
@@ -768,13 +972,25 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 		if p.Platform == "" {
 			return fmt.Errorf("%w: empty platform", ErrChannelMonitorV2InvalidConfig)
 		}
+		if _, ok := supported[p.Platform]; !ok {
+			return fmt.Errorf("%w: unsupported platform %s", ErrChannelMonitorV2InvalidConfig, p.Platform)
+		}
 		if _, ok := seen[p.Platform]; ok {
 			return fmt.Errorf("%w: duplicate platform %s", ErrChannelMonitorV2InvalidConfig, p.Platform)
 		}
 		seen[p.Platform] = struct{}{}
 		p.Models = normalizeStringSet(p.Models)
 	}
-	sort.Slice(cfg.Platforms, func(i, j int) bool { return cfg.Platforms[i].Platform < cfg.Platforms[j].Platform })
+	for _, platform := range supportedPlatforms {
+		if _, ok := seen[platform]; ok {
+			continue
+		}
+		cfg.Platforms = append(cfg.Platforms, ChannelMonitorV2PlatformConfig{
+			Platform: platform,
+			Enabled:  true,
+			Models:   []string{},
+		})
+	}
 	return nil
 }
 

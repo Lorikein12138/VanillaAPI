@@ -81,6 +81,13 @@
             </button>
           </div>
         </div>
+        <div class="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+          <div>
+            <strong class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('channelMonitorV2.settings.syntheticEmptyBucketsTitle') }}</strong>
+            <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">{{ t('channelMonitorV2.settings.syntheticEmptyBucketsHint') }}</p>
+          </div>
+          <Toggle v-model="syntheticEmptyBucketsEnabled" />
+        </div>
       </div>
 
       <div class="card overflow-hidden !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
@@ -121,17 +128,19 @@
             <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('channelMonitorV2.settings.groupsTitle') }}</h3>
             <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">
               {{
-                draft.group_ids.length
-                  ? t('channelMonitorV2.settings.groupsSelected', { count: draft.group_ids.length })
+                draft.group_scope_mode === 'selected'
+                  ? draft.group_ids.length
+                    ? t('channelMonitorV2.settings.groupsSelected', { count: draft.group_ids.length })
+                    : t('channelMonitorV2.settings.groupsScopeEmpty')
                   : t('channelMonitorV2.settings.groupsAll')
               }}
             </p>
           </div>
           <button
-            v-if="draft.group_ids.length"
+            v-if="draft.group_scope_mode === 'selected'"
             type="button"
             class="btn btn-ghost btn-sm"
-            @click="draft.group_ids = []"
+            @click="setAllGroups"
           >
             {{ t('channelMonitorV2.settings.groupsAll') }}
           </button>
@@ -146,7 +155,7 @@
               <input
                 type="checkbox"
                 class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500/40"
-                :checked="draft.group_ids.includes(group.id)"
+                :checked="draft.group_scope_mode === 'all' || draft.group_ids.includes(group.id)"
                 @change="toggleGroup(group.id)"
               />
               <span class="min-w-0 flex-1 truncate font-medium text-gray-800 dark:text-gray-100">{{ group.name }}</span>
@@ -284,6 +293,12 @@ const saving = ref(false)
 const draft = ref<MonitorConfig | null>(null)
 const original = ref('')
 const groups = ref<AdminGroup[]>([])
+const syntheticEmptyBucketsEnabled = computed({
+  get: () => Boolean(draft.value?.synthetic_empty_buckets_enabled),
+  set: (value: boolean) => {
+    if (draft.value) draft.value.synthetic_empty_buckets_enabled = value
+  },
+})
 
 const dirty = computed(() => (draft.value ? JSON.stringify(draft.value) !== original.value : false))
 const namedModelCount = computed(
@@ -354,8 +369,19 @@ function setModels(platform: MonitorConfig['platforms'][number], event: Event) {
   ].sort()
 }
 
+function setAllGroups() {
+  if (!draft.value) return
+  draft.value.group_scope_mode = 'all'
+  draft.value.group_ids = []
+}
+
 function toggleGroup(id: number) {
   if (!draft.value) return
+  if (draft.value.group_scope_mode === 'all') {
+    draft.value.group_scope_mode = 'selected'
+    draft.value.group_ids = groups.value.map((group) => group.id).filter((groupId) => groupId !== id).sort((a, b) => a - b)
+    return
+  }
   draft.value.group_ids = draft.value.group_ids.includes(id)
     ? draft.value.group_ids.filter((value) => value !== id)
     : [...draft.value.group_ids, id].sort((a, b) => a - b)
@@ -384,22 +410,34 @@ function platformLabel(value: string) {
       anthropic: 'Claude',
       openai: 'OpenAI',
       grok: 'Grok',
-      kiro: 'Kiro',
       gemini: 'Gemini',
       antigravity: 'Antigravity',
       kimi: 'Kimi',
       zhipu: 'Zhipu GLM',
       deepseek: 'DeepSeek',
       minimax: 'MiniMax',
+      opencode_go: 'OpenCode',
       composite: 'Composite',
     } as Record<string, string>
   )[value] || value
 }
 
-function normalizeConfig(value: MonitorConfig): MonitorConfig {
+function normalizeConfig(value: MonitorConfig, availableGroups?: AdminGroup[]): MonitorConfig {
   const ignored = value.ignored_error_categories
+  const groupIDs = value.group_ids || []
+  const groupScopeMode = value.group_scope_mode === 'all' || value.group_scope_mode === 'selected'
+    ? value.group_scope_mode
+    : groupIDs.length > 0
+      ? 'selected'
+      : 'all'
+  const existingGroupIDs = availableGroups ? new Set(availableGroups.map((group) => group.id)) : null
   return {
     ...value,
+    group_scope_mode: groupScopeMode,
+    group_ids: groupScopeMode === 'all'
+      ? []
+      : groupIDs.filter((id) => existingGroupIDs == null || existingGroupIDs.has(id)),
+    synthetic_empty_buckets_enabled: value.synthetic_empty_buckets_enabled ?? false,
     health_thresholds: { ...defaultThresholds, ...(value.health_thresholds || {}) },
     // Preserve explicit empty arrays from the server (operator cleared all).
     ignored_error_categories: [
@@ -412,9 +450,9 @@ async function load() {
   loading.value = true
   try {
     const [value, groupRows] = await Promise.all([getConfig(), adminAPI.groups.getAllIncludingInactive()])
-    const normalized = normalizeConfig(value)
-    draft.value = structuredClone(normalized)
     groups.value = groupRows
+    const normalized = normalizeConfig(value, groupRows)
+    draft.value = structuredClone(normalized)
     original.value = JSON.stringify(normalized)
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t('channelMonitorV2.settings.loadFailed')))

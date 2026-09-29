@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
@@ -24,12 +25,14 @@ func (r *channelMonitorV2Repository) GetConfig(ctx context.Context) (*service.Ch
 	var platforms, thresholds []byte
 	err := r.db.QueryRowContext(ctx, `
 		SELECT version, enabled, refresh_interval_seconds, platforms, group_ids,
+		       group_scope_mode, synthetic_empty_buckets_enabled,
 		       COALESCE(ignored_error_categories, '{}'),
 		       COALESCE(health_thresholds, '{}'::jsonb),
 		       updated_at, updated_by
 		FROM channel_monitor_v2_config WHERE id = 1`).Scan(
 		&cfg.Version, &cfg.Enabled, &cfg.RefreshIntervalSeconds, &platforms,
-		pq.Array(&cfg.GroupIDs), pq.Array(&cfg.IgnoredErrorCategories),
+		pq.Array(&cfg.GroupIDs), &cfg.GroupScopeMode, &cfg.SyntheticEmptyBucketsEnabled,
+		pq.Array(&cfg.IgnoredErrorCategories),
 		&thresholds,
 		&cfg.UpdatedAt, &cfg.UpdatedBy,
 	)
@@ -68,17 +71,20 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 	err = r.db.QueryRowContext(ctx, `
 		UPDATE channel_monitor_v2_config
 		SET version = version + 1, enabled = $1, refresh_interval_seconds = $2,
-		    platforms = $3, group_ids = $4, ignored_error_categories = $5,
-		    health_thresholds = $6, updated_by = $7, updated_at = NOW()
-		WHERE id = 1 AND version = $8
+		    platforms = $3, group_ids = $4, group_scope_mode = $5,
+		    synthetic_empty_buckets_enabled = $6, ignored_error_categories = $7,
+		    health_thresholds = $8, updated_by = $9, updated_at = NOW()
+		WHERE id = 1 AND version = $10
 		RETURNING version, enabled, refresh_interval_seconds, platforms, group_ids,
+		          group_scope_mode, synthetic_empty_buckets_enabled,
 		          COALESCE(ignored_error_categories, '{}'),
 		          COALESCE(health_thresholds, '{}'::jsonb),
 		          updated_at, updated_by`,
 		cfg.Enabled, cfg.RefreshIntervalSeconds, platforms, pq.Array(cfg.GroupIDs),
-		pq.Array(cfg.IgnoredErrorCategories), thresholds, cfg.UpdatedBy, expectedVersion,
+		cfg.GroupScopeMode, cfg.SyntheticEmptyBucketsEnabled, pq.Array(cfg.IgnoredErrorCategories), thresholds, cfg.UpdatedBy, expectedVersion,
 	).Scan(&updated.Version, &updated.Enabled, &updated.RefreshIntervalSeconds, &raw,
-		pq.Array(&updated.GroupIDs), pq.Array(&updated.IgnoredErrorCategories),
+		pq.Array(&updated.GroupIDs), &updated.GroupScopeMode, &updated.SyntheticEmptyBucketsEnabled,
+		pq.Array(&updated.IgnoredErrorCategories),
 		&rawThresholds,
 		&updated.UpdatedAt, &updated.UpdatedBy)
 	if err == sql.ErrNoRows {
@@ -151,9 +157,10 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 	// different upstream models and must not share counts.
 	modelCounts := map[string]modelValue{}
 	type groupValue struct {
-		name     string
-		platform string
-		count    int64
+		name      string
+		platform  string
+		platforms []string
+		count     int64
 	}
 	groupCounts := map[int64]groupValue{}
 	for _, platform := range channelMonitorV2EnabledPlatforms(cfg) {
@@ -167,12 +174,19 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 			}
 		}
 	}
-	groupInfo, err := r.loadChannelMonitorV2GroupInfo(ctx, configuredChannelMonitorV2GroupIDs(catalogFilter, cfg))
+	groupIDs := configuredChannelMonitorV2GroupIDs(catalogFilter, cfg)
+	if channelMonitorV2GroupScopeMode(cfg) == "all" && !catalogFilter.RestrictGroups {
+		groupIDs, err = r.listUndeletedGroupIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	groupInfo, err := r.loadChannelMonitorV2GroupInfo(ctx, groupIDs)
 	if err != nil {
 		return nil, err
 	}
 	for groupID, info := range groupInfo {
-		groupCounts[groupID] = groupValue{name: info.name, platform: info.platform, count: 0}
+		groupCounts[groupID] = groupValue{name: info.name, platform: info.platform, platforms: append([]string(nil), info.platforms...)}
 	}
 	for rows.Next() {
 		var platform, groupName, groupPlatform, model string
@@ -194,6 +208,9 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 			current.name = groupName
 			current.platform = groupPlatform
 			current.count += count
+			if current.platform == domain.PlatformComposite {
+				current.platforms = appendChannelMonitorV2Platform(current.platforms, platform)
+			}
 			groupCounts[groupID] = current
 		}
 	}
@@ -209,7 +226,15 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 		result.Models = append(result.Models, service.ChannelMonitorV2Dimension{Value: value, Label: channelMonitorV2ModelLabel(value), Platform: meta.platform, RequestCount: meta.count})
 	}
 	for id, value := range groupCounts {
-		result.Groups = append(result.Groups, service.ChannelMonitorV2GroupDimension{ID: id, Name: value.name, Platform: value.platform, RequestCount: value.count})
+		effectivePlatforms := channelMonitorV2EffectiveGroupPlatforms(channelMonitorV2GroupInfo{platform: value.platform, platforms: value.platforms}, channelMonitorV2EnabledPlatforms(cfg))
+		if len(effectivePlatforms) == 0 {
+			continue
+		}
+		var platforms []string
+		if value.platform == domain.PlatformComposite {
+			platforms = effectivePlatforms
+		}
+		result.Groups = append(result.Groups, service.ChannelMonitorV2GroupDimension{ID: id, Name: value.name, Platform: value.platform, Platforms: platforms, RequestCount: value.count})
 	}
 	sort.Slice(result.Platforms, func(i, j int) bool { return result.Platforms[i].RequestCount > result.Platforms[j].RequestCount })
 	sort.Slice(result.Models, func(i, j int) bool { return result.Models[i].RequestCount > result.Models[j].RequestCount })
@@ -384,11 +409,11 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 	}
 
 	seedGroupIDs := configuredChannelMonitorV2GroupIDs(filter, cfg)
-	// Empty config group list means all groups — load active groups so matrix seed
-	// can materialize real platform/group rows (not bare platform placeholders).
-	if len(seedGroupIDs) == 0 && !filter.RestrictGroups &&
+	// In all mode, load every existing group, including inactive groups, so a
+	// zero-traffic group remains selectable and can be seeded into the matrix.
+	if channelMonitorV2GroupScopeMode(cfg) == "all" && len(seedGroupIDs) == 0 && !filter.RestrictGroups &&
 		(groupBy == service.ChannelMonitorV2GroupByPlatformGroup || groupBy == service.ChannelMonitorV2GroupByPlatformGroupModel) {
-		allIDs, loadErr := r.listActiveGroupIDs(ctx)
+		allIDs, loadErr := r.listUndeletedGroupIDs(ctx)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -397,6 +422,13 @@ func (r *channelMonitorV2Repository) GetMatrix(ctx context.Context, filter servi
 	groupInfo, err := r.loadChannelMonitorV2GroupInfo(ctx, seedGroupIDs)
 	if err != nil {
 		return nil, err
+	}
+	for _, fact := range facts {
+		info, ok := groupInfo[fact.GroupID]
+		if ok && info.platform == domain.PlatformComposite {
+			info.platforms = appendChannelMonitorV2Platform(info.platforms, fact.Platform)
+			groupInfo[fact.GroupID] = info
+		}
 	}
 	accs := seedChannelMonitorV2MatrixAccumulators(filter, cfg, groupBy, groupInfo)
 	for _, fact := range facts {
@@ -519,8 +551,8 @@ func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filte
 	groupIDs := []int64{0}
 	if needsGroup {
 		groupIDs = configuredChannelMonitorV2GroupIDs(filter, cfg)
-		if len(groupIDs) == 0 && !filter.RestrictGroups {
-			// Empty config group list means "all groups": use discovered active groups.
+		if len(groupIDs) == 0 && channelMonitorV2GroupScopeMode(cfg) == "all" && !filter.RestrictGroups {
+			// An all-scope caller uses every existing group discovered for this query.
 			for id := range groupInfo {
 				groupIDs = append(groupIDs, id)
 			}
@@ -545,7 +577,7 @@ func seedChannelMonitorV2MatrixAccumulators(filter service.ChannelMonitorV2Filte
 				if groupID <= 0 {
 					continue
 				}
-				if info.platform == "" || info.platform != platform {
+				if !containsString(channelMonitorV2EffectiveGroupPlatforms(info, platforms), platform) {
 					continue
 				}
 			}
@@ -605,45 +637,67 @@ func configuredChannelMonitorV2GroupIDs(filter service.ChannelMonitorV2Filter, c
 }
 
 func channelMonitorV2ScopedGroupIDs(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) ([]int64, bool) {
-	groups := append([]int64(nil), cfg.GroupIDs...)
+	groups := []int64(nil)
+	constrained := false
+	if channelMonitorV2GroupScopeMode(cfg) == "selected" {
+		groups = append([]int64{}, cfg.GroupIDs...)
+		constrained = true
+	}
 	if filter.RestrictGroups {
-		if len(groups) > 0 {
+		if constrained {
 			groups = intersectInt64(groups, filter.AllowedGroupIDs)
 		} else {
 			groups = append([]int64(nil), filter.AllowedGroupIDs...)
 		}
+		constrained = true
 		if len(groups) == 0 {
 			return nil, true
 		}
 	}
 	if len(filter.GroupIDs) > 0 {
-		if len(groups) > 0 {
+		if constrained {
 			groups = intersectInt64(groups, filter.GroupIDs)
 		} else {
 			groups = append([]int64(nil), filter.GroupIDs...)
 		}
+		constrained = true
 		if len(groups) == 0 {
 			return nil, true
 		}
+	}
+	if constrained && len(groups) == 0 {
+		return nil, true
 	}
 	return groups, false
 }
 
 func channelMonitorV2RestrictedGroupScopeEmpty(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) bool {
-	if !filter.RestrictGroups {
-		return false
-	}
 	_, empty := channelMonitorV2ScopedGroupIDs(filter, cfg)
 	return empty
 }
 
-type channelMonitorV2GroupInfo struct {
-	name     string
-	platform string
+func channelMonitorV2GroupScopeMode(cfg service.ChannelMonitorV2Config) string {
+	switch strings.ToLower(strings.TrimSpace(cfg.GroupScopeMode)) {
+	case "selected":
+		return "selected"
+	case "all":
+		return "all"
+	default:
+		if len(cfg.GroupIDs) > 0 {
+			return "selected"
+		}
+		return "all"
+	}
 }
 
-func (r *channelMonitorV2Repository) listActiveGroupIDs(ctx context.Context) ([]int64, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id FROM groups WHERE deleted_at IS NULL AND status = 'active' ORDER BY id`)
+type channelMonitorV2GroupInfo struct {
+	name      string
+	platform  string
+	platforms []string
+}
+
+func (r *channelMonitorV2Repository) listUndeletedGroupIDs(ctx context.Context) ([]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM groups WHERE deleted_at IS NULL ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +718,20 @@ func (r *channelMonitorV2Repository) loadChannelMonitorV2GroupInfo(ctx context.C
 	if len(groupIDs) == 0 {
 		return out, nil
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id, COALESCE(name, ''), lower(COALESCE(NULLIF(TRIM(platform), ''), 'unknown')) FROM groups WHERE id = ANY($1) AND deleted_at IS NULL AND status = 'active'`, pq.Array(groupIDs))
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT g.id,
+		       COALESCE(g.name, ''),
+		       lower(COALESCE(NULLIF(TRIM(g.platform), ''), 'unknown')),
+		       COALESCE(
+		           array_agg(DISTINCT lower(TRIM(a.platform)) ORDER BY lower(TRIM(a.platform)))
+		               FILTER (WHERE a.id IS NOT NULL AND NULLIF(TRIM(a.platform), '') IS NOT NULL),
+		           '{}'::text[]
+		       )
+		FROM groups g
+		LEFT JOIN account_groups ag ON ag.group_id = g.id
+		LEFT JOIN accounts a ON a.id = ag.account_id AND a.deleted_at IS NULL
+		WHERE g.id = ANY($1) AND g.deleted_at IS NULL
+		GROUP BY g.id, g.name, g.platform`, pq.Array(groupIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -672,15 +739,47 @@ func (r *channelMonitorV2Repository) loadChannelMonitorV2GroupInfo(ctx context.C
 	for rows.Next() {
 		var id int64
 		var name, platform string
-		if err := rows.Scan(&id, &name, &platform); err != nil {
+		var accountPlatforms []string
+		if err := rows.Scan(&id, &name, &platform, pq.Array(&accountPlatforms)); err != nil {
 			return nil, err
 		}
-		out[id] = channelMonitorV2GroupInfo{name: name, platform: platform}
+		out[id] = channelMonitorV2GroupInfo{name: name, platform: platform, platforms: accountPlatforms}
 	}
 	return out, rows.Err()
 }
 
+func appendChannelMonitorV2Platform(platforms []string, platform string) []string {
+	if platform == "" || containsString(platforms, platform) {
+		return platforms
+	}
+	return append(platforms, platform)
+}
+
+func channelMonitorV2EffectiveGroupPlatforms(info channelMonitorV2GroupInfo, enabledPlatforms []string) []string {
+	available := make(map[string]struct{}, len(info.platforms)+1)
+	if info.platform == domain.PlatformComposite {
+		for _, platform := range info.platforms {
+			available[strings.ToLower(strings.TrimSpace(platform))] = struct{}{}
+		}
+	} else if info.platform != "" {
+		available[info.platform] = struct{}{}
+	}
+	result := make([]string, 0, len(available))
+	for _, platform := range enabledPlatforms {
+		if _, ok := available[platform]; ok {
+			result = append(result, platform)
+		}
+	}
+	if len(result) == 0 && info.platform == domain.PlatformComposite && containsString(enabledPlatforms, domain.PlatformComposite) {
+		return []string{domain.PlatformComposite}
+	}
+	return result
+}
+
 func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, includeAdmin bool) (*service.ChannelMonitorV2List[service.ChannelMonitorV2ErrorRow], error) {
+	if channelMonitorV2RestrictedGroupScopeEmpty(filter, cfg) {
+		return &service.ChannelMonitorV2List[service.ChannelMonitorV2ErrorRow]{Items: []service.ChannelMonitorV2ErrorRow{}}, nil
+	}
 	coverage, err := r.loadCoverage(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -749,6 +848,11 @@ func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filte
 		"current_error.created_at < $2",
 		"NOT current_error.is_count_tokens",
 		"(COALESCE(current_error.status_code, 0) >= 400 OR current_error.error_type = 'cyber_policy')",
+		`(COALESCE(current_error.group_id, 0) = 0 OR EXISTS (
+				SELECT 1 FROM groups current_error_group
+				WHERE current_error_group.id = current_error.group_id
+				  AND current_error_group.deleted_at IS NULL
+		))`,
 		`(NULLIF(current_error.request_id, '') IS NULL OR NOT EXISTS (
 				SELECT 1 FROM ops_error_logs newer
 				WHERE newer.request_id = current_error.request_id
@@ -851,6 +955,9 @@ func sanitizeChannelMonitorV2ErrorDetail(message string) string {
 }
 
 func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, admin bool) (*service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow], error) {
+	if channelMonitorV2RestrictedGroupScopeEmpty(filter, cfg) {
+		return &service.ChannelMonitorV2List[service.ChannelMonitorV2UserRow]{Items: []service.ChannelMonitorV2UserRow{}}, nil
+	}
 	coverage, err := r.loadCoverage(ctx, filter)
 	if err != nil {
 		return nil, err
@@ -1160,7 +1267,11 @@ func channelMonitorV2WhereWithRollup(filter service.ChannelMonitorV2Filter, cfg 
 }
 
 func channelMonitorV2Where(filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, alias string) (string, []any) {
-	conditions := []string{alias + ".bucket_start >= $1", alias + ".bucket_start < $2"}
+	conditions := []string{
+		alias + ".bucket_start >= $1",
+		alias + ".bucket_start < $2",
+		fmt.Sprintf("(%s.group_id = 0 OR EXISTS (SELECT 1 FROM groups channel_monitor_v2_group WHERE channel_monitor_v2_group.id = %s.group_id AND channel_monitor_v2_group.deleted_at IS NULL))", alias, alias),
+	}
 	args := []any{filter.Start, filter.End}
 	platforms := channelMonitorV2EnabledPlatforms(cfg)
 	if len(filter.Platforms) > 0 {
@@ -1183,11 +1294,24 @@ func channelMonitorV2Where(filter service.ChannelMonitorV2Filter, cfg service.Ch
 }
 
 func channelMonitorV2EnabledPlatforms(cfg service.ChannelMonitorV2Config) []string {
+	supported := make(map[string]struct{}, len(domain.SupportedGroupPlatforms()))
+	for _, platform := range domain.SupportedGroupPlatforms() {
+		supported[platform] = struct{}{}
+	}
 	out := []string{}
+	seen := make(map[string]struct{}, len(cfg.Platforms))
 	for _, p := range cfg.Platforms {
-		if p.Enabled {
-			out = append(out, p.Platform)
+		if !p.Enabled {
+			continue
 		}
+		if _, ok := supported[p.Platform]; !ok {
+			continue
+		}
+		if _, ok := seen[p.Platform]; ok {
+			continue
+		}
+		seen[p.Platform] = struct{}{}
+		out = append(out, p.Platform)
 	}
 	return out
 }

@@ -2,10 +2,16 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -170,8 +176,11 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	}
 	require.NoError(t, normalizeChannelMonitorV2Config(&cfg))
 	require.Equal(t, 300, cfg.RefreshIntervalSeconds)
-	require.Equal(t, "anthropic", cfg.Platforms[0].Platform)
+	require.Equal(t, "openai", cfg.Platforms[0].Platform)
+	require.Equal(t, "anthropic", cfg.Platforms[1].Platform)
+	require.Len(t, cfg.Platforms, 11)
 	require.Equal(t, []int64{1, 3}, cfg.GroupIDs)
+	require.Equal(t, "selected", cfg.GroupScopeMode)
 
 	cfg.RefreshIntervalSeconds = 120
 	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
@@ -179,6 +188,103 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	cfg.RefreshIntervalSeconds = 60
 	cfg.GroupIDs = []int64{0}
 	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
+
+	cfg.GroupIDs = nil
+	cfg.Platforms = []ChannelMonitorV2PlatformConfig{{Platform: "kiro", Enabled: true}}
+	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
+	cfg.Platforms = []ChannelMonitorV2PlatformConfig{{Platform: "future", Enabled: true}}
+	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
+	cfg.Platforms = []ChannelMonitorV2PlatformConfig{{Platform: "openai"}, {Platform: "openai"}}
+	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
+}
+
+func TestChannelMonitorV2ConfigScopeCompatibility(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		groupIDs  []int64
+		wantMode  string
+		wantGroup []int64
+		synthetic bool
+		wantErr   bool
+	}{
+		{name: "legacy empty means all", wantMode: "all", wantGroup: []int64{}},
+		{name: "legacy nonempty means selected", groupIDs: []int64{4, 2}, wantMode: "selected", wantGroup: []int64{2, 4}, synthetic: true},
+		{name: "selected can be empty", mode: "selected", wantMode: "selected", wantGroup: []int64{}, synthetic: true},
+		{name: "all clears stale ids", mode: "all", groupIDs: []int64{4}, wantMode: "all", wantGroup: []int64{}},
+		{name: "invalid mode rejected", mode: "sometimes", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := ChannelMonitorV2Config{
+				GroupScopeMode:               test.mode,
+				GroupIDs:                     append([]int64(nil), test.groupIDs...),
+				SyntheticEmptyBucketsEnabled: test.synthetic,
+			}
+			err := normalizeChannelMonitorV2Config(&cfg)
+			if test.wantErr {
+				require.ErrorIs(t, err, ErrChannelMonitorV2InvalidConfig)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.wantMode, cfg.GroupScopeMode)
+			require.Equal(t, test.wantGroup, cfg.GroupIDs)
+			require.Equal(t, test.synthetic, cfg.SyntheticEmptyBucketsEnabled)
+			require.Len(t, cfg.Platforms, 11)
+		})
+	}
+}
+
+func TestChannelMonitorV2UsersDoesNotAddSelfForAnEmptyConfiguredScope(t *testing.T) {
+	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{
+		Enabled:        true,
+		GroupScopeMode: "selected",
+		GroupIDs:       []int64{},
+	}}
+	users, err := NewChannelMonitorV2Service(repo).Users(context.Background(), ChannelMonitorV2Filter{}, 42, false)
+	require.NoError(t, err)
+	require.Empty(t, users.Items)
+	require.NotNil(t, users.Items)
+
+	filter := ChannelMonitorV2Filter{RestrictGroups: true}
+	require.True(t, channelMonitorV2HasEmptyGroupScope(filter, ChannelMonitorV2Config{GroupScopeMode: "all"}))
+	require.True(t, channelMonitorV2HasEmptyGroupScope(
+		ChannelMonitorV2Filter{GroupIDs: []int64{9}, AllowedGroupIDs: []int64{3}, RestrictGroups: true},
+		ChannelMonitorV2Config{GroupScopeMode: "all"},
+	))
+	require.False(t, channelMonitorV2HasEmptyGroupScope(ChannelMonitorV2Filter{}, ChannelMonitorV2Config{GroupScopeMode: "all"}))
+}
+
+func TestChannelMonitorV2SupportedPlatformCatalogParity(t *testing.T) {
+	cfg := ChannelMonitorV2Config{}
+	require.NoError(t, normalizeChannelMonitorV2Config(&cfg))
+	apiPlatforms := make([]string, 0, len(cfg.Platforms))
+	for _, platform := range cfg.Platforms {
+		apiPlatforms = append(apiPlatforms, platform.Platform)
+	}
+	require.Equal(t, domain.SupportedGroupPlatforms(), apiPlatforms)
+	require.Len(t, apiPlatforms, 11)
+	require.NotContains(t, apiPlatforms, "kiro")
+
+	platformsFile, err := os.ReadFile(filepath.Join("..", "..", "..", "frontend", "src", "constants", "platforms.ts"))
+	require.NoError(t, err)
+	content := string(platformsFile)
+	concreteBlock := regexp.MustCompile(`(?s)export const CONCRETE_PLATFORM_OPTIONS\s*=\s*\[(.*?)\]\s*as const`).FindStringSubmatch(content)
+	groupBlock := regexp.MustCompile(`(?s)export const GROUP_PLATFORM_OPTIONS\s*=\s*\[(.*?)\]\s*as const`).FindStringSubmatch(content)
+	require.Len(t, concreteBlock, 2, "the concrete platform option block must remain parseable")
+	require.Len(t, groupBlock, 2, "the group platform option block must remain parseable")
+	valuePattern := regexp.MustCompile(`value:\s*'([^']+)'`)
+	frontendPlatforms := make([]string, 0, 11)
+	if strings.Contains(groupBlock[1], "...CONCRETE_PLATFORM_OPTIONS") {
+		for _, match := range valuePattern.FindAllStringSubmatch(concreteBlock[1], -1) {
+			frontendPlatforms = append(frontendPlatforms, match[1])
+		}
+	}
+	for _, match := range valuePattern.FindAllStringSubmatch(groupBlock[1], -1) {
+		frontendPlatforms = append(frontendPlatforms, match[1])
+	}
+	require.Len(t, frontendPlatforms, 11, "the static group option parser must find exactly 11 values")
+	require.Equal(t, domain.SupportedGroupPlatforms(), frontendPlatforms)
 }
 
 func TestChannelMonitorV2ErrorTaxonomyPriority(t *testing.T) {
@@ -439,9 +545,11 @@ func TestSnapshotRedactsPublicConfigPolicyFields(t *testing.T) {
 		config: ChannelMonitorV2Config{Enabled: true},
 		snap: &ChannelMonitorV2Snapshot{
 			Config: ChannelMonitorV2Config{
-				Version:                3,
-				Enabled:                true,
-				RefreshIntervalSeconds: 300,
+				Version:                      3,
+				Enabled:                      true,
+				RefreshIntervalSeconds:       300,
+				GroupScopeMode:               "selected",
+				SyntheticEmptyBucketsEnabled: true,
 				Platforms: []ChannelMonitorV2PlatformConfig{
 					{Platform: "openai", Enabled: true, Models: []string{"gpt-5"}},
 				},
@@ -456,6 +564,8 @@ func TestSnapshotRedactsPublicConfigPolicyFields(t *testing.T) {
 	snap, err := svc.Snapshot(context.Background(), ChannelMonitorV2Filter{}, false)
 	require.NoError(t, err)
 	require.Empty(t, snap.Config.GroupIDs)
+	require.Empty(t, snap.Config.GroupScopeMode)
+	require.False(t, snap.Config.SyntheticEmptyBucketsEnabled)
 	require.Empty(t, snap.Config.IgnoredErrorCategories)
 	require.Nil(t, snap.Config.UpdatedBy)
 	require.Empty(t, snap.Config.Platforms[0].Models)
@@ -463,6 +573,10 @@ func TestSnapshotRedactsPublicConfigPolicyFields(t *testing.T) {
 	require.Zero(t, snap.Metrics.RequestCount)
 	require.InDelta(t, 0.1, snap.Metrics.ErrorRate, 0.0001)
 	require.Zero(t, snap.Metrics.RPM)
+	encoded, err := json.Marshal(snap)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "group_scope_mode")
+	require.NotContains(t, string(encoded), "synthetic_empty_buckets_enabled")
 }
 
 func TestRedactChannelMonitorV2MetricKeepsRates(t *testing.T) {
@@ -506,4 +620,175 @@ func TestChannelMonitorV2HealthTTFTAtTargetIsHealthy(t *testing.T) {
 	require.Equal(t, "healthy", h.TTFT)
 	require.NotNil(t, h.TTFTScore)
 	require.InDelta(t, 100.0, *h.TTFTScore, 0.01)
+}
+
+func TestFillChannelMonitorV2EmptyMatrixBucketsUsesStableHealthySamples(t *testing.T) {
+	start := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	realHealth := ChannelMonitorV2Health{Overall: "critical", ErrorRate: "critical", TTFT: "critical", Cache: "critical"}
+	realBucket := ChannelMonitorV2TrendPoint{
+		BucketStart: start.Add(10 * time.Minute),
+		Metrics:     ChannelMonitorV2Metric{RequestCount: 7, ErrorRate: 0.9},
+		Health:      realHealth,
+	}
+	coverage := ChannelMonitorV2Coverage{
+		RequestedStart: start,
+		RequestedEnd:   start.Add(25 * time.Minute),
+		CoverageStart:  start.Add(5 * time.Minute),
+		DataThrough:    start.Add(15 * time.Minute),
+		BucketSeconds:  300,
+	}
+	groupID := int64(8)
+	makeMatrix := func() *ChannelMonitorV2Matrix {
+		return &ChannelMonitorV2Matrix{
+			Coverage: coverage,
+			Items: []ChannelMonitorV2MatrixRow{{
+				Platform: "openai", GroupID: &groupID, GroupName: "primary", Model: "gpt-5",
+				Buckets: []ChannelMonitorV2TrendPoint{realBucket},
+			}},
+		}
+	}
+	thresholds := DefaultChannelMonitorV2HealthThresholds()
+	first, second := makeMatrix(), makeMatrix()
+	now := start.Add(15 * time.Minute)
+	fillChannelMonitorV2EmptyMatrixBuckets(first, thresholds, now)
+	fillChannelMonitorV2EmptyMatrixBuckets(second, thresholds, now)
+
+	row := first.Items[0]
+	require.Len(t, row.Buckets, 2)
+	require.Equal(t, start.Add(5*time.Minute), row.Buckets[0].BucketStart)
+	require.Equal(t, start.Add(10*time.Minute), row.Buckets[1].BucketStart)
+	require.Equal(t, realBucket, row.Buckets[1], "a real bucket must win over a generated value")
+	require.Equal(t, row.Buckets[0], second.Items[0].Buckets[0], "the same matrix key must produce the same sample after refresh")
+
+	generated := row.Buckets[0]
+	require.Greater(t, generated.Metrics.RequestCount, int64(0))
+	require.Equal(t, generated.Metrics.RequestCount, generated.Metrics.SuccessRequests)
+	require.Zero(t, generated.Metrics.ErrorRequests)
+	require.Greater(t, generated.Metrics.TokenCount, int64(0))
+	require.Equal(t, generated.Metrics.CacheRateDenominator, generated.Metrics.CacheRateNumerator)
+	require.NotNil(t, generated.Metrics.TTFT.P50Ms)
+	require.NotNil(t, generated.Metrics.Duration.P50Ms)
+	for name, score := range map[string]*float64{
+		"overall":    generated.Health.Score,
+		"error rate": generated.Health.ErrorRateScore,
+		"ttft":       generated.Health.TTFTScore,
+		"cache":      generated.Health.CacheScore,
+	} {
+		require.NotNil(t, score, name)
+		require.GreaterOrEqual(t, *score, 80.0, name)
+	}
+	require.Equal(t, "healthy", generated.Health.ErrorRate)
+	require.Equal(t, "healthy", generated.Health.TTFT)
+	require.Equal(t, "healthy", generated.Health.Cache)
+}
+
+func TestFillChannelMonitorV2EmptyMatrixBucketsLeavesIncompleteAndEmptyRowsAlone(t *testing.T) {
+	start := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	newMatrix := func(coverage ChannelMonitorV2Coverage) *ChannelMonitorV2Matrix {
+		return &ChannelMonitorV2Matrix{
+			Coverage: coverage,
+			Items:    []ChannelMonitorV2MatrixRow{{Platform: "openai", Buckets: []ChannelMonitorV2TrendPoint{}}},
+		}
+	}
+	baseCoverage := ChannelMonitorV2Coverage{
+		RequestedStart: start,
+		RequestedEnd:   start.Add(15 * time.Minute),
+		CoverageStart:  start.Add(5 * time.Minute),
+		DataThrough:    start.Add(15 * time.Minute),
+		BucketSeconds:  300,
+	}
+	partialCoverage := newMatrix(baseCoverage)
+	fillChannelMonitorV2EmptyMatrixBuckets(partialCoverage, DefaultChannelMonitorV2HealthThresholds(), start.Add(15*time.Minute))
+	require.Equal(t, []time.Time{start.Add(5 * time.Minute), start.Add(10 * time.Minute)}, []time.Time{
+		partialCoverage.Items[0].Buckets[0].BucketStart,
+		partialCoverage.Items[0].Buckets[1].BucketStart,
+	}, "buckets before coverage_start must stay empty")
+
+	laggedCoverage := baseCoverage
+	laggedCoverage.CoverageStart = start
+	laggedCoverage.DataThrough = start.Add(7 * time.Minute)
+	lagged := newMatrix(laggedCoverage)
+	fillChannelMonitorV2EmptyMatrixBuckets(lagged, DefaultChannelMonitorV2HealthThresholds(), start.Add(20*time.Minute))
+	require.Equal(t, []time.Time{start}, []time.Time{lagged.Items[0].Buckets[0].BucketStart}, "a partially aggregated bucket must stay empty")
+
+	currentCoverage := baseCoverage
+	currentCoverage.CoverageStart = start
+	current := newMatrix(currentCoverage)
+	fillChannelMonitorV2EmptyMatrixBuckets(current, DefaultChannelMonitorV2HealthThresholds(), start.Add(9*time.Minute))
+	require.Equal(t, []time.Time{start}, []time.Time{current.Items[0].Buckets[0].BucketStart}, "the current incomplete bucket must stay empty")
+
+	invalidCoverage := baseCoverage
+	invalidCoverage.CoverageStart = time.Time{}
+	invalid := newMatrix(invalidCoverage)
+	fillChannelMonitorV2EmptyMatrixBuckets(invalid, DefaultChannelMonitorV2HealthThresholds(), start.Add(time.Hour))
+	require.Empty(t, invalid.Items[0].Buckets, "invalid coverage boundaries must not synthesize values")
+
+	emptyRows := &ChannelMonitorV2Matrix{Coverage: baseCoverage, Items: []ChannelMonitorV2MatrixRow{}}
+	fillChannelMonitorV2EmptyMatrixBuckets(emptyRows, DefaultChannelMonitorV2HealthThresholds(), start.Add(time.Hour))
+	require.Empty(t, emptyRows.Items, "an empty matrix must remain empty")
+}
+
+func TestChannelMonitorV2MatrixFillsBeforePublicMetricRedaction(t *testing.T) {
+	start := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	groupID := int64(3)
+	realBucket := ChannelMonitorV2TrendPoint{
+		BucketStart: start,
+		Metrics:     ChannelMonitorV2Metric{RequestCount: 42, SuccessRequests: 42, CacheRate: 0.25},
+		Health:      ChannelMonitorV2Health{Overall: "critical", ErrorRate: "critical", TTFT: "critical", Cache: "critical"},
+	}
+	repo := &channelMonitorV2RepoStub{
+		config: ChannelMonitorV2Config{Enabled: true, SyntheticEmptyBucketsEnabled: true},
+		matrix: &ChannelMonitorV2Matrix{
+			Coverage: ChannelMonitorV2Coverage{
+				RequestedStart: start,
+				RequestedEnd:   start.Add(10 * time.Minute),
+				CoverageStart:  start,
+				DataThrough:    start.Add(10 * time.Minute),
+				BucketSeconds:  300,
+			},
+			Items: []ChannelMonitorV2MatrixRow{{Platform: "openai", GroupID: &groupID, Buckets: []ChannelMonitorV2TrendPoint{realBucket}}},
+		},
+	}
+	svc := NewChannelMonitorV2Service(repo)
+	svc.now = func() time.Time { return start.Add(10 * time.Minute) }
+	matrix, err := svc.Matrix(context.Background(), ChannelMonitorV2Filter{}, ChannelMonitorV2GroupByPlatformGroup, false)
+	require.NoError(t, err)
+	require.False(t, repo.admin)
+	require.Len(t, matrix.Items[0].Buckets, 2)
+	for _, bucket := range matrix.Items[0].Buckets {
+		require.Zero(t, bucket.Metrics.RequestCount)
+		require.Zero(t, bucket.Metrics.SuccessRequests)
+		require.Zero(t, bucket.Metrics.TTFT.SampleCount)
+		require.Nil(t, bucket.Metrics.UpstreamAttemptCount)
+	}
+	require.Equal(t, start, matrix.Items[0].Buckets[0].BucketStart)
+	require.Equal(t, "critical", matrix.Items[0].Buckets[0].Health.Overall, "a real unhealthy bucket must survive metric redaction and stay unfilled")
+	require.Equal(t, start.Add(5*time.Minute), matrix.Items[0].Buckets[1].BucketStart)
+	require.Equal(t, "healthy", matrix.Items[0].Buckets[1].Health.Overall)
+	require.InDelta(t, 1.0, matrix.Items[0].Buckets[1].Metrics.SuccessRate, 0.0001)
+	encoded, err := json.Marshal(matrix)
+	require.NoError(t, err)
+	require.NotContains(t, strings.ToLower(string(encoded)), "synthetic")
+	require.NotContains(t, strings.ToLower(string(encoded)), "is_synthetic")
+}
+
+func TestChannelMonitorV2MatrixKeepsEmptyBucketsWhenDisplayFlagDisabled(t *testing.T) {
+	start := time.Now().UTC().Truncate(5 * time.Minute).Add(-10 * time.Minute)
+	groupID := int64(3)
+	repo := &channelMonitorV2RepoStub{
+		config: ChannelMonitorV2Config{Enabled: true},
+		matrix: &ChannelMonitorV2Matrix{
+			Coverage: ChannelMonitorV2Coverage{
+				RequestedStart: start,
+				RequestedEnd:   start.Add(10 * time.Minute),
+				CoverageStart:  start,
+				DataThrough:    start.Add(10 * time.Minute),
+				BucketSeconds:  300,
+			},
+			Items: []ChannelMonitorV2MatrixRow{{Platform: "openai", GroupID: &groupID, Buckets: []ChannelMonitorV2TrendPoint{}}},
+		},
+	}
+	matrix, err := NewChannelMonitorV2Service(repo).Matrix(context.Background(), ChannelMonitorV2Filter{}, ChannelMonitorV2GroupByPlatformGroup, true)
+	require.NoError(t, err)
+	require.Empty(t, matrix.Items[0].Buckets)
 }

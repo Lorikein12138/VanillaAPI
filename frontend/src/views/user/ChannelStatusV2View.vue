@@ -556,6 +556,7 @@ const matrixGroupBy = ref<MonitorMatrixGroupBy>(parseMatrixGroupBy(route.query.g
 const healthMode = ref<HealthMode>(parseHealthMode(route.query.health_mode))
 const trendView = ref<TrendView>(parseTrendView(route.query.trend_view))
 const dimensions = ref<MonitorDimensions>({ platforms: [], groups: [], models: [] })
+const dimensionsReady = ref(false)
 const snapshot = ref<MonitorSnapshot | null>(null)
 const matrix = ref<MonitorMatrixResponse | null>(null)
 const modelRows = ref<MonitorModelRow[]>([])
@@ -584,10 +585,11 @@ const selectedPlatforms = computed(() => new Set(filter.value.platforms))
 const groupOptions = computed(() =>
   (dimensions.value.groups || [])
     .filter(
-      (item) =>
-        selectedPlatforms.value.size === 0 ||
-        !item.platform ||
-        selectedPlatforms.value.has(item.platform),
+      (item) => {
+        if (selectedPlatforms.value.size === 0) return true
+        const platforms = item.platforms?.length ? item.platforms : item.platform ? [item.platform] : []
+        return platforms.length === 0 || platforms.some((platform) => selectedPlatforms.value.has(platform))
+      },
     )
     .map((item) => ({
       value: String(item.id),
@@ -616,24 +618,28 @@ const selectedGroupIds = computed({
     filter.value.groupIds = value.map(Number).filter((id) => Number.isInteger(id) && id > 0)
   },
 })
-// Soft-prune group/model selections that fall outside the platform cascade.
-// Do NOT wipe when options are temporarily empty (loading); only drop invalid ids.
+// Prune URL/local selections only after the latest dimension response arrives.
+// An empty completed catalog is meaningful and must clear stale IDs too.
 watch(
-  [groupOptions, modelOptions],
+  [platformOptions, groupOptions, modelOptions, dimensionsReady],
   () => {
-    if (groupOptions.value.length > 0) {
-      const allowed = new Set(groupOptions.value.map((item) => item.value))
-      const next = filter.value.groupIds.filter((id) => allowed.has(String(id)))
-      if (next.length !== filter.value.groupIds.length) {
-        filter.value.groupIds = next
-      }
+    if (!dimensionsReady.value) return
+    const allowedPlatforms = new Set(platformOptions.value.map((item) => item.value))
+    const nextPlatforms = filter.value.platforms.filter((platform) => allowedPlatforms.has(platform))
+    if (nextPlatforms.length !== filter.value.platforms.length) {
+      filter.value.platforms = nextPlatforms
     }
-    if (modelOptions.value.length > 0) {
-      const allowed = new Set(modelOptions.value.map((item) => item.value))
-      const next = filter.value.models.filter((model) => allowed.has(model))
-      if (next.length !== filter.value.models.length) {
-        filter.value.models = next
-      }
+
+    const allowedGroups = new Set(groupOptions.value.map((item) => item.value))
+    const nextGroups = filter.value.groupIds.filter((id) => allowedGroups.has(String(id)))
+    if (nextGroups.length !== filter.value.groupIds.length) {
+      filter.value.groupIds = nextGroups
+    }
+
+    const allowedModels = new Set(modelOptions.value.map((item) => item.value))
+    const nextModels = filter.value.models.filter((model) => allowedModels.has(model))
+    if (nextModels.length !== filter.value.models.length) {
+      filter.value.models = nextModels
     }
   },
   { flush: 'post' },
@@ -705,6 +711,7 @@ function syncQuery() {
 }
 /** Dimensions catalog: range only — never re-filtered by platform/group/model selection. */
 async function loadDimensions(signal?: AbortSignal, id = sequence) {
+  if (id === sequence) dimensionsReady.value = false
   const rangeOnly: MonitorFilter = {
     range: filter.value.range,
     platforms: [],
@@ -714,6 +721,7 @@ async function loadDimensions(signal?: AbortSignal, id = sequence) {
   const next = await api.getDimensions(rangeOnly, isAdmin.value, signal)
   if (id !== sequence) return
   dimensions.value = next
+  dimensionsReady.value = true
 }
 
 async function loadMetrics(signal?: AbortSignal, id = sequence) {

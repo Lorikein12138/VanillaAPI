@@ -135,6 +135,12 @@ describe('RelayPulseMatrix', () => {
     // Redacted user payloads may have request_count=0 but still include score.
     expect(cells[1].classes().some((c) => c.startsWith('health-score'))).toBe(true)
     expect(cells[2].classes()).toContain('health-unknown')
+    for (const cell of cells) {
+      expect(cell.classes().join(' ').toLowerCase()).not.toMatch(/synthetic|simulat|fake|伪造|模拟/)
+      expect(cell.attributes('title')?.toLowerCase()).not.toMatch(/synthetic|simulat|fake|伪造|模拟/)
+      expect(cell.attributes('aria-label')?.toLowerCase()).not.toMatch(/synthetic|simulat|fake|伪造|模拟/)
+    }
+    expect(wrapper.text().toLowerCase()).not.toMatch(/synthetic|simulat|fake|伪造|模拟/)
 
     // No click-to-open modal
     await cells[0].trigger('click')

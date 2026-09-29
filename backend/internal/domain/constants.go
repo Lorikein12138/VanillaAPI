@@ -34,6 +34,24 @@ const (
 	PlatformComposite  = "composite"
 )
 
+// SupportedGroupPlatforms is the canonical directory of group platform types.
+// Return a fresh slice so callers cannot mutate the shared catalog.
+func SupportedGroupPlatforms() []string {
+	return []string{
+		PlatformAnthropic,
+		PlatformOpenAI,
+		PlatformGemini,
+		PlatformAntigravity,
+		PlatformGrok,
+		PlatformKimi,
+		PlatformZhipu,
+		PlatformDeepseek,
+		PlatformMiniMax,
+		PlatformOpenCodeGo,
+		PlatformComposite,
+	}
+}
+
 // Account mode constants 区分国产供应商的「按量付费（余额）」与「Coding Plan」两种接入方式。
 // 存储于 credentials["account_mode"]，决定 base_url 预设与额度监控方式。
 const (

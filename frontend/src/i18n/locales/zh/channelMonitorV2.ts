@@ -95,6 +95,8 @@ export default {
       refreshTitle: '汇总频率',
       refreshHint: '影响矩阵时间粒度与刷新节奏',
       refreshAria: '汇总频率',
+      syntheticEmptyBucketsTitle: '数据伪造',
+      syntheticEmptyBucketsHint: '仅为已完成聚合且没有真实流量的完整矩阵区间生成绿色展示色块；不会写入统计数据。',
       platformsTitle: '平台与模型',
       platformsHint: '留空 = 展示全部真实模型名；填写后仅名单内单独成行，其余归入「其他」',
       modelsPlaceholder: '留空=全部真实模型；或填写主流模型名单（其余归其他）',
@@ -103,6 +105,7 @@ export default {
       groupsTitle: '监控分组',
       groupsSelected: '已选择 {count} 个分组',
       groupsAll: '全部分组',
+      groupsScopeEmpty: '未监控任何分组',
       groupsEmpty: '没有可选择的分组',
       errorsTitle: '错误分类与忽略',
       errorsHint:

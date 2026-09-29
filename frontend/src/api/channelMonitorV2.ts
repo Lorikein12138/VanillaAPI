@@ -104,6 +104,10 @@ export interface MonitorConfig {
   refresh_interval_seconds: 60 | 300
   platforms: Array<{ platform: string; enabled: boolean; models: string[] }>
   group_ids: number[]
+  /** Missing only in responses from older servers; settings UI normalizes it. */
+  group_scope_mode?: 'all' | 'selected'
+  /** Operator-only matrix display setting; omitted for older servers and public snapshots. */
+  synthetic_empty_buckets_enabled?: boolean
   health_thresholds: {
     minimum_sample: number
     warning_error_rate: number
@@ -176,7 +180,7 @@ export interface MonitorMatrixResponse {
 
 export interface MonitorDimensions {
   platforms: Array<{ value: string; label: string; request_count: number }>
-  groups: Array<{ id: number; name: string; platform?: string; request_count: number }>
+  groups: Array<{ id: number; name: string; platform?: string; platforms?: string[]; request_count: number }>
   models: Array<{ value: string; label: string; platform?: string; request_count: number }>
 }
 
