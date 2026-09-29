@@ -82,6 +82,10 @@ function mountView() {
     global: {
       stubs: {
         AppLayout: { template: '<div><slot /></div>' },
+        Select: {
+          props: ['modelValue', 'options'],
+          template: '<button data-testid="change-group-by" @click="$emit(\'update:modelValue\', \'platform_model\')">change</button>',
+        },
         FilterMultiSelect: {
           props: ['options'],
           template: '<div data-testid="filter-options"><span v-for="option in options" :key="option.value">{{ option.value }}</span></div>',
@@ -132,6 +136,35 @@ describe('ChannelStatusV2View dimension filters', () => {
       query: expect.objectContaining({ platform: undefined, group: undefined }),
     }))
     expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('reuses one UTC as_of anchor across refresh surfaces and tab changes', async () => {
+    route.query = {}
+    const wrapper = mountView()
+    await flushPromises()
+
+    const asOf = getDimensions.mock.calls[0][3]
+    expect(asOf).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
+    expect(getSnapshot.mock.calls[0][3]).toBe(asOf)
+    expect(getMatrix.mock.calls[0][4]).toBe(asOf)
+    expect(getModels.mock.calls[0][3]).toBe(asOf)
+
+    await wrapper.findAll('[role="tab"]')[1].trigger('click')
+    await flushPromises()
+    expect(getErrors.mock.calls.at(-1)?.[3]).toBe(asOf)
+
+    await wrapper.findAll('[role="tab"]')[2].trigger('click')
+    await flushPromises()
+    expect(getUsers.mock.calls.at(-1)?.[3]).toBe(asOf)
+
+    await wrapper.get('[data-testid="change-group-by"]').trigger('click')
+    await flushPromises()
+    const nextAsOf = getDimensions.mock.calls.at(-1)?.[3]
+    expect(nextAsOf).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
+    expect(getSnapshot.mock.calls.at(-1)?.[3]).toBe(nextAsOf)
+    expect(getMatrix.mock.calls.at(-1)?.[4]).toBe(nextAsOf)
+    expect(getUsers.mock.calls.at(-1)?.[3]).toBe(nextAsOf)
     wrapper.unmount()
   })
 })
