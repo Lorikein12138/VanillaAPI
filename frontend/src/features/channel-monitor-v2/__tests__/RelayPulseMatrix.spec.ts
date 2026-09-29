@@ -180,3 +180,58 @@ describe('RelayPulseMatrix axis range', () => {
     expect(wrapper.findAll('.pulse-cell')).toHaveLength(5)
   })
 })
+
+describe('RelayPulseMatrix projected buckets', () => {
+  it('keeps row summaries and bucket colors on the same ordinary metric payload in each health mode', async () => {
+    const projectedMetric = metrics(240)
+    projectedMetric.error_rate = .1
+    projectedMetric.success_rate = .9
+    projectedMetric.cache_rate = .85
+    projectedMetric.ttft = { sample_count: 216, p50_ms: 2400, avg_ms: 2700, p90_ms: 3100, p95_ms: 3400 }
+    projectedMetric.duration = { sample_count: 240, p50_ms: 14000, avg_ms: 14300, p90_ms: 14700, p95_ms: 15000 }
+    const projectedHealth = {
+      ...health,
+      overall: 'healthy',
+      score: 100,
+      error_rate_score: 90,
+      ttft_score: 80,
+      cache_score: 70,
+    } as MonitorHealth
+    const wrapper = mount(RelayPulseMatrix, {
+      props: {
+        rows: [{
+          platform: 'openai', group_id: 7, group_name: '默认组', model: 'gpt-5',
+          metrics: projectedMetric,
+          health: projectedHealth,
+          buckets: [{ bucket_start: '2026-09-29T12:00:00Z', metrics: projectedMetric, health: projectedHealth }],
+        }],
+        coverage: {
+          requested_start: '2026-09-29T12:00:00Z', requested_end: '2026-09-29T12:05:00Z',
+          coverage_start: '2026-09-29T12:00:00Z', data_through: '2026-09-29T12:05:00Z',
+          computed_at: '2026-09-29T12:05:00Z', aggregation_lag_seconds: 0,
+          coverage_complete: true, bucket_seconds: 300,
+        },
+        healthMode: 'overall',
+      },
+    })
+    const cell = wrapper.get('.pulse-cell')
+
+    for (const [mode, expectedBand] of [
+      ['overall', 'health-score10'],
+      ['success', 'health-score9'],
+      ['ttft', 'health-score8'],
+      ['cache', 'health-score7'],
+    ] as const) {
+      await wrapper.setProps({ healthMode: mode })
+      expect(cell.classes()).toContain(expectedBand)
+      expect(cell.attributes('title')).toContain('85.0%')
+      expect(cell.attributes('aria-label')).toContain('2.4s')
+    }
+
+    const summary = wrapper.findAll('.matrix-row')[1].text()
+    expect(summary).toContain('90.0%')
+    expect(summary).toContain('2.4s')
+    expect(summary).toContain('85.0%')
+    expect(wrapper.html().toLowerCase()).not.toMatch(/synthetic|simulat|fake|伪造|模拟/)
+  })
+})

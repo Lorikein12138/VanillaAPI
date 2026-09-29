@@ -225,9 +225,15 @@ const chartOptions = computed(() => {
         padding: 10,
         displayColors: true,
         callbacks: {
-          label(ctx: { dataset: { label?: string }; parsed: { y: number | null } }) {
+          label(ctx: { dataset: { label?: string }; parsed: { y: number | null }; dataIndex: number }) {
             const label = ctx.dataset.label || ''
-            const y = ctx.parsed.y
+            const source = visibleTrend.value[ctx.dataIndex]
+            let y = ctx.parsed.y
+            if (source) {
+              if (label === t('channelMonitorV2.chart.errorDataset')) y = (source.metrics.error_rate || 0) * 100
+              else if (label === t('channelMonitorV2.chart.cacheDataset')) y = (source.metrics.cache_rate || 0) * 100
+              else if (label === t('channelMonitorV2.chart.ttftDataset')) y = source.metrics.ttft?.p50_ms ?? null
+            }
             if (y == null) return `${label}: -`
             if (label === t('channelMonitorV2.chart.errorDataset') || label === t('channelMonitorV2.chart.cacheDataset')) {
               return `${label}: ${formatMonitorPercent(y / 100)}`

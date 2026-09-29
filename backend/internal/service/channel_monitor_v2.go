@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,6 +18,7 @@ const (
 
 var (
 	ErrChannelMonitorV2InvalidRange   = errors.New("invalid channel monitor v2 range")
+	ErrChannelMonitorV2InvalidAsOf    = errors.New("invalid channel monitor v2 as_of")
 	ErrChannelMonitorV2InvalidGroupBy = errors.New("invalid channel monitor v2 group_by")
 	ErrChannelMonitorV2InvalidConfig  = errors.New("invalid channel monitor v2 config")
 	ErrChannelMonitorV2ConfigConflict = errors.New("channel monitor v2 config was modified")
@@ -90,6 +90,7 @@ type ChannelMonitorV2Filter struct {
 	Models          []string
 	Start           time.Time
 	End             time.Time
+	AsOf            time.Time
 	Bucket          time.Duration
 }
 
@@ -447,7 +448,16 @@ func (s *ChannelMonitorV2Service) UpdateConfig(ctx context.Context, cfg ChannelM
 }
 
 func (s *ChannelMonitorV2Service) ParseFilter(rangeValue string, platforms, models []string, groupIDs []int64) (ChannelMonitorV2Filter, error) {
-	now := s.now().UTC()
+	return s.ParseFilterAt(rangeValue, platforms, models, groupIDs, s.now().UTC())
+}
+
+// ParseFilterAt builds the same fixed UTC window as ParseFilter, anchored to
+// asOf so independently requested V2 surfaces can describe one refresh.
+func (s *ChannelMonitorV2Service) ParseFilterAt(rangeValue string, platforms, models []string, groupIDs []int64, asOf time.Time) (ChannelMonitorV2Filter, error) {
+	if asOf.IsZero() {
+		asOf = s.now().UTC()
+	}
+	asOf = asOf.UTC()
 	var window, bucket time.Duration
 	switch strings.TrimSpace(rangeValue) {
 	case "", "90m":
@@ -461,21 +471,20 @@ func (s *ChannelMonitorV2Service) ParseFilter(rangeValue string, platforms, mode
 	default:
 		return ChannelMonitorV2Filter{}, fmt.Errorf("%w: %s", ErrChannelMonitorV2InvalidRange, rangeValue)
 	}
-	start, end := now.Add(-window), now
+	start, end := asOf.Add(-window), asOf
 	if bucket > time.Minute {
-		// Align display windows to a fixed number of whole buckets. The trailing
-		// bucket may point slightly into the future; SQL simply has no future rows,
-		// while the current partial bucket can still be shown and recomputed often.
-		end = now.Truncate(bucket).Add(bucket)
+		// Preserve whole display-bucket window edges while anchoring them to the
+		// caller's UTC instant. Rollup reads remain aligned to their stored bins.
+		end = asOf.Truncate(bucket).Add(bucket)
 		start = end.Add(-window)
 	}
 	return ChannelMonitorV2Filter{
 		Range: rangeValue, Platforms: normalizeStringSet(platforms), Models: normalizeStringSet(models), GroupIDs: normalizeInt64Set(groupIDs),
-		Start: start, End: end, Bucket: bucket,
+		Start: start, End: end, AsOf: asOf, Bucket: bucket,
 	}, nil
 }
 
-func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter ChannelMonitorV2Filter) (*ChannelMonitorV2Dimensions, error) {
+func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2Dimensions, error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -483,6 +492,17 @@ func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter Channel
 	dims, err := s.repo.GetDimensions(ctx, filter, *cfg)
 	if err != nil {
 		return nil, err
+	}
+	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+		catalogFilter := filter
+		catalogFilter.Platforms = nil
+		catalogFilter.GroupIDs = nil
+		catalogFilter.Models = nil
+		presentation, err := s.buildChannelMonitorV2Presentation(ctx, catalogFilter, *cfg, dims)
+		if err != nil {
+			return nil, err
+		}
+		channelMonitorV2PresentationAddModels(dims, presentation)
 	}
 	// Dimension request_count is operational volume; strip for non-admin callers
 	// at the API edge. Dimensions is shared by user/admin routes — redaction is
@@ -495,9 +515,18 @@ func (s *ChannelMonitorV2Service) Snapshot(ctx context.Context, filter ChannelMo
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.repo.GetSnapshot(ctx, filter, *cfg, admin)
-	if err != nil {
-		return nil, err
+	var snap *ChannelMonitorV2Snapshot
+	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		snap = channelMonitorV2PresentationSnapshot(presentation, filter, *cfg)
+	} else {
+		snap, err = s.repo.GetSnapshot(ctx, filter, *cfg, admin)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !admin && snap != nil {
 		redactChannelMonitorV2Snapshot(snap, s.hideThroughputForViewer(ctx, admin))
@@ -510,9 +539,18 @@ func (s *ChannelMonitorV2Service) Models(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
-	list, err := s.repo.GetModels(ctx, filter, *cfg, admin)
-	if err != nil {
-		return nil, err
+	var list *ChannelMonitorV2List[ChannelMonitorV2ModelRow]
+	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		list = channelMonitorV2PresentationModels(presentation, filter, cfg.HealthThresholds)
+	} else {
+		list, err = s.repo.GetModels(ctx, filter, *cfg, admin)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !admin && list != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
@@ -531,12 +569,18 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	if err != nil {
 		return nil, err
 	}
-	matrix, err := s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
-	if err != nil {
-		return nil, err
-	}
-	if cfg.SyntheticEmptyBucketsEnabled && matrix != nil {
-		fillChannelMonitorV2EmptyMatrixBuckets(matrix, cfg.HealthThresholds, s.now().UTC())
+	var matrix *ChannelMonitorV2Matrix
+	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		matrix = channelMonitorV2PresentationMatrix(presentation, filter, groupBy, cfg.HealthThresholds)
+	} else {
+		matrix, err = s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !admin && matrix != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
@@ -548,108 +592,6 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 		}
 	}
 	return matrix, nil
-}
-
-// fillChannelMonitorV2EmptyMatrixBuckets adds stable, display-only samples to
-// complete empty buckets. It never changes rows, writes, or cached data.
-func fillChannelMonitorV2EmptyMatrixBuckets(matrix *ChannelMonitorV2Matrix, thresholds ChannelMonitorV2HealthThresholds, now time.Time) {
-	if matrix == nil {
-		return
-	}
-	coverage := matrix.Coverage
-	step := time.Duration(coverage.BucketSeconds) * time.Second
-	if step < time.Minute || coverage.RequestedStart.IsZero() || coverage.RequestedEnd.IsZero() ||
-		coverage.CoverageStart.IsZero() || coverage.DataThrough.IsZero() || !coverage.RequestedStart.Before(coverage.RequestedEnd) {
-		return
-	}
-	thresholds = NormalizeChannelMonitorV2HealthThresholds(thresholds)
-	stepSeconds := int64(step / time.Second)
-	startUnix := coverage.RequestedStart.UTC().Unix()
-	remainder := startUnix % stepSeconds
-	if remainder < 0 {
-		remainder += stepSeconds
-	}
-	firstStart := time.Unix(startUnix-remainder, 0).UTC()
-	coverageStart := coverage.CoverageStart.UTC()
-	dataThrough := coverage.DataThrough.UTC()
-	now = now.UTC()
-	minutes := step.Minutes()
-	if minutes <= 0 {
-		return
-	}
-
-	for rowIndex := range matrix.Items {
-		row := &matrix.Items[rowIndex]
-		existing := make(map[int64]struct{}, len(row.Buckets))
-		for _, bucket := range row.Buckets {
-			existing[bucket.BucketStart.UTC().Unix()] = struct{}{}
-		}
-		for bucketStart := firstStart; bucketStart.Before(coverage.RequestedEnd); bucketStart = bucketStart.Add(step) {
-			bucketEnd := bucketStart.Add(step)
-			if bucketStart.Before(coverageStart) || bucketEnd.After(dataThrough) || bucketEnd.After(now) {
-				continue
-			}
-			if _, ok := existing[bucketStart.Unix()]; ok {
-				continue
-			}
-			metrics := channelMonitorV2SyntheticMatrixMetric(*row, bucketStart, minutes, thresholds)
-			row.Buckets = append(row.Buckets, ChannelMonitorV2TrendPoint{
-				BucketStart: bucketStart,
-				Metrics:     metrics,
-				Health:      ChannelMonitorV2HealthForWithThresholds(metrics, thresholds),
-			})
-		}
-		sort.Slice(row.Buckets, func(i, j int) bool { return row.Buckets[i].BucketStart.Before(row.Buckets[j].BucketStart) })
-	}
-}
-
-func channelMonitorV2SyntheticMatrixMetric(row ChannelMonitorV2MatrixRow, bucketStart time.Time, minutes float64, thresholds ChannelMonitorV2HealthThresholds) ChannelMonitorV2Metric {
-	key := fmt.Sprintf("%s\x00%d\x00%s\x00%s", row.Platform, channelMonitorV2MatrixGroupID(row.GroupID), row.Model, bucketStart.UTC().Format(time.RFC3339Nano))
-	hash := sha256.Sum256([]byte(key))
-	requestCount := thresholds.MinimumSample + int64(hash[0]%31)
-	outputTokens := requestCount * int64(80+int64(hash[1])%121)
-	cacheReadTokens := requestCount * int64(600+int64(hash[2])%901)
-	ttftTarget := thresholds.TargetTTFTMs
-	if ttftTarget < 1 {
-		ttftTarget = 1
-	}
-	ttftP50 := int64(1)
-	if ttftTarget > 1 {
-		ttftP50 = ttftTarget/2 + int64(hash[3])%maxInt64(1, ttftTarget-ttftTarget/2+1)
-	}
-	durationP50 := ttftP50 + int64(100+int64(hash[4])%401)
-	ttftAvg := float64(ttftP50)
-	durationAvg := float64(durationP50)
-	zero := int64(0)
-	return ChannelMonitorV2Metric{
-		SuccessRequests:      requestCount,
-		RequestCount:         requestCount,
-		OutputTokens:         outputTokens,
-		CacheReadTokens:      cacheReadTokens,
-		TokenCount:           outputTokens + cacheReadTokens,
-		RPM:                  float64(requestCount) / minutes,
-		TPM:                  float64(outputTokens+cacheReadTokens) / minutes,
-		SuccessRate:          1,
-		CacheRate:            1,
-		CacheRateNumerator:   cacheReadTokens,
-		CacheRateDenominator: cacheReadTokens,
-		TTFT: ChannelMonitorV2Latency{
-			SampleCount: requestCount,
-			P50Ms:       &ttftP50,
-			P90Ms:       &ttftP50,
-			P95Ms:       &ttftP50,
-			AvgMs:       &ttftAvg,
-		},
-		Duration: ChannelMonitorV2Latency{
-			SampleCount: requestCount,
-			P50Ms:       &durationP50,
-			P90Ms:       &durationP50,
-			P95Ms:       &durationP50,
-			AvgMs:       &durationAvg,
-		},
-		UpstreamAffectedRequests: &zero,
-		UpstreamAttemptCount:     &requestCount,
-	}
 }
 
 func channelMonitorV2MatrixGroupID(groupID *int64) int64 {
@@ -703,6 +645,13 @@ func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter Ch
 	if err != nil {
 		return nil, err
 	}
+	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		list = channelMonitorV2MergePresentationErrors(list, presentation, cfg.IgnoredErrorCategories)
+	}
 	if !admin && list != nil {
 		for i := range list.Items {
 			list.Items[i].Count = 0
@@ -710,6 +659,47 @@ func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter Ch
 		}
 	}
 	return list, nil
+}
+
+func channelMonitorV2MergePresentationErrors(list *ChannelMonitorV2List[ChannelMonitorV2ErrorRow], presentation *ChannelMonitorV2Presentation, ignored []string) *ChannelMonitorV2List[ChannelMonitorV2ErrorRow] {
+	if list == nil {
+		list = &ChannelMonitorV2List[ChannelMonitorV2ErrorRow]{Items: []ChannelMonitorV2ErrorRow{}}
+	}
+	list.Coverage = presentation.Coverage
+	indices := make(map[string]int, len(list.Items))
+	for i := range list.Items {
+		indices[list.Items[i].Category] = i
+	}
+	ignoredSet := channelMonitorV2PresentationIgnoredCategorySet(ignored)
+	for category, count := range presentation.SyntheticErrorCategories {
+		if count <= 0 {
+			continue
+		}
+		index, ok := indices[category]
+		if !ok {
+			_, isIgnored := ignoredSet[category]
+			list.Items = append(list.Items, ChannelMonitorV2ErrorRow{Category: category, Ignored: isIgnored})
+			index = len(list.Items) - 1
+			indices[category] = index
+		}
+		list.Items[index].Count = channelMonitorV2SaturatingAdd(list.Items[index].Count, count)
+	}
+	total := int64(0)
+	for i := range list.Items {
+		total = channelMonitorV2SaturatingAdd(total, list.Items[i].Count)
+	}
+	if total > 0 {
+		for i := range list.Items {
+			list.Items[i].Rate = float64(list.Items[i].Count) / float64(total)
+		}
+	}
+	sort.SliceStable(list.Items, func(i, j int) bool {
+		if list.Items[i].Rate != list.Items[j].Rate {
+			return list.Items[i].Rate > list.Items[j].Rate
+		}
+		return list.Items[i].Category < list.Items[j].Category
+	})
+	return list
 }
 
 // RedactChannelMonitorV2Dimensions clears absolute request counts on filter chips.
@@ -797,12 +787,43 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 	if s.hideUserRankingForViewer(ctx, admin) {
 		return &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{}}, nil
 	}
+	var presentation *ChannelMonitorV2Presentation
+	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+		presentation, err = s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	result, err := s.repo.GetUsers(ctx, filter, *cfg, admin)
 	if err != nil {
 		return nil, err
 	}
 	if result == nil {
 		result = &ChannelMonitorV2List[ChannelMonitorV2UserRow]{}
+	}
+	if presentation != nil {
+		result.Coverage = presentation.Coverage
+		if viewerID > 0 && channelMonitorV2MetricHasTruth(presentation.SyntheticMetrics) {
+			selfIndex := -1
+			for i := range result.Items {
+				if result.Items[i].UserID != nil && *result.Items[i].UserID == viewerID {
+					selfIndex = i
+					break
+				}
+			}
+			if selfIndex < 0 {
+				id := viewerID
+				result.Items = append(result.Items, ChannelMonitorV2UserRow{UserID: &id, IsSelf: true, CanDrilldown: true, DisplayLabel: "Me"})
+				selfIndex = len(result.Items) - 1
+			}
+			combined := newChannelMonitorV2MetricFold()
+			combined.add(result.Items[selfIndex].Metrics)
+			combined.add(presentation.SyntheticMetrics)
+			result.Items[selfIndex].Metrics = combined.metric(channelMonitorV2PresentationCoveredMinutes(filter, presentation.Coverage))
+			sort.SliceStable(result.Items, func(i, j int) bool {
+				return result.Items[i].Metrics.RequestCount > result.Items[j].Metrics.RequestCount
+			})
+		}
 	}
 	selfIndex := -1
 	for i := range result.Items {

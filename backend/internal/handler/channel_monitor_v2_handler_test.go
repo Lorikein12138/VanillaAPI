@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -84,4 +85,30 @@ func TestChannelMonitorV2ScopeFilterLeavesAdminUnrestricted(t *testing.T) {
 	require.False(t, filter.RestrictGroups)
 	require.Nil(t, filter.AllowedGroupIDs)
 	require.Empty(t, authorizer.calls)
+}
+
+func TestParseChannelMonitorV2AsOfBoundsAndUTC(t *testing.T) {
+	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	got, err := parseChannelMonitorV2AsOf("", now)
+	require.NoError(t, err)
+	require.Equal(t, now, got)
+
+	got, err = parseChannelMonitorV2AsOf("2026-09-29T14:00:00+02:00", now)
+	require.NoError(t, err)
+	require.Equal(t, now, got)
+
+	_, err = parseChannelMonitorV2AsOf("not-a-time", now)
+	require.ErrorIs(t, err, service.ErrChannelMonitorV2InvalidAsOf)
+	_, err = parseChannelMonitorV2AsOf(now.Add(61*time.Second).Format(time.RFC3339Nano), now)
+	require.ErrorIs(t, err, service.ErrChannelMonitorV2InvalidAsOf)
+	_, err = parseChannelMonitorV2AsOf(now.Add(-24*time.Hour-time.Nanosecond).Format(time.RFC3339Nano), now)
+	require.ErrorIs(t, err, service.ErrChannelMonitorV2InvalidAsOf)
+
+	got, err = parseChannelMonitorV2AsOf(now.Add(time.Minute).Format(time.RFC3339Nano), now)
+	require.NoError(t, err)
+	require.Equal(t, now.Add(time.Minute), got)
+	got, err = parseChannelMonitorV2AsOf(now.Add(-24*time.Hour).Format(time.RFC3339Nano), now)
+	require.NoError(t, err)
+	require.Equal(t, now.Add(-24*time.Hour), got)
 }
