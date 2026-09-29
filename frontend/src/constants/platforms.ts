@@ -28,3 +28,8 @@ export const GROUP_PLATFORM_OPTIONS = [
   ...CONCRETE_PLATFORM_OPTIONS,
   { value: 'composite', label: 'Composite' }
 ] as const satisfies readonly PlatformOption<GroupPlatform>[]
+
+type Assert<T extends true> = T
+export type GroupPlatformOptionsAreExhaustive = Assert<
+  Exclude<GroupPlatform, (typeof GROUP_PLATFORM_OPTIONS)[number]['value']> extends never ? true : false
+>

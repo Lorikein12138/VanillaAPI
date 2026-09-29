@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
@@ -226,4 +227,30 @@ func TestCompositeConcretePlatformsIncludeCNProviders(t *testing.T) {
 		require.True(t, isConcreteRequestPlatform(platform))
 		require.True(t, canCopyAccountsFromGroupPlatform(PlatformComposite, platform))
 	}
+}
+
+func TestSupportedGroupPlatformDirectoryMatchesConcreteRouting(t *testing.T) {
+	platforms := domain.SupportedGroupPlatforms()
+	require.Equal(t, []string{
+		domain.PlatformAnthropic,
+		domain.PlatformOpenAI,
+		domain.PlatformGemini,
+		domain.PlatformAntigravity,
+		domain.PlatformGrok,
+		domain.PlatformKimi,
+		domain.PlatformZhipu,
+		domain.PlatformDeepseek,
+		domain.PlatformMiniMax,
+		domain.PlatformOpenCodeGo,
+		domain.PlatformComposite,
+	}, platforms)
+
+	for _, platform := range platforms {
+		require.Equal(t, platform != domain.PlatformComposite, isConcreteRequestPlatform(platform), platform)
+	}
+	require.False(t, isConcreteRequestPlatform("kiro"))
+	require.False(t, isConcreteRequestPlatform("unknown"))
+
+	platforms[0] = "mutated"
+	require.Equal(t, domain.PlatformAnthropic, domain.SupportedGroupPlatforms()[0])
 }

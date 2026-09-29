@@ -25,4 +25,14 @@ describe('platform option catalogs', () => {
       'composite'
     ])
   })
+
+  it('keeps exactly the supported group platform catalog without Kiro', () => {
+    const values = GROUP_PLATFORM_OPTIONS.map((option) => option.value)
+    expect(values).toHaveLength(11)
+    expect(values).not.toContain('kiro')
+    expect(values).toEqual([
+      'anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'kimi',
+      'zhipu', 'deepseek', 'minimax', 'opencode_go', 'composite'
+    ])
+  })
 })

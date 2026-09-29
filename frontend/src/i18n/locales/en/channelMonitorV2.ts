@@ -96,6 +96,8 @@ export default {
       refreshTitle: 'Aggregation interval',
       refreshHint: 'Affects matrix time granularity and refresh cadence',
       refreshAria: 'Aggregation interval',
+      syntheticEmptyBucketsTitle: 'Synthetic data',
+      syntheticEmptyBucketsHint: 'Add green display buckets only to complete, aggregated intervals with no real traffic. This does not write statistics.',
       platformsTitle: 'Platforms and models',
       platformsHint:
         'Leave empty = show all real model names; when filled, only listed models get their own rows and the rest roll into “Other”',
@@ -105,6 +107,7 @@ export default {
       groupsTitle: 'Monitored groups',
       groupsSelected: '{count} groups selected',
       groupsAll: 'All groups',
+      groupsScopeEmpty: 'No groups monitored',
       groupsEmpty: 'No groups available',
       errorsTitle: 'Error categories and ignores',
       errorsHint:

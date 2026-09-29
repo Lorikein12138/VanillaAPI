@@ -95,7 +95,194 @@ func TestChannelMonitorV2WhereUsesConfiguredScopeAndEmptyFilterMeansAllConfigure
 	where, args := channelMonitorV2Where(filter, cfg, "m")
 	require.Contains(t, where, "m.platform = ANY($3)")
 	require.Contains(t, where, "m.group_id = ANY($4)")
+	require.Contains(t, where, "m.group_id = 0 OR EXISTS")
+	require.Contains(t, where, "channel_monitor_v2_group.deleted_at IS NULL")
 	require.Len(t, args, 4)
+}
+
+func TestChannelMonitorV2SelectedEmptyScopeReturnsEmptyAcrossReadEndpoints(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+	cfg := service.ChannelMonitorV2Config{
+		Enabled:        true,
+		GroupScopeMode: "selected",
+		GroupIDs:       []int64{},
+		Platforms:      []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}},
+	}
+	filter := service.ChannelMonitorV2Filter{}
+
+	dimensions, err := repo.GetDimensions(context.Background(), filter, cfg)
+	require.NoError(t, err)
+	require.Empty(t, dimensions.Platforms)
+	require.Empty(t, dimensions.Groups)
+	require.Empty(t, dimensions.Models)
+	snapshot, err := repo.GetSnapshot(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.Empty(t, snapshot.Trend)
+	models, err := repo.GetModels(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.Empty(t, models.Items)
+	errors, err := repo.GetErrors(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.Empty(t, errors.Items)
+	users, err := repo.GetUsers(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.Empty(t, users.Items)
+	for _, groupBy := range []service.ChannelMonitorV2GroupBy{
+		service.ChannelMonitorV2GroupByPlatform,
+		service.ChannelMonitorV2GroupByPlatformGroup,
+		service.ChannelMonitorV2GroupByPlatformModel,
+		service.ChannelMonitorV2GroupByPlatformGroupModel,
+	} {
+		matrix, matrixErr := repo.GetMatrix(context.Background(), filter, cfg, groupBy, false)
+		require.NoError(t, matrixErr)
+		require.Empty(t, matrix.Items)
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2WhereUsesSupportedPlatformCatalogAndDeletedGroupFilter(t *testing.T) {
+	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{
+		{Platform: "kiro", Enabled: true},
+		{Platform: "openai", Enabled: true},
+		{Platform: "gemini", Enabled: false},
+	}}
+	platforms := channelMonitorV2EnabledPlatforms(cfg)
+	require.Equal(t, []string{"openai"}, platforms)
+	where, args := channelMonitorV2Where(service.ChannelMonitorV2Filter{Start: time.Unix(1, 0), End: time.Unix(2, 0)}, cfg, "m")
+	require.Contains(t, where, "m.platform = ANY($3)")
+	require.Contains(t, where, "m.group_id = 0 OR EXISTS")
+	require.Contains(t, where, "channel_monitor_v2_group.deleted_at IS NULL")
+	require.Len(t, args, 3)
+}
+
+func TestChannelMonitorV2ConfigRepositoryReadsAndWritesScopeAndDisplayFields(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+	updatedAt := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	platformsJSON := `[ {"platform":"openai","enabled":true,"models":[]} ]`
+	thresholdsJSON := `{}`
+	mock.ExpectQuery(`SELECT version, enabled, refresh_interval_seconds, platforms, group_ids`).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"version", "enabled", "refresh_interval_seconds", "platforms", "group_ids", "group_scope_mode",
+			"synthetic_empty_buckets_enabled", "ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
+		}).AddRow(4, true, 60, platformsJSON, "{3}", "selected", true, "{timeout}", thresholdsJSON, updatedAt, int64(7)))
+	got, err := repo.GetConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "selected", got.GroupScopeMode)
+	require.True(t, got.SyntheticEmptyBucketsEnabled)
+	require.Equal(t, []int64{3}, got.GroupIDs)
+	require.Equal(t, int64(7), *got.UpdatedBy)
+
+	actorID := int64(8)
+	mock.ExpectQuery(`UPDATE channel_monitor_v2_config`).
+		WithArgs(true, 300, sqlmock.AnyArg(), sqlmock.AnyArg(), "selected", true, sqlmock.AnyArg(), sqlmock.AnyArg(), &actorID, 4).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"version", "enabled", "refresh_interval_seconds", "platforms", "group_ids", "group_scope_mode",
+			"synthetic_empty_buckets_enabled", "ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
+		}).AddRow(5, true, 300, platformsJSON, "{}", "selected", true, "{}", thresholdsJSON, updatedAt, actorID))
+	updated, err := repo.UpdateConfig(context.Background(), service.ChannelMonitorV2Config{
+		Enabled: true, RefreshIntervalSeconds: 300,
+		Platforms:      []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{}}},
+		GroupScopeMode: "selected", GroupIDs: []int64{}, SyntheticEmptyBucketsEnabled: true, UpdatedBy: &actorID,
+	}, 4)
+	require.NoError(t, err)
+	require.Equal(t, 5, updated.Version)
+	require.Equal(t, "selected", updated.GroupScopeMode)
+	require.Empty(t, updated.GroupIDs)
+	require.True(t, updated.SyntheticEmptyBucketsEnabled)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2ConfigRepositoryPreservesVersionConflict(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+	mock.ExpectQuery(`UPDATE channel_monitor_v2_config`).WillReturnRows(sqlmock.NewRows([]string{
+		"version", "enabled", "refresh_interval_seconds", "platforms", "group_ids", "group_scope_mode",
+		"synthetic_empty_buckets_enabled", "ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
+	}))
+	_, err = repo.UpdateConfig(context.Background(), service.ChannelMonitorV2Config{
+		GroupScopeMode: "selected", GroupIDs: []int64{},
+	}, 3)
+	require.ErrorIs(t, err, service.ErrChannelMonitorV2ConfigConflict)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2LoadErrorDetailsFiltersDeletedGroups(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+	mock.ExpectQuery(`current_error_group\.deleted_at IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"platform", "group_id", "model", "error_type", "error_owner", "error_source", "status_code", "upstream_status_code", "message", "count"}))
+	_, err = repo.loadErrorDetails(context.Background(), service.ChannelMonitorV2Filter{
+		Start: time.Unix(1, 0), End: time.Unix(2, 0),
+	}, service.ChannelMonitorV2Config{GroupScopeMode: "all", Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}}})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2CompositeMatrixSeedsEnabledEffectivePlatforms(t *testing.T) {
+	filter := service.ChannelMonitorV2Filter{}
+	cfg := service.ChannelMonitorV2Config{
+		GroupScopeMode: "selected",
+		GroupIDs:       []int64{1, 2, 3, 4},
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "openai", Enabled: true},
+			{Platform: "gemini", Enabled: true},
+			{Platform: "composite", Enabled: true},
+			{Platform: "minimax", Enabled: false},
+			{Platform: "kiro", Enabled: true},
+		},
+	}
+	groupInfo := map[int64]channelMonitorV2GroupInfo{
+		1: {name: "disabled", platform: "minimax"},
+		2: {name: "multi", platform: "composite", platforms: []string{"openai", "gemini", "openai", "kiro"}},
+		3: {name: "empty", platform: "composite"},
+		4: {name: "legacy", platform: "kiro"},
+	}
+	accs := seedChannelMonitorV2MatrixAccumulators(filter, cfg, service.ChannelMonitorV2GroupByPlatformGroup, groupInfo)
+	require.Len(t, accs, 3)
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "openai", groupID: 2})
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "gemini", groupID: 2})
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "composite", groupID: 3})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "kiro", groupID: 2})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "minimax", groupID: 1})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "kiro", groupID: 4})
+}
+
+func TestChannelMonitorV2GroupInfoLoadsCompositeAccountPlatforms(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+	mock.ExpectQuery(`LEFT JOIN account_groups ag ON ag.group_id = g.id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "platform", "platforms"}).
+			AddRow(int64(5), "Composite", "composite", "{gemini,openai,kiro}"))
+	info, err := repo.loadChannelMonitorV2GroupInfo(context.Background(), []int64{5})
+	require.NoError(t, err)
+	require.Equal(t, "composite", info[5].platform)
+	require.Equal(t, []string{"gemini", "openai", "kiro"}, info[5].platforms)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2ListUndeletedGroupIDsIncludesInactiveGroups(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	repo := &channelMonitorV2Repository{db: db}
+	mock.ExpectQuery(`SELECT id FROM groups WHERE deleted_at IS NULL ORDER BY id`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(2)).AddRow(int64(5)))
+	groupIDs, err := repo.listUndeletedGroupIDs(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 5}, groupIDs)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestChannelMonitorV2WhereRejectsGroupFilterOutsideConfiguredScope(t *testing.T) {
