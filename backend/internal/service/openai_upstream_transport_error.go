@@ -24,71 +24,42 @@ const openAITransportErrorTempUnschedDuration = 10 * time.Minute
 // ultimately exhausted.
 var openAITransportFailoverBody = []byte(`{"error":{"type":"upstream_error","message":"Upstream request failed"}}`)
 
-// upstreamTransportErrorClass describes how to react to a transport-level upstream
-// failure — i.e. the HTTP round-trip never completed (proxy / DNS / TCP / TLS
-// error, no HTTP status code received).
+// upstreamTransportErrorClass keeps legacy network persistence separate from
+// OpenAI account-owned proxy credential evidence.
 type upstreamTransportErrorClass struct {
-	// Persistent marks failures where retrying the same proxy/account is
-	// pointless: expired or rejected proxy credentials, a dead proxy endpoint,
-	// or DNS/routing failure. Such accounts should be temporarily unscheduled
-	// (and alerted on) instead of being repeatedly scheduled into hard failures.
-	Persistent bool
+	Persistent  bool
+	Attribution openAIAccountFailureAttribution
 }
 
-// persistentUpstreamTransportErrorMarkers are substrings (matched case-insensitively
-// against the raw transport error) that indicate a durable proxy/network fault.
-// Matched signals are intentionally specific failure *reasons*, not the operation
-// (e.g. we match "connection refused", not "proxyconnect") so that a transient
-// failure of the same operation (a proxy timeout) is NOT misclassified as durable.
-var persistentUpstreamTransportErrorMarkers = []string{
-	"authentication failed",         // SOCKS5 RFC1929 / proxy credentials rejected (expired account)
-	"proxy authentication required", // HTTP proxy 407
-	"connection refused",            // proxy/upstream endpoint down
-	"no route to host",
-	"network is unreachable",
-	"no such host", // DNS resolution failure (bad/expired proxy hostname)
-}
-
-// classifyUpstreamTransportError decides whether a transport-level upstream error
-// is durable (Persistent — evict the account + alert) or a transient blip
-// (fail over to a healthy account but keep this one schedulable).
-//
-// Motivating incident: a SOCKS5 proxy whose subscription lapsed returned
-// `username/password authentication failed`; the account was nonetheless
-// rescheduled on every request, hard-failing users with 502s.
-//
-// Classification strategy (mirrors sanitizeStreamError in gateway_service.go):
-//  1. Typed-error checks first (syscall constants, *net.DNSError) — portable and
-//     unambiguous.
-//  2. String-marker fallback for errors that have no typed form (e.g. the plain
-//     string returned by golang.org/x/net/proxy for SOCKS5 credential rejection).
-//     The network-layer string markers ("connection refused", "no route to host",
-//     "network is unreachable", "no such host") are kept as a cross-platform safety
-//     net even though the typed checks should cover them on modern Go+Linux.
+// classifyUpstreamTransportError preserves shared Gateway/Gemini persistence;
+// Attribution independently identifies OpenAI account-owned proxy rejection.
 func classifyUpstreamTransportError(err error) upstreamTransportErrorClass {
 	if err == nil {
-		return upstreamTransportErrorClass{}
+		return upstreamTransportErrorClass{Attribution: openAIAccountFailureUnknown}
 	}
-
-	// — Typed checks (preferred) ——————————————————————————————————————————————
-	if errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.EHOSTUNREACH) ||
-		errors.Is(err, syscall.ENETUNREACH) {
-		return upstreamTransportErrorClass{Persistent: true}
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-		return upstreamTransportErrorClass{Persistent: true}
-	}
-
-	// — String-marker fallback ————————————————————————————————————————————————
 	msg := strings.ToLower(err.Error())
-	for _, marker := range persistentUpstreamTransportErrorMarkers {
-		if strings.Contains(msg, marker) {
-			return upstreamTransportErrorClass{Persistent: true}
+	if strings.Contains(msg, "proxy authentication required") ||
+		(strings.Contains(msg, "username/password authentication failed") &&
+			(strings.Contains(msg, "socks") || strings.Contains(msg, "proxy"))) ||
+		(strings.Contains(msg, "proxy authentication failed") && strings.Contains(msg, "proxy")) ||
+		(strings.Contains(msg, "proxyconnect") && strings.Contains(msg, "407")) {
+		return upstreamTransportErrorClass{
+			Persistent:  true,
+			Attribution: openAIAccountFailureProxyAuthentication,
 		}
 	}
-	return upstreamTransportErrorClass{}
+	result := upstreamTransportErrorClass{Attribution: openAIAccountFailureTransport}
+	result.Persistent = errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH)
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		result.Persistent = true
+	}
+	for _, marker := range []string{"authentication failed", "proxy authentication required", "connection refused", "no route to host", "network is unreachable", "no such host"} {
+		if strings.Contains(msg, marker) {
+			result.Persistent = true
+		}
+	}
+	return result
 }
 
 // isClientCanceledTransportError reports whether a transport-level failure was
@@ -103,9 +74,8 @@ func isClientCanceledTransportError(ctx context.Context, err error) bool {
 // (Do/DoWithTLS returned a non-HTTP error: proxy/DNS/TCP/TLS). It:
 //  1. records the failure in Ops error logs (status 0, kind=request_error),
 //     except when the client disconnected (see isClientCanceledTransportError);
-//  2. for durable faults (expired/rejected proxy creds, dead proxy, DNS/routing)
-//     temporarily unschedules the account (DB + in-memory) and logs a stable
-//     warn event that alert rules can key on;
+//  2. for explicit rejected proxy credentials, temporarily unschedules the
+//     account (DB + in-memory) and logs a stable warn event that alert rules can key on;
 //  3. returns an error that is *UpstreamFailoverError (so the handler fails over
 //     to a healthy account) for all non-canceled errors, or a plain error for
 //     context.Canceled (client gone — no failover, no eviction).
@@ -150,14 +120,17 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 		return err
 	}
 
-	if classifyUpstreamTransportError(err).Persistent {
+	transportClass := classifyUpstreamTransportError(err)
+	if transportClass.Attribution == openAIAccountFailureProxyAuthentication {
 		s.tempUnscheduleOpenAITransportError(ctx, account, safeErr)
 	}
 
-	return &UpstreamFailoverError{
+	failoverErr := &UpstreamFailoverError{
 		StatusCode:   http.StatusBadGateway,
 		ResponseBody: openAITransportFailoverBody,
 	}
+	failoverErr.accountFailureAttribution = transportClass.Attribution
+	return failoverErr
 }
 
 // tempUnscheduleOpenAITransportError marks an account temporarily unschedulable
