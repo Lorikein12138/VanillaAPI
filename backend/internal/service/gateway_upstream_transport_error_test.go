@@ -5,9 +5,11 @@ package service
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -200,5 +202,41 @@ func TestHandleUpstreamTransportError_UpstreamDeadlineStillFailsOver(t *testing.
 	}
 	if repo.calls != 0 {
 		t.Fatalf("SetTempUnschedulable called %d times for upstream deadline, want 0", repo.calls)
+	}
+}
+
+func TestGatewayTransportLegacyPersistenceAndOps(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		persistent bool
+	}{
+		{"refused", syscall.ECONNREFUSED, true},
+		{"host", syscall.EHOSTUNREACH, true},
+		{"network", syscall.ENETUNREACH, true},
+		{"dns", &net.DNSError{IsNotFound: true, Err: "missing"}, true},
+		{"tls", errors.New("tls: handshake failure"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &transportTempUnschedRepoStub{}
+			svc := &GatewayService{accountRepo: repo}
+			c := newTransportErrorTestGin(t)
+			err := svc.handleUpstreamTransportError(context.Background(), c, &Account{ID: 99101, Platform: PlatformAnthropic}, tc.err, OpsUpstreamErrorEvent{})
+			var fo *UpstreamFailoverError
+			if !errors.As(err, &fo) || !fo.ShouldRetryNextAccount() || string(fo.ResponseBody) != string(gatewayTransportFailoverBody) {
+				t.Fatalf("unsafe failover: %v", err)
+			}
+			want := 0
+			if tc.persistent {
+				want = 1
+			}
+			if repo.calls != want || c.Writer.Written() {
+				t.Fatalf("calls=%d written=%v", repo.calls, c.Writer.Written())
+			}
+			raw, ok := c.Get(OpsUpstreamErrorsKey)
+			if !ok || len(raw.([]*OpsUpstreamErrorEvent)) != 1 {
+				t.Fatal("missing Ops event")
+			}
+		})
 	}
 }

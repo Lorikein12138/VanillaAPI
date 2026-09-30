@@ -262,11 +262,13 @@ func newOpenAISilentRefusalFailoverError(c *gin.Context, account *Account, upstr
 	if strings.TrimSpace(upstreamRequestID) != "" {
 		headers.Set("x-request-id", strings.TrimSpace(upstreamRequestID))
 	}
-	return &UpstreamFailoverError{
+	failoverErr := &UpstreamFailoverError{
 		StatusCode:      http.StatusBadGateway,
 		ResponseBody:    openAISilentRefusalErrorBody(),
 		ResponseHeaders: headers,
 	}
+	failoverErr.accountFailureAttribution = openAIAccountFailureSilentRefusal
+	return failoverErr
 }
 
 // newOpenAIResponsesEmptyCompletedFailoverError marks an empty
@@ -301,11 +303,13 @@ func newOpenAIResponsesEmptyCompletedFailoverError(c *gin.Context, account *Acco
 	if strings.TrimSpace(upstreamRequestID) != "" {
 		headers.Set("x-request-id", strings.TrimSpace(upstreamRequestID))
 	}
-	return &UpstreamFailoverError{
+	failoverErr := &UpstreamFailoverError{
 		StatusCode:      http.StatusBadGateway,
 		ResponseBody:    openAISilentRefusalErrorBody(),
 		ResponseHeaders: headers,
 	}
+	failoverErr.accountFailureAttribution = openAIAccountFailureSilentRefusal
+	return failoverErr
 }
 
 func openAISilentRefusalErrorBody() []byte {

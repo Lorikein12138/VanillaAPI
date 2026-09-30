@@ -1189,7 +1189,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthProbeLongReq
 
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthPostWriteFailureEndsProbe(t *testing.T) {
 	groupID := int64(70015)
-	svc := newSmartSchedulerTestService([]Account{
+	svc := newIsolatedSmartSchedulerTestServiceForTest(t, []Account{
 		newSmartSchedulerTestAccount(7081, groupID, 10),
 		newSmartSchedulerTestAccount(7082, groupID, 20),
 	}, schedulerTestConcurrencyCache{})
@@ -1199,7 +1199,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SmartHealthPostWriteFai
 	selection := selectSmartAccountForTest(t, svc, groupID, "")
 	require.Equal(t, int64(7081), selection.Account.ID)
 	require.NotZero(t, selection.Account.smartHealthProbeID)
-	svc.ObserveOpenAIAccountHealthFailure(context.Background(), selection.Account, &UpstreamFailoverError{Scope: GatewayFailureScopeAccount})
+	svc.ObserveOpenAIAccountHealthFailure(context.Background(), selection.Account, &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount})
 	stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, 7081)
 	stat.mu.Lock()
 	require.Zero(t, stat.probeID)
@@ -5251,12 +5251,16 @@ func TestSmartSchedulingStall_Sticky(t *testing.T) {
 
 func TestSmartSchedulingStall_Attribution(t *testing.T) {
 	schedulerService := &OpenAIGatewayService{
-		rateLimitService:   newOpenAISchedulerModeRateLimitService(true, false),
+		rateLimitService:   newIsolatedOpenAISchedulerModeRateLimitServiceForTest(t, true, false),
 		openaiAccountStats: newOpenAIAccountRuntimeStats(),
 	}
 	scheduler, ok := schedulerService.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
 	require.True(t, ok)
-	timeoutErr := &UpstreamFailoverError{StatusCode: http.StatusGatewayTimeout, SafeToFailoverAfterWrite: true}
+	timeoutErr := &UpstreamFailoverError{
+		StatusCode:                http.StatusGatewayTimeout,
+		SafeToFailoverAfterWrite:  true,
+		accountFailureAttribution: openAIAccountFailureFirstOutputTimeout,
+	}
 	account := &Account{ID: 7801, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
 	schedulerService.ReportOpenAIAccountScheduleResult(account, "model", false, nil, timeoutErr)
@@ -5286,7 +5290,7 @@ func TestSmartSchedulingStall_Attribution(t *testing.T) {
 	canceledStat.mu.Unlock()
 
 	postOutputAccount := &Account{ID: 7803, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	schedulerService.ObserveOpenAIAccountHealthFailure(context.Background(), postOutputAccount, errors.New("attributable stream failure"))
+	schedulerService.ObserveOpenAIAccountHealthFailure(context.Background(), postOutputAccount, &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount})
 	postOutputStat := openAIAccountRuntimeStatForTest(t, scheduler.stats, postOutputAccount.ID)
 	postOutputStat.mu.Lock()
 	require.Len(t, postOutputStat.smartErrorWindow, 1, "an attributable failure after semantic output is counted once")
@@ -7771,4 +7775,110 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LegacyAccountModelRoute
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
+}
+
+func TestOpenAILegacyCredentialSubmissionFourModes(t *testing.T) {
+	for _, smart := range []bool{false, true} {
+		for _, advanced := range []bool{false, true} {
+			for _, scope := range []GatewayFailureScope{"", GatewayFailureScopeRequest, GatewayFailureScopeProvider, GatewayFailureScopeAccount} {
+				t.Run(fmt.Sprintf("S=%v_A=%v_scope=%s", smart, advanced, scope), func(t *testing.T) {
+					svc := newIsolatedSmartSchedulerTestServiceForTest(t, []Account{newSmartSchedulerTestAccount(98101, 40101, 1)}, schedulerTestConcurrencyCache{})
+					svc.rateLimitService = newIsolatedOpenAISchedulerModeRateLimitServiceForTest(t, smart, advanced)
+					first := selectSmartAccountForTest(t, svc, 40101, "")
+					require.EqualValues(t, 98101, first.Account.ID)
+					if first.ReleaseFunc != nil {
+						first.ReleaseFunc()
+					}
+					account := &Account{ID: 98101, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+					scheduler, _ := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
+					var stat *openAIAccountRuntimeStat
+					if scheduler != nil {
+						stat = openAIAccountRuntimeStatForTest(t, scheduler.stats, account.ID)
+						stat.sampleCount.Store(7)
+						stat.errorRateEWMABits.Store(math.Float64bits(.3))
+						stat.ttftEWMABits.Store(math.Float64bits(200))
+						stat.lastObservedAt.Store(123)
+						if smart {
+							account.smartHealthProbeID = 71
+							stat.mu.Lock()
+							stat.probeID = 71
+							stat.probeActive.Store(true)
+							stat.probeLeaseUntil.Store(time.Now().Add(time.Minute).UnixNano())
+							stat.mu.Unlock()
+						}
+					}
+					source := &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: scope, StatusCode: 401}
+					svc.ReportOpenAIAccountScheduleResult(account, "model", false, nil, source)
+					neutral := scope != GatewayFailureScopeAccount && (!smart || scope != "")
+					if stat != nil && neutral {
+						require.EqualValues(t, 7, stat.sampleCount.Load())
+						require.Equal(t, math.Float64bits(.3), stat.errorRateEWMABits.Load())
+						require.Equal(t, math.Float64bits(200), stat.ttftEWMABits.Load())
+						require.EqualValues(t, 123, stat.lastObservedAt.Load())
+						stat.mu.Lock()
+						require.Empty(t, stat.smartErrorWindow)
+						require.Empty(t, stat.smartTTFTWindow)
+						if smart {
+							require.False(t, stat.probeActive.Load())
+							require.Zero(t, stat.probeID)
+						}
+						stat.mu.Unlock()
+					} else if stat != nil {
+						require.EqualValues(t, 8, stat.sampleCount.Load())
+					}
+					require.Equal(t, !neutral, source.accountScheduleFailureReported.Load())
+					next := selectSmartAccountForTest(t, svc, 40101, "")
+					require.Equal(t, first.Account.ID, next.Account.ID, "four-mode selection remains available")
+					if next.ReleaseFunc != nil {
+						next.ReleaseFunc()
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestOpenAILegacySubmissionSkipsBreakerBeforeScheduler(t *testing.T) {
+	for _, scope := range []GatewayFailureScope{"", GatewayFailureScopeRequest, GatewayFailureScopeProvider} {
+		rate := newIsolatedOpenAISchedulerModeRateLimitServiceForTest(t, false, true)
+		cache := &openAIAPIKeyHealthCacheStub{}
+		rate.accountRepo = &openAIAPIKeyHealthAccountRepo{}
+		rate.settingService = NewSettingService(&openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
+			SettingKeySmartSchedulingEnabled: "false", openAIAdvancedSchedulerSettingKey: "true",
+			SettingKeyOpenAIAPIKeyHealthBreakerSettings: `{"enabled":true,"window_minutes":1,"failure_threshold":3,"cooldown_minutes":5}`,
+		}}, &config.Config{})
+		rate.SetOpenAIAPIKeyHealthCache(cache)
+		svc := &OpenAIGatewayService{rateLimitService: rate}
+		account := openAIHealthPoolAccount()
+		source := &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: scope, StatusCode: 401}
+		require.False(t, svc.ReportOpenAIAccountScheduleResult(account, "model", false, nil, source))
+		require.Zero(t, cache.recordCalls)
+		require.Nil(t, svc.openaiAccountStatsPublished.Load(), "ignored report must not initialize stats")
+		require.False(t, source.accountScheduleFailureReported.Load())
+		control := &UpstreamFailoverError{Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount, StatusCode: 401}
+		svc.ReportOpenAIAccountScheduleResult(account, "model", false, nil, control)
+		require.Equal(t, 1, cache.recordCalls, "enabled breaker must receive the account-scoped control")
+	}
+}
+
+// isolateOpenAISchedulerSettingsForTest owns the shared cache lifecycle. Fixture
+// asynchronous work must register a later cleanup to stop/join before this reset.
+func isolateOpenAISchedulerSettingsForTest(t testing.TB) {
+	t.Helper()
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+}
+
+func newIsolatedOpenAISchedulerModeRateLimitServiceForTest(t testing.TB, smart, advanced bool) *RateLimitService {
+	t.Helper()
+	isolateOpenAISchedulerSettingsForTest(t)
+	return newOpenAISchedulerModeRateLimitService(smart, advanced)
+}
+
+func newIsolatedSmartSchedulerTestServiceForTest(t testing.TB, accounts []Account, concurrency schedulerTestConcurrencyCache) *OpenAIGatewayService {
+	t.Helper()
+	isolateOpenAISchedulerSettingsForTest(t)
+	svc := newSmartSchedulerTestService(accounts, concurrency)
+	t.Cleanup(svc.CloseOpenAIWSPool)
+	return svc
 }
