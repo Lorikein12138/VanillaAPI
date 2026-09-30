@@ -948,6 +948,10 @@ func (s *openAIAccountRuntimeStats) reportAtForRequest(
 	if s == nil || accountID <= 0 {
 		return
 	}
+	if smartEnabled && !success && !attributable {
+		s.releaseNeutralProbeLeaseForID(accountID, probeID, now)
+		return
+	}
 	const alpha = 0.2
 	stat, release, ok := s.acquire(accountID, true, true)
 	if !ok {
@@ -1566,6 +1570,36 @@ func (s *openAIAccountRuntimeStats) cancelProbeLeaseForID(accountID int64, probe
 		}
 		if stat.probeTraceStarted {
 			event := openAIProbeTraceEventLocked(stat, accountID, "cancel", "inconclusive", reason)
+			event.batchSampleCount = batchSamplesBefore
+			shouldDrainProbeTrace = enqueueOpenAIAccountProbeTraceLocked(stat, event)
+		}
+		clearOpenAIProbeTraceLocked(stat)
+	}
+	stat.mu.Unlock()
+	release()
+	if shouldDrainProbeTrace {
+		drainOpenAIAccountProbeTraceQueue(stat)
+	}
+}
+
+func (s *openAIAccountRuntimeStats) releaseNeutralProbeLeaseForID(accountID int64, probeID uint64, _ time.Time) {
+	if probeID == 0 {
+		return
+	}
+	stat, release, ok := s.acquire(accountID, false, true)
+	if !ok {
+		return
+	}
+	shouldDrainProbeTrace := false
+	stat.mu.Lock()
+	if stat.probeID == probeID {
+		batchSamplesBefore := len(stat.probeBatchSamples)
+		stat.probeID = 0
+		stat.probeStartedAt = time.Time{}
+		stat.probeActive.Store(false)
+		stat.probeLeaseUntil.Store(0)
+		if stat.probeTraceStarted {
+			event := openAIProbeTraceEventLocked(stat, accountID, "cancel", "inconclusive", "not_attributable")
 			event.batchSampleCount = batchSamplesBefore
 			shouldDrainProbeTrace = enqueueOpenAIAccountProbeTraceLocked(stat, event)
 		}
@@ -4371,27 +4405,55 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	}
 	accountID := account.ID
 	healthTripped := false
-	clientCanceled := !success && len(observedErr) > 0 && errors.Is(observedErr[0], context.Canceled)
+	var reportErr error
+	if len(observedErr) > 0 {
+		reportErr = observedErr[0]
+	}
+	// Reproduce the frozen handlers' legacy submission boundary before any
+	// breaker, scheduler or runtime observation.
+	if !success && s != nil && !s.isSmartSchedulingEnabled(context.Background()) && !shouldSubmitOpenAILegacyFailure(reportErr) {
+		return false
+	}
+	classification := classifyOpenAIAccountFailure(reportErr)
+	effectiveSuccess := success
 	attributable := success
-	if !success {
-		attributable = false
-		if !clientCanceled && len(observedErr) > 0 && observedErr[0] != nil {
-			var failoverErr *UpstreamFailoverError
-			if errors.As(observedErr[0], &failoverErr) {
-				attributable = failoverErr.ShouldReportAccountScheduleFailure() && failoverErr.claimAccountScheduleFailureReport()
-			} else {
-				attributable = true
-			}
+	if success && reportErr != nil && s != nil && s.isSmartSchedulingEnabled(context.Background()) {
+		// Some legacy callers report a completed Images user error as a scheduling
+		// success. Keep that S=false observation, but use the source classification
+		// when smart health is enabled.
+		effectiveSuccess = false
+		attributable = classification.attributable
+		if !attributable {
+			slog.Debug("openai_account_failure_attribution",
+				"account_id", accountID,
+				"status_code", openAIAccountFailureStatusCode(reportErr),
+				"classification", classification.reason.String(),
+			)
 		}
+	}
+	if !success {
+		effectiveSuccess = false
+		attributable = classification.attributable
+		if !attributable {
+			slog.Debug("openai_account_failure_attribution",
+				"account_id", accountID,
+				"status_code", openAIAccountFailureStatusCode(reportErr),
+				"classification", classification.reason.String(),
+			)
+		}
+	}
+	var failoverErr *UpstreamFailoverError
+	if !effectiveSuccess && attributable && errors.As(reportErr, &failoverErr) && !failoverErr.claimAccountScheduleFailureReport() {
+		return healthTripped
 	}
 	if s != nil && s.rateLimitService != nil {
-		if success {
+		if effectiveSuccess {
 			s.rateLimitService.ObserveOpenAIAPIKeyHealthSuccess(context.Background(), account)
 		} else if attributable {
-			healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, observedErr[0])
+			healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, reportErr)
 		}
 	}
-	if success && s != nil {
+	if effectiveSuccess && s != nil {
 		s.openaiOAuth429RetryStartedAt.Delete(accountID)
 		s.clearOpenAIAccountModelTransientState(accountID, normalizeOpenAIAccountModelTransientModel(model))
 	}
@@ -4408,9 +4470,9 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 		return healthTripped
 	}
 	if reporter, ok := scheduler.(*defaultOpenAIAccountScheduler); ok {
-		reporter.reportAccountResult(account, success, firstTokenMs, attributable)
+		reporter.reportAccountResult(account, effectiveSuccess, firstTokenMs, attributable)
 	} else if account.smartHealthProbeID == 0 {
-		scheduler.ReportResult(accountID, success, firstTokenMs)
+		scheduler.ReportResult(accountID, effectiveSuccess, firstTokenMs)
 	}
 	return healthTripped
 }
@@ -4424,16 +4486,24 @@ func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Con
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	classification := classifyOpenAIAccountFailure(observedErr)
 	if errors.Is(observedErr, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
 		if stats := s.openaiAccountStatsPublished.Load(); stats != nil && account.smartHealthProbeID != 0 {
-			stats.cancelProbeLeaseForID(account.ID, account.smartHealthProbeID, time.Now())
+			stats.releaseNeutralProbeLeaseForID(account.ID, account.smartHealthProbeID, time.Now())
 		}
 		return false
 	}
-	attributable := true
+	attributable := classification.attributable
 	var failoverErr *UpstreamFailoverError
-	if errors.As(observedErr, &failoverErr) {
-		attributable = failoverErr.ShouldReportAccountScheduleFailure() && failoverErr.claimAccountScheduleFailureReport()
+	if attributable && errors.As(observedErr, &failoverErr) && !failoverErr.claimAccountScheduleFailureReport() {
+		return false
+	}
+	if !attributable {
+		slog.Debug("openai_account_failure_attribution",
+			"account_id", account.ID,
+			"status_code", openAIAccountFailureStatusCode(observedErr),
+			"classification", classification.reason.String(),
+		)
 	}
 	healthTripped := false
 	if attributable && s.rateLimitService != nil {
@@ -5097,4 +5167,13 @@ func calcLoadSkewByMoments(sum float64, sumSquares float64, count int) float64 {
 		variance = 0
 	}
 	return math.Sqrt(variance)
+}
+
+// shouldSubmitOpenAILegacyFailure is independent of smart source attribution.
+func shouldSubmitOpenAILegacyFailure(err error) bool {
+	var failoverErr *UpstreamFailoverError
+	if errors.As(err, &failoverErr) && failoverErr != nil {
+		return !failoverErr.IsCredentialFailure() || failoverErr.Scope == GatewayFailureScopeAccount
+	}
+	return true
 }

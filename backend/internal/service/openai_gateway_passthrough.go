@@ -290,7 +290,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				"message": ImageGenerationPermissionMessage(),
 			},
 		})
-		return nil, errors.New("image generation disabled for group")
+		return nil, withOpenAIAccountFailureAttribution(errors.New("image generation disabled for group"), openAIAccountFailureRequestInvalid)
 	}
 	imageBillingModel := ""
 	imageSizeTier := ""
@@ -2232,7 +2232,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 									"message": errMsg,
 								},
 							})
-							return resultWithUsage(), fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg)
+							return resultWithUsage(), withOpenAIAccountFailureAttribution(fmt.Errorf("upstream response failed: passthrough rule matched message=%s", errMsg), openAIAccountFailureRequestInvalid)
 						}
 					}
 				}

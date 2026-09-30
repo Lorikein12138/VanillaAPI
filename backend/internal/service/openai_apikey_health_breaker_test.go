@@ -75,11 +75,12 @@ func TestClassifyOpenAIAPIKeyHealthFailureExclusions(t *testing.T) {
 		err      error
 		eligible bool
 	}{
-		{name: "account attributed 502", err: &UpstreamFailoverError{StatusCode: http.StatusBadGateway}, eligible: true},
+		{name: "ordinary provider 502", err: &UpstreamFailoverError{StatusCode: http.StatusBadGateway}},
 		{name: "request scoped capacity", err: &UpstreamFailoverError{StatusCode: 529, RequestScopedTransient: true}},
 		{name: "provider scoped overload", err: &UpstreamFailoverError{StatusCode: 529, Scope: GatewayFailureScopeProvider}},
 		{name: "dedicated same account retry", err: &UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, RetryableOnSameAccount: true}},
-		{name: "credential disable path", err: &UpstreamFailoverError{StatusCode: http.StatusUnauthorized, Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount}},
+		{name: "credential disable path", err: &UpstreamFailoverError{StatusCode: http.StatusUnauthorized, Stage: GatewayFailureStageAccountAuth, Scope: GatewayFailureScopeAccount}, eligible: true},
+		{name: "explicit quota", err: newOpenAIUpstreamFailoverError(http.StatusTooManyRequests, nil, []byte(`{"error":{"code":"insufficient_quota"}}`), "", false), eligible: true},
 		{name: "client request", err: &UpstreamFailoverError{StatusCode: http.StatusBadRequest}},
 	}
 	for _, tt := range tests {
@@ -114,7 +115,11 @@ func TestOpenAIAPIKeyHealthBreakerTripsPersistedAndRuntimeState(t *testing.T) {
 	svc.SetAccountRuntimeBlocker(blocker)
 	account := openAIHealthPoolAccount()
 
-	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: http.StatusBadGateway, ResponseBody: []byte(`{"error":"upstream"}`)}))
+	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{
+		StatusCode: http.StatusUnauthorized,
+		Stage:      GatewayFailureStageAccountAuth,
+		Scope:      GatewayFailureScopeAccount,
+	}))
 	require.Equal(t, 1, cache.recordCalls)
 	require.Equal(t, 1, cache.setCalls)
 	require.Equal(t, 1, repo.setCalls)

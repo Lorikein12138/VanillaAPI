@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"syscall"
 	"testing"
 	"time"
 
@@ -150,4 +152,38 @@ func TestGeminiForwardAsChatCompletions_TransportErrorFailsOverWithoutRetry(t *t
 	require.Equal(t, 1, httpStub.calls, "不应在同账号上重试")
 	require.Zero(t, repo.calls)
 	require.False(t, c.Writer.Written(), "换号场景不应写客户端响应")
+}
+
+func TestGeminiTransportLegacyPersistenceAndOps(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		persistent bool
+	}{
+		{"refused", syscall.ECONNREFUSED, true},
+		{"host", syscall.EHOSTUNREACH, true},
+		{"network", syscall.ENETUNREACH, true},
+		{"dns", &net.DNSError{IsNotFound: true, Err: "missing"}, true},
+		{"tls", errors.New("tls: handshake failure"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, upstream, repo := newGeminiTransportErrorService(tc.err)
+			c, rec := newGeminiNativeTestContext(t)
+			_, err := svc.ForwardNative(context.Background(), c, geminiPoolModeAPIKeyAccount(), "gemini-2.5-flash", "generateContent", false, []byte(geminiTransportTestNativeBody))
+			requireGeminiTransportFailover(t, err)
+			require.Equal(t, 1, upstream.calls)
+			want := 0
+			if tc.persistent {
+				want = 1
+			}
+			require.Equal(t, want, repo.calls)
+			require.False(t, c.Writer.Written())
+			require.Zero(t, rec.Body.Len())
+			raw, ok := c.Get(OpsUpstreamErrorsKey)
+			require.True(t, ok)
+			events := raw.([]*OpsUpstreamErrorEvent)
+			require.Len(t, events, 1)
+			require.Equal(t, "request_error", events[0].Kind)
+		})
+	}
 }

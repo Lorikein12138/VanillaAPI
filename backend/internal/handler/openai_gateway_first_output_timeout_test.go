@@ -232,7 +232,11 @@ func TestSmartSchedulingStall_FailoverBudget(t *testing.T) {
 func ptrForSmartSchedulingStall(value int64) *int64 { return &value }
 
 func TestSmartSchedulingStall_TimeoutAttribution(t *testing.T) {
-	failoverErr := &service.UpstreamFailoverError{SafeToFailoverAfterWrite: true}
+	failoverErr := &service.UpstreamFailoverError{
+		StatusCode:               http.StatusGatewayTimeout,
+		ResponseBody:             []byte(`{"error":{"type":"first_output_timeout"}}`),
+		SafeToFailoverAfterWrite: true,
+	}
 	count := 0
 	require.True(t, failoverErr.ShouldReportAccountScheduleFailure())
 	require.False(t, openAIFirstOutputFailoverExhausted(failoverErr, &count))

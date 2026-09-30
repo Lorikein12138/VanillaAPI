@@ -839,7 +839,7 @@ func findHandlerRefresherStarted(router *gin.Engine) <-chan struct{} {
 	return value.(chan struct{})
 }
 
-func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGatewayHandler, *grokCredentialHandlerRepo, *grokCredentialHandlerUpstream, *gin.Engine, func()) {
+func newGrokCredentialFailoverHandler(t *testing.T, mode string, schedulingRate ...*service.RateLimitService) (*OpenAIGatewayHandler, *grokCredentialHandlerRepo, *grokCredentialHandlerUpstream, *gin.Engine, func()) {
 	t.Helper()
 	groupID := int64(901)
 	accounts := []service.Account{
@@ -924,9 +924,13 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Gateway.MaxAccountSwitches = 3
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	var rate *service.RateLimitService
+	if len(schedulingRate) > 0 {
+		rate = schedulingRate[0]
+	}
 	gateway := service.NewOpenAIGatewayService(
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
-		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
+		service.NewBillingService(cfg, nil), rate, billingCache, upstream,
 		&service.DeferredService{}, nil, provider, nil, nil, nil, nil, nil,
 	)
 	cache := &concurrencyCacheMock{
@@ -941,6 +945,9 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
+		if mode == "budget" {
+			c.Set("grok_credential_failover_deadline", time.Now().Add(-time.Second))
+		}
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
 		c.Next()
@@ -957,4 +964,79 @@ func newGrokCredentialFailoverHandler(t *testing.T, mode string) (*OpenAIGateway
 		billingCache.Stop()
 	}
 	return h, repo, upstream, router, cleanup
+}
+
+// Actual HTTP and WebSocket credential-failover chains must not submit provider
+// failures into advanced legacy observations after handler guards were removed.
+func TestOpenAIHandlerLegacyProviderFailureDoesNotCreateRuntimeSamples(t *testing.T) {
+	for _, endpoint := range []struct{ name, path string }{
+		{"responses", "/openai/v1/responses"},
+		{"messages", "/openai/v1/messages"},
+		{"chat", "/openai/v1/chat/completions"},
+		{"ws", "/openai/v1/responses"},
+	} {
+		for _, mode := range []string{"provider", "budget"} {
+			t.Run(endpoint.name+"/"+mode, func(t *testing.T) {
+				settings := service.NewSettingService(&smartSchedulingStallSettingsRepo{values: map[string]string{
+					service.SettingKeySmartSchedulingEnabled: "false",
+					"openai_advanced_scheduler_enabled":      "true",
+				}}, &config.Config{})
+				require.NoError(t, settings.UpdateSettings(context.Background(), &service.SystemSettings{
+					SmartSchedulingEnabled: false, OpenAIAdvancedSchedulerEnabled: true,
+				}))
+				t.Cleanup(func() {
+					require.NoError(t, settings.UpdateSettings(context.Background(), &service.SystemSettings{}))
+				})
+				rate := service.NewRateLimitService(nil, nil, &config.Config{}, nil, nil)
+				rate.SetSettingService(settings)
+				h, repo, upstream, router, cleanup := newGrokCredentialFailoverHandler(t, mode, rate)
+				// This constructor owns maintenance workers; stop/join them before
+				// the earlier settings cleanup invalidates the global generation.
+				t.Cleanup(h.gatewayService.CloseOpenAIWSPool)
+				defer cleanup()
+				if endpoint.name == "ws" {
+					server := httptest.NewServer(router)
+					defer server.Close()
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					defer cancel()
+					conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+endpoint.path, nil)
+					require.NoError(t, err)
+					defer conn.CloseNow()
+					payload, _ := json.Marshal(map[string]any{"type": "response.create", "model": "grok", "input": "hello", "stream": false})
+					require.NoError(t, conn.Write(ctx, coderws.MessageText, payload))
+					_, _, err = conn.Read(ctx)
+					var closeErr coderws.CloseError
+					require.ErrorAs(t, err, &closeErr)
+					require.Contains(t, closeErr.Reason, service.GrokCredentialUnavailableClientMessage)
+				} else {
+					body := map[string]any{"model": "grok", "stream": false}
+					if endpoint.name == "responses" {
+						body["input"] = "hello"
+					} else {
+						body["messages"] = []map[string]string{{"role": "user", "content": "hello"}}
+						body["max_tokens"] = 16
+					}
+					payload, _ := json.Marshal(body)
+					rec := httptest.NewRecorder()
+					req := httptest.NewRequest(http.MethodPost, endpoint.path, bytes.NewReader(payload))
+					req.Header.Set("Content-Type", "application/json")
+					router.ServeHTTP(rec, req)
+					require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+					require.Contains(t, rec.Body.String(), service.GrokCredentialUnavailableClientMessage)
+				}
+				require.Equal(t, 1, repo.selectorCalls())
+				require.Empty(t, upstream.accountHits())
+				require.Empty(t, repo.errorIDs())
+				require.Zero(t, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount)
+				// All three suppressed scopes use the same central boundary for each
+				// entry; account scope remains a legacy observation.
+				for _, scope := range []service.GatewayFailureScope{"", service.GatewayFailureScopeRequest, service.GatewayFailureScopeProvider} {
+					h.gatewayService.ReportOpenAIAccountScheduleResult(&service.Account{ID: 99001, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}, "model", false, nil, &service.UpstreamFailoverError{Stage: service.GatewayFailureStageAccountAuth, Scope: scope, StatusCode: 401})
+					require.Zero(t, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount)
+				}
+				h.gatewayService.ReportOpenAIAccountScheduleResult(&service.Account{ID: 99001, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}, "model", false, nil, &service.UpstreamFailoverError{Stage: service.GatewayFailureStageAccountAuth, Scope: service.GatewayFailureScopeAccount, StatusCode: 401})
+				require.Equal(t, 1, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount)
+			})
+		}
+	}
 }
