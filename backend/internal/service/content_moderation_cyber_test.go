@@ -67,7 +67,7 @@ func (r *cyberOrderingTestRepo) snapshotEmailSents() []bool {
 
 func TestRecordCyberPolicyEvent_DisabledWhenRiskControlOff(t *testing.T) {
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled: "false",
 		}},
@@ -95,7 +95,7 @@ func TestRecordCyberPolicyEvent_DisabledWhenRiskControlOff(t *testing.T) {
 
 func TestRecordCyberPolicyEvent_WritesLogWhenEnabled(t *testing.T) {
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled: "true",
 		}},
@@ -204,7 +204,7 @@ func TestRecordCyberPolicyEvent_RespectsContentModerationScope(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &banCountArgsTestRepo{}
 			userRepo := &contentModerationTestUserRepo{user: &User{ID: 1, Role: RoleUser, Status: StatusActive}}
-			svc := NewContentModerationService(
+			svc := newContentModerationTestService(t,
 				&contentModerationTestSettingRepo{values: map[string]string{
 					SettingKeyRiskControlEnabled:      "true",
 					SettingKeyContentModerationConfig: tt.config,
@@ -240,7 +240,7 @@ func TestRecordCyberPolicyEvent_InitialRuntimeSnapshotLoadFailureSkipsEvent(t *t
 		SettingKeyRiskControlEnabled:      "true",
 		SettingKeyContentModerationConfig: `{invalid`,
 	}}
-	svc := NewContentModerationService(settingRepo, repo, nil, nil, nil, nil, nil, nil)
+	svc := newContentModerationTestService(t, settingRepo, repo, nil, nil, nil, nil, nil, nil)
 
 	svc.RecordCyberPolicyEvent(context.Background(), CyberPolicyRecordInput{
 		UserID: 1,
@@ -260,7 +260,8 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 		SettingKeyRiskControlEnabled:      "true",
 		SettingKeyContentModerationConfig: `{"all_groups":true,"model_filter":{"type":"include","models":["gpt-5"]}}`,
 	}}
-	svc := NewContentModerationService(settingRepo, repo, nil, nil, nil, nil, nil, nil)
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1, Status: StatusActive}}
+	svc := newContentModerationTestService(t, settingRepo, repo, nil, nil, userRepo, nil, nil, nil)
 
 	_, err := svc.loadRuntimeSnapshot(context.Background())
 	require.NoError(t, err)
@@ -270,17 +271,55 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 	expired.loadedAt = time.Now().Add(-2 * time.Minute)
 	svc.runtimeSnapshot.Store(&expired)
 	settingRepo.failMultiple(errors.New("database unavailable"))
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	settingRepo.blockNextMultiple(started, release)
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	finished := make(chan struct{})
+	type refreshCompletion struct {
+		snapshot *contentModerationRuntimeSnapshot
+		retryAt  int64
+	}
+	completion := make(chan refreshCompletion, 1)
+	t.Cleanup(func() {
+		unblock()
+		select {
+		case <-finished:
+		case <-time.After(30 * time.Second):
+			t.Error("refresh cleanup timed out")
+		}
+	})
 
 	svc.RecordCyberPolicyEvent(context.Background(), CyberPolicyRecordInput{
 		UserID: 1,
 		Model:  "gpt-5",
 	})
 
+	go func() {
+		svc.runtimeRefreshMu.Lock()
+		result := refreshCompletion{svc.runtimeSnapshot.Load(), svc.runtimeRefreshRetryAt.Load()}
+		svc.runtimeRefreshMu.Unlock()
+		completion <- result
+		close(finished)
+	}()
+
 	require.Len(t, repo.snapshotLogs(), 1)
-	require.Eventually(t, func() bool {
-		_, calls := settingRepo.calls()
-		return calls == 2
-	}, time.Second, time.Millisecond)
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("refresh did not start")
+	}
+	unblock()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("refresh did not finish")
+	}
+	result := <-completion
+	require.Same(t, &expired, result.snapshot)
+	require.NotZero(t, result.retryAt)
+	require.Empty(t, userRepo.updated)
+	require.Equal(t, StatusActive, userRepo.user.Status)
 	getValue, getMultiple := settingRepo.calls()
 	require.Zero(t, getValue)
 	require.Equal(t, 2, getMultiple)
@@ -302,7 +341,7 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 // (or test-double) SMTP endpoint is available.
 func TestRecordCyberPolicyEvent_CreateLogBeforeEmail(t *testing.T) {
 	repo := &cyberOrderingTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled: "true",
 		}},
@@ -364,7 +403,7 @@ func (r *banCountArgsTestRepo) snapshotCountCalls() []bool {
 
 func TestApplyFlaggedAccountSideEffects_PassesExcludeCyberFlag(t *testing.T) {
 	repo := &banCountArgsTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{}},
 		repo, nil, nil, nil, nil, nil, nil,
 	)
@@ -383,7 +422,7 @@ func TestApplyFlaggedAccountSideEffects_PassesExcludeCyberFlag(t *testing.T) {
 
 func TestRecordCyberPolicyEvent_ExcludeFromBanCount_SkipsBanJudgment(t *testing.T) {
 	repo := &banCountArgsTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: `{"cyber_policy_exclude_from_ban_count":true}`,
@@ -411,7 +450,7 @@ func TestRecordCyberPolicyEvent_ExcludeFromBanCount_SkipsBanJudgment(t *testing.
 
 func TestRecordCyberPolicyEvent_DefaultCountsTowardBan(t *testing.T) {
 	repo := &banCountArgsTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled: "true",
 		}},

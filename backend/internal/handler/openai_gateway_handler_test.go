@@ -1370,7 +1370,7 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		require.Equal(t, "/v1/moderations", r.URL.Path)
 		_, _ = w.Write([]byte(`{"results":[{"category_scores":{"sexual":0.9}}]}`))
 	}))
-	defer moderationServer.Close()
+	t.Cleanup(moderationServer.Close)
 
 	cfg := &service.ContentModerationConfig{
 		Enabled:      true,
@@ -1400,6 +1400,11 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		nil,
 		nil,
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		require.NoError(t, moderationSvc.Shutdown(ctx))
+	})
 	decision, err := moderationSvc.Check(context.Background(), service.ContentModerationCheckInput{
 		UserID:   1,
 		Endpoint: "/v1/responses",
@@ -1422,7 +1427,7 @@ func TestOpenAIResponsesWebSocket_ContentModerationBlocksFirstFrame(t *testing.T
 		concurrencyHelper:        NewConcurrencyHelper(service.NewConcurrencyService(&concurrencyCacheMock{}), SSEPingFormatNone, time.Second),
 	}
 	wsServer := newOpenAIWSHandlerTestServer(t, h, middleware.AuthSubject{UserID: 1, Concurrency: 1})
-	defer wsServer.Close()
+	t.Cleanup(wsServer.Close)
 
 	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
 	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http")+"/openai/v1/responses", nil)
