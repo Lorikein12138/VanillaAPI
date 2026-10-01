@@ -130,6 +130,7 @@ func provideCleanup(
 	openAIAutoReset *service.OpenAIQuotaAutoResetService,
 	promptAudit *securityaudit.PromptService,
 	pluginManager *service.PluginManager,
+	contentModeration *service.ContentModerationService,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -437,6 +438,11 @@ func provideCleanup(
 			}
 		}
 
+		if contentModeration != nil {
+			if err := contentModeration.Shutdown(ctx); err != nil {
+				log.Printf("[Cleanup] ContentModerationService failed: %v", err)
+			}
+		}
 		runParallel(parallelSteps)
 		runSequential(infraSteps)
 

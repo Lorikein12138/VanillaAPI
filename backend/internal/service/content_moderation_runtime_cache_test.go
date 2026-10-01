@@ -52,29 +52,38 @@ func (r *contentModerationRuntimeSettingRepo) Set(_ context.Context, key, value 
 	return nil
 }
 
-func (r *contentModerationRuntimeSettingRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+func (r *contentModerationRuntimeSettingRepo) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
 	r.mu.Lock()
 	r.getMultipleCalls++
-	if err := r.getMultipleErr; err != nil {
-		r.mu.Unlock()
-		return nil, err
-	}
+	err := r.getMultipleErr
 	out := make(map[string]string, len(keys))
 	for _, key := range keys {
 		if value, ok := r.values[key]; ok {
 			out[key] = value
 		}
 	}
-	start := r.getMultipleStart
-	wait := r.getMultipleWait
-	r.getMultipleStart = nil
-	r.getMultipleWait = nil
+	start, wait := r.getMultipleStart, r.getMultipleWait
+	r.getMultipleStart, r.getMultipleWait = nil, nil
 	r.mu.Unlock()
 	if start != nil {
-		start <- struct{}{}
+		select {
+		case start <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if wait != nil {
-		<-wait
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -152,6 +161,74 @@ func runtimeCacheTestInput(text string) ContentModerationCheckInput {
 		Protocol: ContentModerationProtocolOpenAIChat,
 		Model:    "risk-cache-test",
 		Body:     []byte(`{"messages":[{"role":"user","content":"` + text + `"}]}`),
+	}
+}
+
+func TestContentModerationRuntimeSettingRepoHooks(t *testing.T) {
+	for _, mode := range []string{"success", "failure", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			repo := &contentModerationRuntimeSettingRepo{values: map[string]string{"key": "value"}}
+			failure := errors.New("database unavailable")
+			if mode == "failure" {
+				repo.failMultiple(failure)
+			}
+			started, release := make(chan struct{}, 1), make(chan struct{})
+			repo.blockNextMultiple(started, release)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			finished := make(chan struct{})
+			var values map[string]string
+			var err error
+			go func() {
+				values, err = repo.GetMultiple(ctx, []string{"key"})
+				close(finished)
+			}()
+			t.Cleanup(func() {
+				unblock()
+				cancel()
+				select {
+				case <-finished:
+				case <-time.After(30 * time.Second):
+					t.Error("hook cleanup timed out")
+				}
+			})
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("hook did not notify start")
+			}
+			// The gate holds the call, but not the repository mutex.
+			require.NoError(t, repo.Set(ctx, "other", "updated"))
+			select {
+			case <-finished:
+				t.Fatal("call completed before release/cancellation")
+			default:
+			}
+			if mode == "cancel" {
+				cancel()
+			} else {
+				unblock()
+			}
+			select {
+			case <-finished:
+			case <-time.After(30 * time.Second):
+				t.Fatal("hook did not finish")
+			}
+			switch mode {
+			case "success":
+				require.NoError(t, err)
+				require.Equal(t, map[string]string{"key": "value"}, values)
+			case "failure":
+				require.ErrorIs(t, err, failure)
+			case "cancel":
+				require.ErrorIs(t, err, context.Canceled)
+			}
+			repo.failMultiple(nil)
+			_, err = repo.GetMultiple(context.Background(), []string{"key"})
+			require.NoError(t, err, "hooks must be consumed once")
+		})
 	}
 }
 

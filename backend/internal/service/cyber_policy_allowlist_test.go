@@ -40,7 +40,7 @@ func TestCyberPolicyAllowlistCoversAllUserKeysAndRefreshes(t *testing.T) {
 
 func TestRecordCyberPolicyEventLogOnlyPreservesEvidenceWithoutSideEffects(t *testing.T) {
 	repo := &banCountArgsTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{SettingKeyRiskControlEnabled: "true"}},
 		repo, nil, nil, nil, nil, nil, &EmailService{},
 	)

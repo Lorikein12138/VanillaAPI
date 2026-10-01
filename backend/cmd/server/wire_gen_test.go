@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -51,6 +52,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 	schedulerSnapshotSvc := service.NewSchedulerSnapshotService(nil, nil, nil, nil, cfg)
 	opsSystemLogSinkSvc := service.NewOpsSystemLogSink(nil)
 
+	moderationSvc := service.NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
 	cleanup := provideCleanup(
 		nil, // entClient
 		nil, // redis
@@ -85,24 +87,28 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		openAIOAuthSvc,
 		geminiOAuthSvc,
 		antigravityOAuthSvc,
-		nil, // grokOAuth
-		nil, // openAIGateway
-		nil, // scheduledTestRunner
-		nil, // backupSvc
-		nil, // paymentOrderExpiry
-		nil, // channelMonitorRunner
-		nil, // channelMonitorV2Aggregator
-		nil, // quotaFlusher
-		nil, // upstreamBillingProbe
-		nil, // ollamaCloudUsage
-		nil, // opencodeGoUsage
-		nil, // auditLog
-		nil, // openAIAutoReset
-		nil, // promptAudit
-		nil, // pluginManager
+		nil,           // grokOAuth
+		nil,           // openAIGateway
+		nil,           // scheduledTestRunner
+		nil,           // backupSvc
+		nil,           // paymentOrderExpiry
+		nil,           // channelMonitorRunner
+		nil,           // channelMonitorV2Aggregator
+		nil,           // quotaFlusher
+		nil,           // upstreamBillingProbe
+		nil,           // ollamaCloudUsage
+		nil,           // opencodeGoUsage
+		nil,           // auditLog
+		nil,           // openAIAutoReset
+		nil,           // promptAudit
+		nil,           // pluginManager
+		moderationSvc, // contentModeration
 	)
 
 	require.NotPanics(t, func() {
 		cleanup()
 	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, moderationSvc.Shutdown(ctx), "cleanup must already have joined content moderation")
 }

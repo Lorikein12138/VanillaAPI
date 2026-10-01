@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -42,96 +41,103 @@ var (
 	redisNamespaceSeq uint64
 )
 
-func TestMain(m *testing.M) {
-	ctx := context.Background()
+func TestMain(m *testing.M) { os.Exit(runIntegrationTests(m)) }
 
-	if err := timezone.Init("UTC"); err != nil {
-		log.Printf("failed to init timezone: %v", err)
-		os.Exit(1)
-	}
+func runIntegrationTests(m *testing.M) int {
+	return runIntegrationHarnessLifecycle(func(cleanup *integrationHarnessCleanup) int {
+		ctx := context.Background()
 
-	if !dockerIsAvailable(ctx) {
-		// In CI we expect Docker to be available so integration tests should fail loudly.
-		if os.Getenv("CI") != "" {
-			log.Printf("docker is not available (CI=true); failing integration tests")
-			os.Exit(1)
+		if err := timezone.Init("UTC"); err != nil {
+			log.Printf("failed to init timezone: %v", err)
+			return 1
 		}
-		log.Printf("docker is not available; skipping integration tests (start Docker to enable)")
-		os.Exit(0)
-	}
 
-	postgresImage := selectDockerImage(ctx, postgresImageTag)
-	pgContainer, err := tcpostgres.Run(
-		ctx,
-		postgresImage,
-		tcpostgres.WithDatabase("sub2api_test"),
-		tcpostgres.WithUsername("postgres"),
-		tcpostgres.WithPassword("postgres"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		log.Printf("failed to start postgres container: %v", err)
-		os.Exit(1)
-	}
-	defer func() { _ = pgContainer.Terminate(ctx) }()
+		if !dockerIsAvailable(ctx) {
+			// In CI we expect Docker to be available so integration tests should fail loudly.
+			if os.Getenv("CI") != "" {
+				log.Printf("docker is not available (CI=true); failing integration tests")
+				return 1
+			}
+			log.Printf("docker is not available; skipping integration tests (start Docker to enable)")
+			return 0
+		}
 
-	redisContainer, err := tcredis.Run(
-		ctx,
-		redisImageTag,
-	)
-	if err != nil {
-		log.Printf("failed to start redis container: %v", err)
-		os.Exit(1)
-	}
-	defer func() { _ = redisContainer.Terminate(ctx) }()
+		postgresImage := selectDockerImage(ctx, postgresImageTag)
+		pgContainer, err := tcpostgres.Run(
+			ctx,
+			postgresImage,
+			tcpostgres.WithDatabase("sub2api_test"),
+			tcpostgres.WithUsername("postgres"),
+			tcpostgres.WithPassword("postgres"),
+			tcpostgres.BasicWaitStrategies(),
+		)
+		if pgContainer != nil {
+			cleanup.add(func(ctx context.Context) error { return pgContainer.Terminate(ctx) })
+		}
+		if err != nil {
+			log.Printf("failed to start postgres container: %v", err)
+			return 1
+		}
 
-	dsn, err := pgContainer.ConnectionString(ctx, "sslmode=disable", "TimeZone=UTC")
-	if err != nil {
-		log.Printf("failed to get postgres dsn: %v", err)
-		os.Exit(1)
-	}
+		redisContainer, err := tcredis.Run(
+			ctx,
+			redisImageTag,
+		)
+		if redisContainer != nil {
+			cleanup.add(func(ctx context.Context) error { return redisContainer.Terminate(ctx) })
+		}
+		if err != nil {
+			log.Printf("failed to start redis container: %v", err)
+			return 1
+		}
 
-	integrationDB, err = openSQLWithRetry(ctx, dsn, 30*time.Second)
-	if err != nil {
-		log.Printf("failed to open sql db: %v", err)
-		os.Exit(1)
-	}
-	if err := ApplyMigrations(ctx, integrationDB); err != nil {
-		log.Printf("failed to apply db migrations: %v", err)
-		os.Exit(1)
-	}
+		dsn, err := pgContainer.ConnectionString(ctx, "sslmode=disable", "TimeZone=UTC")
+		if err != nil {
+			log.Printf("failed to get postgres dsn: %v", err)
+			return 1
+		}
 
-	// 创建 ent client 用于集成测试
-	drv := entsql.OpenDB(dialect.Postgres, integrationDB)
-	integrationEntClient = dbent.NewClient(dbent.Driver(drv))
+		integrationDB, err = openSQLWithRetry(ctx, dsn, 30*time.Second)
+		if err != nil {
+			log.Printf("failed to open sql db: %v", err)
+			return 1
+		}
+		cleanup.add(func(context.Context) error { return integrationDB.Close() })
+		if err := ApplyMigrations(ctx, integrationDB); err != nil {
+			log.Printf("failed to apply db migrations: %v", err)
+			return 1
+		}
 
-	redisHost, err := redisContainer.Host(ctx)
-	if err != nil {
-		log.Printf("failed to get redis host: %v", err)
-		os.Exit(1)
-	}
-	redisPort, err := redisContainer.MappedPort(ctx, "6379/tcp")
-	if err != nil {
-		log.Printf("failed to get redis port: %v", err)
-		os.Exit(1)
-	}
+		// 创建 ent client 用于集成测试
+		drv := entsql.OpenDB(dialect.Postgres, integrationDB)
+		integrationEntClient = dbent.NewClient(dbent.Driver(drv))
+		cleanup.add(func(context.Context) error { return integrationEntClient.Close() })
 
-	integrationRedis = redisclient.NewClient(&redisclient.Options{
-		Addr: fmt.Sprintf("%s:%d", redisHost, redisPort.Int()),
-		DB:   0,
+		redisHost, err := redisContainer.Host(ctx)
+		if err != nil {
+			log.Printf("failed to get redis host: %v", err)
+			return 1
+		}
+		redisPort, err := redisContainer.MappedPort(ctx, "6379/tcp")
+		if err != nil {
+			log.Printf("failed to get redis port: %v", err)
+			return 1
+		}
+
+		integrationRedis = redisclient.NewClient(&redisclient.Options{
+			Addr: fmt.Sprintf("%s:%d", redisHost, redisPort.Int()),
+			DB:   0,
+		})
+		cleanup.add(func(context.Context) error { return integrationRedis.Close() })
+		if err := integrationRedis.Ping(ctx).Err(); err != nil {
+			log.Printf("failed to ping redis: %v", err)
+			return 1
+		}
+
+		admissionCacheClient = testRedis
+		admissionCacheBackend = "real Redis: " + integrationRedis.Info(ctx, "server").Val()
+		return m.Run()
 	})
-	if err := integrationRedis.Ping(ctx).Err(); err != nil {
-		log.Printf("failed to ping redis: %v", err)
-		os.Exit(1)
-	}
-
-	code := m.Run()
-
-	_ = integrationEntClient.Close()
-	_ = integrationRedis.Close()
-	_ = integrationDB.Close()
-
-	os.Exit(code)
 }
 
 func dockerIsAvailable(ctx context.Context) bool {
@@ -292,86 +298,6 @@ func sanitizeRedisNamespace(name string) string {
 	name = strings.ReplaceAll(name, "/", "_")
 	name = strings.ReplaceAll(name, " ", "_")
 	return name
-}
-
-type prefixHook struct {
-	prefix string
-}
-
-func (h prefixHook) DialHook(next redisclient.DialHook) redisclient.DialHook { return next }
-
-func (h prefixHook) ProcessHook(next redisclient.ProcessHook) redisclient.ProcessHook {
-	return func(ctx context.Context, cmd redisclient.Cmder) error {
-		h.prefixCmd(cmd)
-		return next(ctx, cmd)
-	}
-}
-
-func (h prefixHook) ProcessPipelineHook(next redisclient.ProcessPipelineHook) redisclient.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []redisclient.Cmder) error {
-		for _, cmd := range cmds {
-			h.prefixCmd(cmd)
-		}
-		return next(ctx, cmds)
-	}
-}
-
-func (h prefixHook) prefixCmd(cmd redisclient.Cmder) {
-	args := cmd.Args()
-	if len(args) < 2 {
-		return
-	}
-
-	prefixOne := func(i int) {
-		if i < 0 || i >= len(args) {
-			return
-		}
-
-		switch v := args[i].(type) {
-		case string:
-			if v != "" && !strings.HasPrefix(v, h.prefix) {
-				args[i] = h.prefix + v
-			}
-		case []byte:
-			s := string(v)
-			if s != "" && !strings.HasPrefix(s, h.prefix) {
-				args[i] = []byte(h.prefix + s)
-			}
-		}
-	}
-
-	switch strings.ToLower(cmd.Name()) {
-	case "get", "set", "setnx", "setex", "psetex", "incr", "decr", "incrby", "expire", "pexpire", "ttl", "pttl",
-		"hgetall", "hget", "hset", "hdel", "hincrbyfloat", "exists",
-		"zadd", "zcard", "zrange", "zrangebyscore", "zrem", "zremrangebyscore", "zrevrange", "zrevrangebyscore", "zscore":
-		prefixOne(1)
-	case "mget":
-		for i := 1; i < len(args); i++ {
-			prefixOne(i)
-		}
-	case "del", "unlink":
-		for i := 1; i < len(args); i++ {
-			prefixOne(i)
-		}
-	case "eval", "evalsha", "eval_ro", "evalsha_ro":
-		if len(args) < 3 {
-			return
-		}
-		numKeys, err := strconv.Atoi(fmt.Sprint(args[2]))
-		if err != nil || numKeys <= 0 {
-			return
-		}
-		for i := 0; i < numKeys && 3+i < len(args); i++ {
-			prefixOne(3 + i)
-		}
-	case "scan":
-		for i := 2; i+1 < len(args); i++ {
-			if strings.EqualFold(fmt.Sprint(args[i]), "match") {
-				prefixOne(i + 1)
-				break
-			}
-		}
-	}
 }
 
 // IntegrationRedisSuite provides a base suite for Redis integration tests.

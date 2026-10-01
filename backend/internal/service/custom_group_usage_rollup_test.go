@@ -6,20 +6,13 @@ import (
 	"testing"
 	"time"
 
-	appTimezone "github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/stretchr/testify/require"
 )
 
-func useGroupUsageTestTimezone(t *testing.T, name string) {
-	t.Helper()
-
-	previousName := appTimezone.Name()
-	require.NoError(t, appTimezone.Init(name))
-	t.Cleanup(func() { require.NoError(t, appTimezone.Init(previousName)) })
-}
-
 func TestGroupUsageDateUsesConfiguredTimezoneBoundary(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if runServiceTimezoneTestInSubprocess(t, "America/New_York") {
+		return
+	}
 
 	beforeMidnight := time.Date(2026, 3, 9, 3, 59, 59, 0, time.UTC)
 	atMidnight := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC)
@@ -30,7 +23,9 @@ func TestGroupUsageDateUsesConfiguredTimezoneBoundary(t *testing.T) {
 }
 
 func TestGroupUsageParseDateUsesConfiguredTimezone(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if runServiceTimezoneTestInSubprocess(t, "America/New_York") {
+		return
+	}
 
 	parsed, err := ParseGroupUsageDate("2026-03-08")
 	require.NoError(t, err)
@@ -39,7 +34,9 @@ func TestGroupUsageParseDateUsesConfiguredTimezone(t *testing.T) {
 }
 
 func TestGroupUsageYesterdayStartHandlesDST(t *testing.T) {
-	useGroupUsageTestTimezone(t, "America/New_York")
+	if runServiceTimezoneTestInSubprocess(t, "America/New_York") {
+		return
+	}
 
 	todayStart := time.Date(2026, 3, 9, 4, 0, 0, 0, time.UTC)
 	yesterdayStart := GroupUsageYesterdayStart(todayStart)

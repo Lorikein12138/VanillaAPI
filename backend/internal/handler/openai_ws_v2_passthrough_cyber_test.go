@@ -43,6 +43,11 @@ func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, sett
 	}
 	moderationRepo := &contentModerationHandlerTestRepo{}
 	moderationSvc := service.NewContentModerationService(settingRepo, moderationRepo, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		require.NoError(t, moderationSvc.Shutdown(ctx))
+	})
 	settingSvc := service.NewSettingService(settingRepo, nil)
 
 	groupID := int64(4301)
@@ -168,7 +173,7 @@ func TestOpenAIResponsesWebSocketV2PassthroughCyberMarkIsConsumedAfterTurn(t *te
 		cancelWrite()
 		require.NoError(t, err)
 	}))
-	defer upstreamServer.Close()
+	t.Cleanup(upstreamServer.Close)
 	harness := newOpenAIWSPassthroughHandlerHarness(t, upstreamServer.URL)
 
 	requestPayload := `{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"cyber-session-1","input":"test"}`
@@ -269,7 +274,7 @@ func TestOpenAIResponsesWebSocketV2PassthroughNonCyberTurnAllowsFollowup(t *test
 		_, _, _ = conn.Read(readCtx)
 		cancelRead()
 	}))
-	defer upstreamServer.Close()
+	t.Cleanup(upstreamServer.Close)
 	harness := newOpenAIWSPassthroughHandlerHarness(t, upstreamServer.URL)
 
 	firstPayload := `{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"non-cyber-session-1","input":"first"}`

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -29,6 +30,11 @@ func TestContentModerationEngineHandlerRoundTrip(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	settings := &moderationEngineSettings{value: `{"api_keys":["legacy-secret"],"model":"omni-moderation-latest"}`}
 	svc := service.NewContentModerationService(settings, nil, nil, nil, nil, nil, nil, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		require.NoError(t, svc.Shutdown(ctx))
+	})
 	h := NewContentModerationHandler(svc)
 	router := gin.New()
 	router.PUT("/config", h.UpdateConfig)

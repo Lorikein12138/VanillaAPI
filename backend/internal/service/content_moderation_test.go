@@ -463,7 +463,7 @@ func TestContentModerationCheck_PreBlockKeywordHitSkipsUpstreamCall(t *testing.T
 		upstreamCalled = true
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{}}})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -475,7 +475,7 @@ func TestContentModerationCheck_PreBlockKeywordHitSkipsUpstreamCall(t *testing.T
 	require.NoError(t, err)
 
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -514,7 +514,7 @@ func TestContentModerationCheck_KeywordsIgnoredInObserveMode(t *testing.T) {
 		upstreamHits++
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{CategoryScores: map[string]float64{"sexual": 0.1}}}})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -526,7 +526,7 @@ func TestContentModerationCheck_KeywordsIgnoredInObserveMode(t *testing.T) {
 	require.NoError(t, err)
 
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -559,7 +559,7 @@ func TestContentModerationCheck_KeywordOnlyStrategySkipsAPIOnMiss(t *testing.T) 
 		upstreamCalled = true
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{CategoryScores: map[string]float64{"sexual": 0.99}}}})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -572,7 +572,7 @@ func TestContentModerationCheck_KeywordOnlyStrategySkipsAPIOnMiss(t *testing.T) 
 	require.NoError(t, err)
 
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -606,7 +606,7 @@ func TestContentModerationCheck_APIOnlyStrategyIgnoresKeywordList(t *testing.T) 
 		upstreamCalled = true
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{CategoryScores: map[string]float64{"sexual": 0.1}}}})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -619,7 +619,7 @@ func TestContentModerationCheck_APIOnlyStrategyIgnoresKeywordList(t *testing.T) 
 	require.NoError(t, err)
 
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -728,7 +728,7 @@ func TestContentModerationCheck_ModelFilterExcludeSkipsListedModels(t *testing.T
 
 func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *testing.T) {
 	raw := `{"enabled":true,"mode":"pre_block","base_url":"https://api.openai.com","model":"omni-moderation-latest","blocked_keywords":["secret-token"]}`
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyContentModerationConfig: raw,
 		}},
@@ -781,7 +781,7 @@ func newContentModerationModelFilterTestService(t *testing.T, cfg *ContentModera
 	rawCfg, err := json.Marshal(cfg)
 	require.NoError(t, err)
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -806,7 +806,7 @@ func TestContentModerationUpdateConfig_AppendsAndDeletesAPIKeys(t *testing.T) {
 	repo := &contentModerationTestSettingRepo{values: map[string]string{
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	svc := newContentModerationTestService(t, repo, nil, nil, nil, nil, nil, nil, nil)
 	deleteHashes := []string{moderationAPIKeyHash("sk-old-a")}
 	addKeys := []string{"sk-new-c", "sk-old-b"}
 
@@ -833,7 +833,7 @@ func TestContentModerationUpdateConfig_ReplacesAPIKeysWhenRequested(t *testing.T
 	repo := &contentModerationTestSettingRepo{values: map[string]string{
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	svc := newContentModerationTestService(t, repo, nil, nil, nil, nil, nil, nil, nil)
 	deleteHashes := []string{moderationAPIKeyHash("sk-old-a")}
 	replaceKeys := []string{"sk-new-only"}
 
@@ -860,7 +860,7 @@ func TestContentModerationUpdateConfig_SavesCustomThresholds(t *testing.T) {
 	repo := &contentModerationTestSettingRepo{values: map[string]string{
 		SettingKeyContentModerationConfig: string(rawCfg),
 	}}
-	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil, nil)
+	svc := newContentModerationTestService(t, repo, nil, nil, nil, nil, nil, nil, nil)
 	thresholds := map[string]float64{
 		"sexual":     0.72,
 		"harassment": 1.25,
@@ -1021,7 +1021,7 @@ func TestContentModerationCheck_OpenAIResponsesRecordsNonHitForCodexPayload(t *t
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1033,7 +1033,7 @@ func TestContentModerationCheck_OpenAIResponsesRecordsNonHitForCodexPayload(t *t
 	require.NoError(t, err)
 
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1085,7 +1085,7 @@ func TestContentModerationCheck_PreBlockBlocksCodexResponsesLatestUserInput(t *t
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1098,7 +1098,7 @@ func TestContentModerationCheck_PreBlockBlocksCodexResponsesLatestUserInput(t *t
 	require.NoError(t, err)
 
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1158,7 +1158,7 @@ func TestContentModerationStatusTracksPreBlockSyncMetrics(t *testing.T) {
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1168,7 +1168,7 @@ func TestContentModerationStatusTracksPreBlockSyncMetrics(t *testing.T) {
 	rawCfg, err := json.Marshal(cfg)
 	require.NoError(t, err)
 
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1209,7 +1209,7 @@ func TestContentModerationStatusTracksPreBlockAPIKeyLoad(t *testing.T) {
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1219,7 +1219,7 @@ func TestContentModerationStatusTracksPreBlockAPIKeyLoad(t *testing.T) {
 	rawCfg, err := json.Marshal(cfg)
 	require.NoError(t, err)
 
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1265,7 +1265,7 @@ func TestContentModerationStatusTracksPreBlockLocalBlocks(t *testing.T) {
 	rawCfg, err := json.Marshal(cfg)
 	require.NoError(t, err)
 
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1319,13 +1319,13 @@ func TestContentModerationCallModeration_400DoesNotFreezeAPIKey(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"Number of images (5) exceeds maximum of 1","type":"invalid_request_error","param":"input","code":"too_many_images"}}`))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.BaseURL = server.URL
 	cfg.APIKeys = []string{"sk-test"}
 	cfg.RetryCount = 5
-	svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+	svc := newContentModerationTestService(t, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	_, err := svc.callModeration(context.Background(), cfg, "hello")
 
@@ -1358,13 +1358,13 @@ func TestContentModerationCallModeration_FreezesByHTTPStatus(t *testing.T) {
 				w.WriteHeader(tt.statusCode)
 				_, _ = w.Write([]byte(`{"error":{"message":"upstream error"}}`))
 			}))
-			defer server.Close()
+			t.Cleanup(server.Close)
 
 			cfg := defaultContentModerationConfig()
 			cfg.BaseURL = server.URL
 			cfg.APIKeys = []string{"sk-test"}
 			cfg.RetryCount = 0
-			svc := NewContentModerationService(nil, nil, nil, nil, nil, nil, nil, nil)
+			svc := newContentModerationTestService(t, nil, nil, nil, nil, nil, nil, nil, nil)
 
 			_, err := svc.callModeration(context.Background(), cfg, "hello")
 
@@ -1386,9 +1386,9 @@ func TestContentModerationTestAPIKeys_400DoesNotFreezeAPIKey(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid moderation request"}}`))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{}},
 		nil,
 		nil,
@@ -1431,7 +1431,7 @@ func TestContentModerationCheck_PreHashUsesRedisHashCache(t *testing.T) {
 
 	repo := &contentModerationTestRepo{}
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1001, Status: StatusActive}}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1476,7 +1476,7 @@ func TestContentModerationCheck_HashBlockLogsDoNotIncreaseNextViolationCount(t *
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1499,7 +1499,7 @@ func TestContentModerationCheck_HashBlockLogsDoNotIncreaseNextViolationCount(t *
 	}
 	require.NoError(t, repo.CreateLog(context.Background(), hashLog))
 
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1544,7 +1544,7 @@ func TestContentModerationAutoBanSkipsAdminAccount(t *testing.T) {
 	require.NoError(t, repo.CreateLog(context.Background(), newContentModerationFlaggedLog(userID)))
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	svc := newContentModerationTestService(t, nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 
 	svc.persistContentModerationLog(context.Background(), cfg, newContentModerationFlaggedLog(userID), "", false, true)
 
@@ -1571,7 +1571,7 @@ func TestContentModerationAutoBanDisablesRegularUserAtThreshold(t *testing.T) {
 	require.NoError(t, repo.CreateLog(context.Background(), newContentModerationFlaggedLog(userID)))
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleUser, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	svc := newContentModerationTestService(t, nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 
 	svc.persistContentModerationLog(context.Background(), cfg, newContentModerationFlaggedLog(userID), "", false, true)
 
@@ -1592,7 +1592,7 @@ func TestContentModerationAdminBelowBanThresholdRecordsViolationOnly(t *testing.
 	repo := &contentModerationTestRepo{}
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: userID, Role: RoleAdmin, Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	svc := newContentModerationTestService(t, nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 
 	svc.persistContentModerationLog(context.Background(), cfg, newContentModerationFlaggedLog(userID), "", false, true)
 
@@ -1625,7 +1625,7 @@ func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1640,7 +1640,7 @@ func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T
 
 	repo := &contentModerationTestRepo{}
 	hashCache := &contentModerationTestHashCache{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1742,7 +1742,7 @@ func TestContentModerationCheck_AsyncFlaggedWritesRedisHashCache(t *testing.T) {
 			}},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	cfg := defaultContentModerationConfig()
 	cfg.Enabled = true
@@ -1754,7 +1754,7 @@ func TestContentModerationCheck_AsyncFlaggedWritesRedisHashCache(t *testing.T) {
 
 	repo := &contentModerationTestRepo{}
 	hashCache := &contentModerationTestHashCache{}
-	svc := NewContentModerationService(
+	svc := newContentModerationTestService(t,
 		&contentModerationTestSettingRepo{values: map[string]string{
 			SettingKeyRiskControlEnabled:      "true",
 			SettingKeyContentModerationConfig: string(rawCfg),
@@ -1803,7 +1803,7 @@ func TestContentModerationUnbanUser_ActivatesUserAndInvalidatesAuthCache(t *test
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1001, Email: "user@example.com", Status: StatusDisabled}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	svc := newContentModerationTestService(t, nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 
 	result, err := svc.UnbanUser(context.Background(), 1001)
 
@@ -1819,7 +1819,7 @@ func TestContentModerationUnbanUser_ActiveUserOnlyInvalidatesAuthCache(t *testin
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1001, Email: "user@example.com", Status: StatusActive}}
 	invalidator := &contentModerationTestAuthCacheInvalidator{}
 	repo := &contentModerationTestRepo{}
-	svc := NewContentModerationService(nil, repo, nil, nil, userRepo, nil, invalidator, nil)
+	svc := newContentModerationTestService(t, nil, repo, nil, nil, userRepo, nil, invalidator, nil)
 
 	result, err := svc.UnbanUser(context.Background(), 1001)
 
@@ -1835,7 +1835,7 @@ func contentModerationIntPtr(v int) *int {
 
 func TestContentModerationUpdateConfig_CyberPolicyExcludeFromBanCount(t *testing.T) {
 	settingRepo := &contentModerationTestSettingRepo{values: map[string]string{}}
-	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, nil, nil, nil)
+	svc := newContentModerationTestService(t, settingRepo, nil, nil, nil, nil, nil, nil, nil)
 
 	// 默认值必须是 false（计入，保持现状）
 	view, err := svc.GetConfig(context.Background())

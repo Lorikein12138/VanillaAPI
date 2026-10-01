@@ -537,6 +537,17 @@ type ContentModerationService struct {
 	lastCleanupUnix          atomic.Int64
 	lastCleanupDeletedHit    atomic.Int64
 	lastCleanupDeletedNonHit atomic.Int64
+	lifecycleMu              sync.Mutex
+	runtimeCtx               context.Context
+	runtimeCancel            context.CancelFunc
+	maintenanceCtx           context.Context
+	maintenanceCancel        context.CancelFunc
+	lifecycleWG              sync.WaitGroup
+	stopping                 bool
+	pending                  int
+	pendingDone              chan struct{}
+	shutdownDone             chan struct{}
+	shutdownErr              error
 	runtimeSnapshot          atomic.Pointer[contentModerationRuntimeSnapshot]
 	runtimeRefreshMu         sync.Mutex
 	runtimeCacheTTL          time.Duration
@@ -563,6 +574,7 @@ type contentModerationTask struct {
 	recordHash       bool
 	applySideEffects bool
 	enqueuedAt       time.Time
+	registered       bool
 }
 
 type contentModerationKeyHealth struct {
@@ -607,13 +619,105 @@ func NewContentModerationService(
 		asyncQueue:           make(chan contentModerationTask, maxContentModerationQueueSize),
 		keyHealth:            make(map[string]*contentModerationKeyHealth),
 	}
+	svc.lifecycleMu.Lock()
+	svc.initRuntimeLocked()
 	if settingRepo != nil && repo != nil {
+		svc.lifecycleWG.Add(svc.workerCount + 1)
 		for i := 0; i < svc.workerCount; i++ {
-			go svc.worker(i)
+			go func(id int) { defer svc.lifecycleWG.Done(); svc.worker(id) }(i)
 		}
-		go svc.cleanupWorker()
+		go func() { defer svc.lifecycleWG.Done(); svc.cleanupWorker() }()
 	}
+	svc.lifecycleMu.Unlock()
 	return svc
+}
+
+// initRuntimeLocked also supports manually constructed test services without workers.
+func (s *ContentModerationService) initRuntimeLocked() {
+	if s.runtimeCtx != nil {
+		return
+	}
+	s.runtimeCtx, s.runtimeCancel = context.WithCancel(context.Background())
+	s.maintenanceCtx, s.maintenanceCancel = context.WithCancel(s.runtimeCtx)
+	s.pendingDone = make(chan struct{})
+	s.shutdownDone = make(chan struct{})
+}
+
+func (s *ContentModerationService) runtimeContext(maintenance bool) context.Context {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.initRuntimeLocked()
+	if maintenance {
+		return s.maintenanceCtx
+	}
+	return s.runtimeCtx
+}
+
+func (s *ContentModerationService) isStopping() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.stopping
+}
+
+func (s *ContentModerationService) completeTask() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.pending--
+	if s.stopping && s.pending == 0 {
+		close(s.pendingDone)
+	}
+}
+
+// Shutdown rejects new asynchronous work, drains accepted tasks, then joins workers
+// and maintenance. A caller deadline cancels runtime IO and remains an error.
+func (s *ContentModerationService) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.lifecycleMu.Lock()
+	s.initRuntimeLocked()
+	if !s.stopping {
+		s.stopping = true
+		s.maintenanceCancel()
+		if s.pending == 0 {
+			close(s.pendingDone)
+		}
+		go func() {
+			select {
+			case <-s.pendingDone:
+			case <-s.runtimeCtx.Done():
+			}
+			s.runtimeCancel()
+			s.lifecycleWG.Wait()
+			close(s.shutdownDone)
+		}()
+	}
+	done := s.shutdownDone
+	s.lifecycleMu.Unlock()
+	select {
+	case <-done:
+		s.lifecycleMu.Lock()
+		defer s.lifecycleMu.Unlock()
+		return s.shutdownErr
+	default:
+	}
+	select {
+	case <-done:
+		s.lifecycleMu.Lock()
+		defer s.lifecycleMu.Unlock()
+		return s.shutdownErr
+	case <-ctx.Done():
+		s.lifecycleMu.Lock()
+		if s.shutdownErr == nil {
+			s.shutdownErr = ctx.Err()
+		}
+		s.runtimeCancel()
+		s.lifecycleMu.Unlock()
+		return ctx.Err()
+	}
 }
 
 func (s *ContentModerationService) GetConfig(ctx context.Context) (*ContentModerationConfigView, error) {
@@ -1194,10 +1298,19 @@ func (s *ContentModerationService) enqueueAsync(input ContentModerationCheckInpu
 		inputHash:  hashText,
 		enqueuedAt: time.Now(),
 	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.stopping {
+		s.asyncDropped.Add(1)
+		return
+	}
+	s.pending++
+	task.registered = true
 	select {
 	case s.asyncQueue <- task:
 		s.asyncEnqueued.Add(1)
 	default:
+		s.pending--
 		slog.Warn("content_moderation.async_queue_full", "user_id", input.UserID, "endpoint", input.Endpoint)
 		s.asyncDropped.Add(1)
 	}
@@ -1229,10 +1342,19 @@ func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInp
 		applySideEffects: applySideEffects,
 		enqueuedAt:       time.Now(),
 	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.stopping {
+		s.asyncDropped.Add(1)
+		return
+	}
+	s.pending++
+	task.registered = true
 	select {
 	case s.asyncQueue <- task:
 		s.asyncEnqueued.Add(1)
 	default:
+		s.pending--
 		slog.Warn("content_moderation.record_queue_full",
 			"user_id", input.UserID,
 			"endpoint", input.Endpoint,
@@ -1242,12 +1364,20 @@ func (s *ContentModerationService) enqueueRecord(input ContentModerationCheckInp
 }
 
 func (s *ContentModerationService) worker(id int) {
+	base := s.runtimeContext(false)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), maxContentModerationTimeoutMS*time.Millisecond+10*time.Second)
+		if base.Err() != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(base, maxContentModerationTimeoutMS*time.Millisecond+10*time.Second)
 		runtimeSnapshot, err := s.loadRuntimeSnapshot(ctx)
-		if err != nil || runtimeSnapshot == nil || runtimeSnapshot.config == nil || id >= runtimeSnapshot.config.WorkerCount {
+		if err != nil || runtimeSnapshot == nil || runtimeSnapshot.config == nil || (id >= runtimeSnapshot.config.WorkerCount && !s.isStopping()) {
 			cancel()
-			time.Sleep(time.Second)
+			select {
+			case <-base.Done():
+				return
+			case <-time.After(time.Second):
+			}
 			continue
 		}
 		cfg := runtimeSnapshot.config
@@ -1257,6 +1387,9 @@ func (s *ContentModerationService) worker(id int) {
 			continue
 		}
 		func() {
+			if task.registered {
+				defer s.completeTask()
+			}
 			defer cancel()
 			defer func() {
 				if r := recover(); r != nil {
@@ -1473,7 +1606,11 @@ func (s *ContentModerationService) cleanupWorker() {
 	timer := time.NewTimer(contentModerationCleanupDelay)
 	defer timer.Stop()
 	for {
-		<-timer.C
+		select {
+		case <-s.runtimeContext(true).Done():
+			return
+		case <-timer.C:
+		}
 		s.runCleanupOnce()
 		timer.Reset(contentModerationCleanupInterval)
 	}
@@ -1483,7 +1620,7 @@ func (s *ContentModerationService) runCleanupOnce() {
 	if s == nil || s.repo == nil || s.settingRepo == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), contentModerationCleanupTimeout)
+	ctx, cancel := context.WithTimeout(s.runtimeContext(true), contentModerationCleanupTimeout)
 	defer cancel()
 	cfg, err := s.loadConfig(ctx)
 	if err != nil {
@@ -1562,16 +1699,24 @@ func (s *ContentModerationService) runtimeSnapshotTTL() time.Duration {
 }
 
 func (s *ContentModerationService) triggerRuntimeSnapshotRefresh() {
-	if s == nil || s.runtimeRefreshDeferred() || !s.runtimeRefreshMu.TryLock() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	s.initRuntimeLocked()
+	if s.stopping || s.runtimeRefreshDeferred() || !s.runtimeRefreshMu.TryLock() {
 		return
 	}
 	if s.runtimeRefreshDeferred() {
 		s.runtimeRefreshMu.Unlock()
 		return
 	}
+	s.lifecycleWG.Add(1)
 	go func() {
+		defer s.lifecycleWG.Done()
 		defer s.runtimeRefreshMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), contentModerationRuntimeRefreshTimeout)
+		ctx, cancel := context.WithTimeout(s.maintenanceCtx, contentModerationRuntimeRefreshTimeout)
 		defer cancel()
 		if _, err := s.refreshRuntimeSnapshot(ctx); err != nil {
 			s.runtimeRefreshRetryAt.Store(time.Now().Add(s.runtimeSnapshotTTL()).UnixNano())
