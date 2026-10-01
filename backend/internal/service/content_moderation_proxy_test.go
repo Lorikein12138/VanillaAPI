@@ -113,7 +113,7 @@ func TestContentModerationCallRoutesThroughProxy(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{Flagged: false}}})
 	}))
-	defer proxySrv.Close()
+	t.Cleanup(proxySrv.Close)
 
 	proxyAddr := strings.TrimPrefix(proxySrv.URL, "http://")
 	host, portStr, ok := strings.Cut(proxyAddr, ":")
@@ -128,7 +128,7 @@ func TestContentModerationCallRoutesThroughProxy(t *testing.T) {
 	proxyRepo := &contentModerationTestProxyRepo{proxies: map[int64]*Proxy{
 		7: {ID: 7, Name: "audit-proxy", Protocol: "http", Host: host, Port: port, Status: StatusActive},
 	}}
-	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	svc := newContentModerationTestService(t, nil, nil, nil, nil, nil, proxyRepo, nil, nil)
 
 	cfg := defaultContentModerationConfig()
 	cfg.BaseURL = "http://moderation-proxy-test.invalid"
@@ -152,10 +152,10 @@ func TestContentModerationProxyResolveFailureDoesNotFallBackToDirect(t *testing.
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{Flagged: false}}})
 	}))
-	defer directSrv.Close()
+	t.Cleanup(directSrv.Close)
 
 	proxyRepo := &contentModerationTestProxyRepo{getByIDErr: errors.New("proxy deleted")}
-	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	svc := newContentModerationTestService(t, nil, nil, nil, nil, nil, proxyRepo, nil, nil)
 
 	cfg := defaultContentModerationConfig()
 	cfg.BaseURL = directSrv.URL
@@ -177,7 +177,7 @@ func TestContentModerationProxyURLResolutionCached(t *testing.T) {
 	proxyRepo := &contentModerationTestProxyRepo{proxies: map[int64]*Proxy{
 		3: {ID: 3, Name: "p", Protocol: "http", Host: "127.0.0.1", Port: 8080, Status: StatusActive},
 	}}
-	svc := NewContentModerationService(nil, nil, nil, nil, nil, proxyRepo, nil, nil)
+	svc := newContentModerationTestService(t, nil, nil, nil, nil, nil, proxyRepo, nil, nil)
 
 	for i := 0; i < 5; i++ {
 		if _, err := svc.resolveModerationProxyURL(context.Background(), 3); err != nil {
@@ -195,7 +195,7 @@ func TestContentModerationUpdateConfigProxyIDSemantics(t *testing.T) {
 	proxyRepo := &contentModerationTestProxyRepo{proxies: map[int64]*Proxy{
 		5: {ID: 5, Name: "p", Protocol: "http", Host: "127.0.0.1", Port: 8080, Status: StatusActive},
 	}}
-	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, proxyRepo, nil, nil)
+	svc := newContentModerationTestService(t, settingRepo, nil, nil, nil, nil, proxyRepo, nil, nil)
 	ctx := context.Background()
 
 	view, err := svc.UpdateConfig(ctx, UpdateContentModerationConfigInput{ProxyID: moderationProxyIDPtr(5)})
@@ -239,7 +239,7 @@ func TestContentModerationTestAPIKeysProxySemantics(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{Flagged: false}}})
 	}))
-	defer proxySrv.Close()
+	t.Cleanup(proxySrv.Close)
 	proxyAddr := strings.TrimPrefix(proxySrv.URL, "http://")
 	host, portStr, _ := strings.Cut(proxyAddr, ":")
 	port, _ := strconv.Atoi(portStr)
@@ -259,7 +259,15 @@ func TestContentModerationTestAPIKeysProxySemantics(t *testing.T) {
 	proxyRepo := &contentModerationTestProxyRepo{proxies: map[int64]*Proxy{
 		7: {ID: 7, Name: "audit-proxy", Protocol: "http", Host: host, Port: port, Status: StatusActive},
 	}}
-	svc := NewContentModerationService(settingRepo, nil, nil, nil, nil, proxyRepo, nil, nil)
+	var direct atomic.Int64
+	directSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		direct.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{Flagged: false}}})
+	}))
+	t.Cleanup(directSrv.Close)
+
+	svc := newContentModerationTestService(t, settingRepo, nil, nil, nil, nil, proxyRepo, nil, nil)
 
 	// nil：沿用已保存配置的代理，测试请求应经过代理成功。
 	result, err := svc.TestAPIKeys(context.Background(), TestContentModerationAPIKeysInput{APIKeys: []string{"sk-input"}})
@@ -274,13 +282,6 @@ func TestContentModerationTestAPIKeysProxySemantics(t *testing.T) {
 	}
 
 	// 0：强制直连；BaseURL 指向本地可直连服务器，应成功且不再经过代理。
-	var direct atomic.Int64
-	directSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		direct.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(moderationAPIResponse{Results: []moderationAPIResult{{Flagged: false}}})
-	}))
-	defer directSrv.Close()
 
 	before := proxied.Load()
 	result, err = svc.TestAPIKeys(context.Background(), TestContentModerationAPIKeysInput{

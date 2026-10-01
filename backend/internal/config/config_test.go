@@ -30,6 +30,45 @@ func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
 	require.Equal(t, DefaultModelsListReadMaxBytes, cfg.Gateway.ModelsListReadMaxBytes)
 }
 
+func TestLoadV0211AdmissionDefaultsAndEnvironment(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 200, cfg.APIKeyCreate.MaxActivePerUser)
+	require.Equal(t, 60, cfg.APIKeyCreate.MaxPerUserPerHour)
+	r := cfg.Billing.InflightReservation
+	require.True(t, r.Enabled)
+	require.Equal(t, 900, r.TTLSeconds)
+	require.Equal(t, 8192, r.DefaultMaxTokens)
+	require.Equal(t, 128000, r.MaxOutputTokens)
+	require.Equal(t, 200000, r.MaxInputTokens)
+	require.Zero(t, r.MaxReservationUSD)
+	require.False(t, r.FailClosedOnUnpriced)
+	t.Setenv("API_KEY_CREATE_MAX_ACTIVE_PER_USER", "0")
+	t.Setenv("API_KEY_CREATE_MAX_PER_USER_PER_HOUR", "0")
+	t.Setenv("BILLING_INFLIGHT_RESERVATION_ENABLED", "false")
+	t.Setenv("BILLING_INFLIGHT_RESERVATION_TTL_SECONDS", "123")
+	t.Setenv("BILLING_INFLIGHT_RESERVATION_FAIL_CLOSED_ON_UNPRICED", "true")
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Zero(t, cfg.APIKeyCreate.MaxActivePerUser)
+	require.Zero(t, cfg.APIKeyCreate.MaxPerUserPerHour)
+	require.False(t, cfg.Billing.InflightReservation.Enabled)
+	require.Equal(t, 123, cfg.Billing.InflightReservation.TTLSeconds)
+	require.True(t, cfg.Billing.InflightReservation.FailClosedOnUnpriced)
+}
+
+func TestLoadV0211AdmissionRejectsNegativeConfiguration(t *testing.T) {
+	for _, key := range []string{"API_KEY_CREATE_MAX_ACTIVE_PER_USER", "API_KEY_CREATE_MAX_PER_USER_PER_HOUR", "BILLING_INFLIGHT_RESERVATION_TTL_SECONDS", "BILLING_INFLIGHT_RESERVATION_DEFAULT_MAX_TOKENS", "BILLING_INFLIGHT_RESERVATION_MAX_OUTPUT_TOKENS", "BILLING_INFLIGHT_RESERVATION_MAX_INPUT_TOKENS", "BILLING_INFLIGHT_RESERVATION_MAX_RESERVATION_USD"} {
+		t.Run(key, func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			t.Setenv(key, "-1")
+			_, err := Load()
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestLoadTimezonePrecedence(t *testing.T) {
 	tests := []struct {
 		name         string

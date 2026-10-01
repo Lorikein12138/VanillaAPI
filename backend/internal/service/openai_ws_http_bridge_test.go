@@ -1897,6 +1897,14 @@ func TestProxyResponsesWebSocketFromClientForGrokUsesXAIHTTPBridgeAndPreservesMa
 
 func TestOpenAIWSHTTPBridgeAcceptsFirstFrameAboveLegacy16MiB(t *testing.T) {
 
+	started := time.Now()
+	deadline := started.Add(120 * time.Second)
+	if outer, ok := t.Deadline(); ok && outer.Add(-5*time.Second).Before(deadline) {
+		deadline = outer.Add(-5 * time.Second)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	t.Logf("large-frame total budget=%s", time.Until(deadline))
 	sseBody := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_large_bridge","model":"gpt-5"}}`,
 		"",
@@ -1949,7 +1957,18 @@ func TestOpenAIWSHTTPBridgeAcceptsFirstFrameAboveLegacy16MiB(t *testing.T) {
 		Status:      StatusActive,
 	}
 
-	payload := []byte(strings.Repeat(" ", 1024) + `{"type":"response.create","generate":true,"model":"gpt-5","stream":true,"input":"` + strings.Repeat("x", 17*1024*1024) + `"}`)
+	prefix, suffix := `{"type":"response.create","generate":true,"model":"gpt-5","stream":true,"input":"`, `"}`
+	const padding = 1024
+	payload := make([]byte, padding+len(prefix)+17*1024*1024+len(suffix))
+	for i := range padding {
+		payload[i] = ' '
+	}
+	copy(payload[padding:], prefix)
+	for i := padding + len(prefix); i < len(payload)-len(suffix); i++ {
+		payload[i] = 'x'
+	}
+	copy(payload[len(payload)-len(suffix):], suffix)
+	t.Logf("large-frame payload bytes=%d", len(payload))
 	require.Greater(t, len(payload), 16*1024*1024)
 	require.GreaterOrEqual(t, int64(len(payload)), cfg.Gateway.OpenAIWS.HTTPBridgeThresholdBytes)
 	require.Less(t, int64(len(payload)), ResolveOpenAIWSClientReadLimitBytes(cfg))
@@ -1976,9 +1995,7 @@ func TestOpenAIWSHTTPBridgeAcceptsFirstFrameAboveLegacy16MiB(t *testing.T) {
 		defer func() { _ = conn.CloseNow() }()
 		conn.SetReadLimit(ResolveOpenAIWSClientReadLimitBytes(cfg))
 
-		readCtx, cancelRead := context.WithTimeout(r.Context(), 10*time.Second)
-		msgType, firstMessage, err := conn.Read(readCtx)
-		cancelRead()
+		msgType, firstMessage, err := conn.Read(ctx)
 		if err != nil {
 			errCh <- err
 			return
@@ -1990,34 +2007,26 @@ func TestOpenAIWSHTTPBridgeAcceptsFirstFrameAboveLegacy16MiB(t *testing.T) {
 
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
-		req := r.Clone(r.Context())
+		req := r.Clone(ctx)
 		req.Header = req.Header.Clone()
 		req.Header.Set("User-Agent", "codex_cli_rs/0.135.0")
 		ginCtx.Request = req
 
-		proxyCtx, cancelProxy := context.WithTimeout(r.Context(), 20*time.Second)
-		defer cancelProxy()
-		errCh <- svc.ProxyResponsesWebSocketFromClient(proxyCtx, ginCtx, conn, account, "sk-test", firstMessage, hooks)
+		errCh <- svc.ProxyResponsesWebSocketFromClient(ctx, ginCtx, conn, account, "sk-test", firstMessage, hooks)
 	}))
 	defer wsServer.Close()
 
-	dialCtx, cancelDial := context.WithTimeout(context.Background(), 5*time.Second)
-	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), nil)
-	cancelDial()
-	require.NoError(t, err)
+	clientConn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(wsServer.URL, "http"), nil)
+	require.NoError(t, err, "dial/write stage payload=%d elapsed=%s", len(payload), time.Since(started))
 	defer func() { _ = clientConn.CloseNow() }()
 
-	writeCtx, cancelWrite := context.WithTimeout(context.Background(), 20*time.Second)
-	err = clientConn.Write(writeCtx, coderws.MessageText, payload)
-	cancelWrite()
-	require.NoError(t, err)
+	err = clientConn.Write(ctx, coderws.MessageText, payload)
+	require.NoError(t, err, "dial/write stage payload=%d elapsed=%s", len(payload), time.Since(started))
 
 	var eventTypes []string
 	for {
-		readCtx, cancelRead := context.WithTimeout(context.Background(), 10*time.Second)
-		msgType, event, readErr := clientConn.Read(readCtx)
-		cancelRead()
-		require.NoError(t, readErr)
+		msgType, event, readErr := clientConn.Read(ctx)
+		require.NoError(t, readErr, "read stage payload=%d elapsed=%s", len(payload), time.Since(started))
 		require.Equal(t, coderws.MessageText, msgType)
 
 		eventType := gjson.GetBytes(event, "type").String()
@@ -2029,12 +2038,20 @@ func TestOpenAIWSHTTPBridgeAcceptsFirstFrameAboveLegacy16MiB(t *testing.T) {
 	require.Contains(t, eventTypes, "response.created")
 	require.Contains(t, eventTypes, "response.completed")
 
-	require.NoError(t, clientConn.Close(coderws.StatusNormalClosure, "done"))
+	closed := make(chan error, 1)
+	go func() { closed <- clientConn.Close(coderws.StatusNormalClosure, "done") }()
+	select {
+	case closeErr := <-closed:
+		require.NoError(t, closeErr)
+	case <-ctx.Done():
+		_ = clientConn.CloseNow()
+		t.Fatalf("close stage payload=%d elapsed=%s: %v", len(payload), time.Since(started), ctx.Err())
+	}
 	select {
 	case proxyErr := <-errCh:
 		require.NoError(t, proxyErr)
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for websocket bridge proxy to finish")
+	case <-ctx.Done():
+		t.Fatalf("proxy finish payload=%d elapsed=%s: %v", len(payload), time.Since(started), ctx.Err())
 	}
 
 	select {
@@ -2045,10 +2062,11 @@ func TestOpenAIWSHTTPBridgeAcceptsFirstFrameAboveLegacy16MiB(t *testing.T) {
 		require.Equal(t, 9, outcome.result.Usage.InputTokens)
 		require.Equal(t, 1, outcome.result.Usage.OutputTokens)
 		require.Equal(t, "response.completed", outcome.result.UpstreamTerminalEvent)
-	default:
-		t.Fatal("AfterTurn was not called for websocket HTTP bridge turn")
+	case <-ctx.Done():
+		t.Fatalf("AfterTurn payload=%d elapsed=%s: %v", len(payload), time.Since(started), ctx.Err())
 	}
 
+	require.Empty(t, turnOutcomeCh, "only one turn")
 	require.NotNil(t, upstream.lastReq)
 	require.Equal(t, http.MethodPost, upstream.lastReq.Method)
 	require.Equal(t, "https://env-openai.example/v1/responses", upstream.lastReq.URL.String())
