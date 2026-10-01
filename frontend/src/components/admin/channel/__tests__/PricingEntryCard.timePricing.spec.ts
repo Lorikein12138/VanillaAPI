@@ -158,4 +158,37 @@ describe('PricingEntryCard request multipliers', () => {
       reasoning_effort_multipliers: { high: 0.5 },
     })
   })
+
+  it('does not auto-fill prices when adding a model to an entry that already has models', async () => {
+    vi.mocked(channelsAPI.getModelDefaultPricing).mockClear()
+    vi.mocked(channelsAPI.getModelDefaultPricing).mockResolvedValue({
+      found: true, input_price: 2e-6, output_price: 10e-6,
+    })
+    const wrapper = shallowMount(PricingEntryCard, {
+      props: { entry: { ...createEntry(), models: ['gpt-5.5', 'gpt-6-sol'] } },
+    })
+    wrapper.findComponent({ name: 'ModelTagInput' }).vm.$emit('update:models', ['gpt-5.5', 'gpt-6-sol', 'gpt-6-astra'])
+    await flushPromises()
+    expect(channelsAPI.getModelDefaultPricing).not.toHaveBeenCalled()
+    const updates = wrapper.emitted('update')!
+    expect(updates).toHaveLength(1)
+    expect(updates[0][0]).toMatchObject({
+      models: ['gpt-5.5', 'gpt-6-sol', 'gpt-6-astra'], input_price: null, output_price: null,
+      cache_write_price: null, cache_read_price: null,
+    })
+  })
+
+  it('does not auto-fill prices when several models are added to an empty entry at once', async () => {
+    vi.mocked(channelsAPI.getModelDefaultPricing).mockClear()
+    vi.mocked(channelsAPI.getModelDefaultPricing).mockResolvedValue({
+      found: true, input_price: 2e-6, output_price: 10e-6,
+    })
+    const wrapper = shallowMount(PricingEntryCard, {
+      props: { entry: createEntry() },
+    })
+    wrapper.findComponent({ name: 'ModelTagInput' }).vm.$emit('update:models', ['claude-opus-5', 'claude-sonnet-5'])
+    await flushPromises()
+    expect(channelsAPI.getModelDefaultPricing).not.toHaveBeenCalled()
+    expect(wrapper.emitted('update')!.at(-1)![0]).toMatchObject({ input_price: null, output_price: null })
+  })
 })
