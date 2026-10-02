@@ -485,6 +485,16 @@ func (s *ChannelMonitorV2Service) ParseFilterAt(rangeValue string, platforms, mo
 }
 
 func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2Dimensions, error) {
+	return s.dimensions(ctx, filter, admin, false)
+}
+
+// PresentationDimensions serves the shared status page with administrator
+// scope while keeping the presentation projection independent from identity.
+func (s *ChannelMonitorV2Service) PresentationDimensions(ctx context.Context, filter ChannelMonitorV2Filter) (*ChannelMonitorV2Dimensions, error) {
+	return s.dimensions(ctx, filter, true, true)
+}
+
+func (s *ChannelMonitorV2Service) dimensions(ctx context.Context, filter ChannelMonitorV2Filter, admin, presentation bool) (*ChannelMonitorV2Dimensions, error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -493,7 +503,7 @@ func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter Channel
 	if err != nil {
 		return nil, err
 	}
-	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+	if (!admin || presentation) && cfg.SyntheticEmptyBucketsEnabled {
 		catalogFilter := filter
 		catalogFilter.Platforms = nil
 		catalogFilter.GroupIDs = nil
@@ -511,12 +521,22 @@ func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter Channel
 }
 
 func (s *ChannelMonitorV2Service) Snapshot(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2Snapshot, error) {
+	return s.snapshot(ctx, filter, admin, false)
+}
+
+// PresentationSnapshot serves the shared status page with administrator scope
+// and the configured response-only presentation projection.
+func (s *ChannelMonitorV2Service) PresentationSnapshot(ctx context.Context, filter ChannelMonitorV2Filter) (*ChannelMonitorV2Snapshot, error) {
+	return s.snapshot(ctx, filter, true, true)
+}
+
+func (s *ChannelMonitorV2Service) snapshot(ctx context.Context, filter ChannelMonitorV2Filter, admin, presentation bool) (*ChannelMonitorV2Snapshot, error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var snap *ChannelMonitorV2Snapshot
-	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+	if (!admin || presentation) && cfg.SyntheticEmptyBucketsEnabled {
 		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
 		if buildErr != nil {
 			return nil, buildErr
@@ -535,12 +555,22 @@ func (s *ChannelMonitorV2Service) Snapshot(ctx context.Context, filter ChannelMo
 }
 
 func (s *ChannelMonitorV2Service) Models(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
+	return s.models(ctx, filter, admin, false)
+}
+
+// PresentationModels serves the shared status page with administrator scope
+// and the configured response-only presentation projection.
+func (s *ChannelMonitorV2Service) PresentationModels(ctx context.Context, filter ChannelMonitorV2Filter) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
+	return s.models(ctx, filter, true, true)
+}
+
+func (s *ChannelMonitorV2Service) models(ctx context.Context, filter ChannelMonitorV2Filter, admin, presentation bool) (*ChannelMonitorV2List[ChannelMonitorV2ModelRow], error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var list *ChannelMonitorV2List[ChannelMonitorV2ModelRow]
-	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+	if (!admin || presentation) && cfg.SyntheticEmptyBucketsEnabled {
 		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
 		if buildErr != nil {
 			return nil, buildErr
@@ -562,6 +592,16 @@ func (s *ChannelMonitorV2Service) Models(ctx context.Context, filter ChannelMoni
 }
 
 func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMonitorV2Filter, groupBy ChannelMonitorV2GroupBy, admin bool) (*ChannelMonitorV2Matrix, error) {
+	return s.matrix(ctx, filter, groupBy, admin, false)
+}
+
+// PresentationMatrix serves the shared status page with administrator scope
+// and the configured response-only presentation projection.
+func (s *ChannelMonitorV2Service) PresentationMatrix(ctx context.Context, filter ChannelMonitorV2Filter, groupBy ChannelMonitorV2GroupBy) (*ChannelMonitorV2Matrix, error) {
+	return s.matrix(ctx, filter, groupBy, true, true)
+}
+
+func (s *ChannelMonitorV2Service) matrix(ctx context.Context, filter ChannelMonitorV2Filter, groupBy ChannelMonitorV2GroupBy, admin, presentation bool) (*ChannelMonitorV2Matrix, error) {
 	if !groupBy.Valid() {
 		return nil, fmt.Errorf("%w: %s", ErrChannelMonitorV2InvalidGroupBy, groupBy)
 	}
@@ -570,7 +610,7 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 		return nil, err
 	}
 	var matrix *ChannelMonitorV2Matrix
-	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+	if (!admin || presentation) && cfg.SyntheticEmptyBucketsEnabled {
 		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
 		if buildErr != nil {
 			return nil, buildErr
@@ -637,6 +677,16 @@ func (s *ChannelMonitorV2Service) Errors(ctx context.Context, filter ChannelMoni
 // Non-admin callers receive category rates + ignored flags only: absolute Count
 // is zeroed and Details (upstream messages / status codes / volume) are omitted.
 func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter ChannelMonitorV2Filter, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
+	return s.errorsForViewer(ctx, filter, admin, false)
+}
+
+// PresentationErrors serves the shared status page with administrator scope
+// and the configured response-only presentation projection.
+func (s *ChannelMonitorV2Service) PresentationErrors(ctx context.Context, filter ChannelMonitorV2Filter) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
+	return s.errorsForViewer(ctx, filter, true, true)
+}
+
+func (s *ChannelMonitorV2Service) errorsForViewer(ctx context.Context, filter ChannelMonitorV2Filter, admin, presentation bool) (*ChannelMonitorV2List[ChannelMonitorV2ErrorRow], error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -645,7 +695,7 @@ func (s *ChannelMonitorV2Service) ErrorsForViewer(ctx context.Context, filter Ch
 	if err != nil {
 		return nil, err
 	}
-	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+	if (!admin || presentation) && cfg.SyntheticEmptyBucketsEnabled {
 		presentation, buildErr := s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
 		if buildErr != nil {
 			return nil, buildErr
@@ -777,6 +827,16 @@ func redactChannelMonitorV2Metric(m *ChannelMonitorV2Metric, hideThroughput bool
 }
 
 func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonitorV2Filter, viewerID int64, admin bool) (*ChannelMonitorV2List[ChannelMonitorV2UserRow], error) {
+	return s.users(ctx, filter, viewerID, admin, false)
+}
+
+// PresentationUsers serves the shared status page with administrator scope
+// and the configured response-only presentation projection.
+func (s *ChannelMonitorV2Service) PresentationUsers(ctx context.Context, filter ChannelMonitorV2Filter, viewerID int64) (*ChannelMonitorV2List[ChannelMonitorV2UserRow], error) {
+	return s.users(ctx, filter, viewerID, true, true)
+}
+
+func (s *ChannelMonitorV2Service) users(ctx context.Context, filter ChannelMonitorV2Filter, viewerID int64, admin, usePresentation bool) (*ChannelMonitorV2List[ChannelMonitorV2UserRow], error) {
 	cfg, err := s.getEnabledConfig(ctx)
 	if err != nil {
 		return nil, err
@@ -788,7 +848,7 @@ func (s *ChannelMonitorV2Service) Users(ctx context.Context, filter ChannelMonit
 		return &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Items: []ChannelMonitorV2UserRow{}}, nil
 	}
 	var presentation *ChannelMonitorV2Presentation
-	if !admin && cfg.SyntheticEmptyBucketsEnabled {
+	if (!admin || usePresentation) && cfg.SyntheticEmptyBucketsEnabled {
 		presentation, err = s.buildChannelMonitorV2Presentation(ctx, filter, *cfg, nil)
 		if err != nil {
 			return nil, err

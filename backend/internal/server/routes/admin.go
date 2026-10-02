@@ -862,6 +862,16 @@ func registerChannelMonitorV2Routes(admin *gin.RouterGroup, h *handler.Handlers,
 			reads.GET("/errors", h.ChannelMonitorV2.Errors)
 			reads.GET("/users", h.ChannelMonitorV2.AdminUsers)
 		}
+		presentation := monitor.Group("/presentation")
+		presentation.Use(featureGuard, modeV2Guard)
+		{
+			presentation.GET("/dimensions", h.ChannelMonitorV2.PresentationDimensions)
+			presentation.GET("/snapshot", h.ChannelMonitorV2.PresentationSnapshot)
+			presentation.GET("/models", h.ChannelMonitorV2.PresentationModels)
+			presentation.GET("/matrix", h.ChannelMonitorV2.PresentationMatrix)
+			presentation.GET("/errors", h.ChannelMonitorV2.PresentationErrors)
+			presentation.GET("/users", h.ChannelMonitorV2.PresentationUsers)
+		}
 	}
 }
 
