@@ -1,6 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../client'
-import { getDimensions, getErrors, getMatrix, getModels, getSnapshot, getUsers, repeatedArrayParamsSerializer } from '../channelMonitorV2'
+import {
+  getAdminPresentationDimensions,
+  getAdminPresentationErrors,
+  getAdminPresentationMatrix,
+  getAdminPresentationModels,
+  getAdminPresentationSnapshot,
+  getAdminPresentationUsers,
+  getConfig,
+  getDimensions,
+  getErrors,
+  getMatrix,
+  getModels,
+  getSnapshot,
+  getUsers,
+  type MonitorConfig,
+  repeatedArrayParamsSerializer,
+  updateConfig,
+} from '../channelMonitorV2'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -58,5 +75,37 @@ describe('channel monitor V2 query serialization', () => {
         as_of: asOf,
       })
     }
+  })
+
+  it('uses the dedicated admin presentation route for all six status resources', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { items: [] } })
+    const filter = { range: '90m' as const, platforms: [], groupIds: [], models: [] }
+
+    await getAdminPresentationDimensions(filter)
+    await getAdminPresentationSnapshot(filter)
+    await getAdminPresentationMatrix(filter, 'platform_group')
+    await getAdminPresentationModels(filter)
+    await getAdminPresentationErrors(filter)
+    await getAdminPresentationUsers(filter)
+
+    expect(get.mock.calls.map(([path]) => path)).toEqual([
+      '/admin/channel-monitor-v2/presentation/dimensions',
+      '/admin/channel-monitor-v2/presentation/snapshot',
+      '/admin/channel-monitor-v2/presentation/matrix',
+      '/admin/channel-monitor-v2/presentation/models',
+      '/admin/channel-monitor-v2/presentation/errors',
+      '/admin/channel-monitor-v2/presentation/users',
+    ])
+  })
+
+  it('keeps configuration on the separate raw admin config route', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: {} })
+    await getConfig()
+    expect(get).toHaveBeenCalledWith('/admin/channel-monitor-v2/config')
+
+    const put = vi.spyOn(apiClient, 'put').mockResolvedValue({ data: {} })
+    const config = { version: 4 } as MonitorConfig
+    await updateConfig(config)
+    expect(put).toHaveBeenCalledWith('/admin/channel-monitor-v2/config', config)
   })
 })
