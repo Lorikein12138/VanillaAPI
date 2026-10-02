@@ -719,17 +719,24 @@ async function loadDimensions(signal?: AbortSignal, id = sequence, asOf = refres
     groupIds: [],
     models: [],
   }
-  const next = await api.getDimensions(rangeOnly, isAdmin.value, signal, asOf)
+  const next = isAdmin.value
+    ? await api.getAdminPresentationDimensions(rangeOnly, signal, asOf)
+    : await api.getDimensions(rangeOnly, false, signal, asOf)
   if (id !== sequence) return
   dimensions.value = next
   dimensionsReady.value = true
 }
 
 async function loadMetrics(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
-  const [nextSnapshot, nextMatrix] = await Promise.all([
-    api.getSnapshot(filter.value, isAdmin.value, signal, asOf),
-    api.getMatrix(filter.value, matrixGroupBy.value, isAdmin.value, signal, asOf),
-  ])
+  const [nextSnapshot, nextMatrix] = isAdmin.value
+    ? await Promise.all([
+        api.getAdminPresentationSnapshot(filter.value, signal, asOf),
+        api.getAdminPresentationMatrix(filter.value, matrixGroupBy.value, signal, asOf),
+      ])
+    : await Promise.all([
+        api.getSnapshot(filter.value, false, signal, asOf),
+        api.getMatrix(filter.value, matrixGroupBy.value, false, signal, asOf),
+      ])
   if (id !== sequence) return
   snapshot.value = nextSnapshot
   matrix.value = nextMatrix
@@ -796,11 +803,17 @@ async function loadTab(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) 
   tabLoading.value = true
   try {
     if (activeTab.value === 'models') {
-      modelRows.value = (await api.getModels(filter.value, isAdmin.value, signal, asOf)).items || []
+      modelRows.value = (await (isAdmin.value
+        ? api.getAdminPresentationModels(filter.value, signal, asOf)
+        : api.getModels(filter.value, false, signal, asOf))).items || []
     } else if (activeTab.value === 'errors') {
-      errorRows.value = (await api.getErrors(filter.value, isAdmin.value, signal, asOf)).items || []
+      errorRows.value = (await (isAdmin.value
+        ? api.getAdminPresentationErrors(filter.value, signal, asOf)
+        : api.getErrors(filter.value, false, signal, asOf))).items || []
     } else if (showUserRanking.value) {
-      userRows.value = (await api.getUsers(filter.value, isAdmin.value, signal, asOf)).items || []
+      userRows.value = (await (isAdmin.value
+        ? api.getAdminPresentationUsers(filter.value, signal, asOf)
+        : api.getUsers(filter.value, false, signal, asOf))).items || []
     } else {
       userRows.value = []
     }

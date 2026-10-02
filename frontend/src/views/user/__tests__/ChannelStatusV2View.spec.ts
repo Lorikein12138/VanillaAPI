@@ -1,15 +1,39 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { route, router, getDimensions, getSnapshot, getMatrix, getModels, getErrors, getUsers, showError } = vi.hoisted(() => ({
+const {
+  route,
+  router,
+  authState,
+  getDimensions,
+  getSnapshot,
+  getMatrix,
+  getModels,
+  getErrors,
+  getUsers,
+  getAdminPresentationDimensions,
+  getAdminPresentationSnapshot,
+  getAdminPresentationMatrix,
+  getAdminPresentationModels,
+  getAdminPresentationErrors,
+  getAdminPresentationUsers,
+  showError,
+} = vi.hoisted(() => ({
   route: { query: {} as Record<string, unknown> },
   router: { replace: vi.fn() },
+  authState: { isAdmin: false },
   getDimensions: vi.fn(),
   getSnapshot: vi.fn(),
   getMatrix: vi.fn(),
   getModels: vi.fn(),
   getErrors: vi.fn(),
   getUsers: vi.fn(),
+  getAdminPresentationDimensions: vi.fn(),
+  getAdminPresentationSnapshot: vi.fn(),
+  getAdminPresentationMatrix: vi.fn(),
+  getAdminPresentationModels: vi.fn(),
+  getAdminPresentationErrors: vi.fn(),
+  getAdminPresentationUsers: vi.fn(),
   showError: vi.fn(),
 }))
 
@@ -17,7 +41,7 @@ vi.mock('vue-router', () => ({
   useRoute: () => route,
   useRouter: () => router,
 }))
-vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ isAdmin: false }) }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => authState }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError }) }))
 vi.mock('@/utils/featureFlags', () => ({
   isChannelMonitorThroughputHidden: () => false,
@@ -30,6 +54,12 @@ vi.mock('@/api/channelMonitorV2', () => ({
   getModels,
   getErrors,
   getUsers,
+  getAdminPresentationDimensions,
+  getAdminPresentationSnapshot,
+  getAdminPresentationMatrix,
+  getAdminPresentationModels,
+  getAdminPresentationErrors,
+  getAdminPresentationUsers,
 }))
 vi.mock('vue-i18n', async (importOriginal) => ({
   ...await importOriginal<typeof import('vue-i18n')>(),
@@ -98,6 +128,7 @@ function mountView() {
 describe('ChannelStatusV2View dimension filters', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    authState.isAdmin = false
     route.query = { platform: 'openai' }
     getDimensions.mockResolvedValue(dimensions)
     getSnapshot.mockResolvedValue({
@@ -111,6 +142,18 @@ describe('ChannelStatusV2View dimension filters', () => {
     getModels.mockResolvedValue({ items: [] })
     getErrors.mockResolvedValue({ items: [] })
     getUsers.mockResolvedValue({ items: [] })
+    getAdminPresentationDimensions.mockResolvedValue(dimensions)
+    getAdminPresentationSnapshot.mockResolvedValue({
+      coverage,
+      config: { refresh_interval_seconds: 300 },
+      metrics: emptyMetrics,
+      health: { overall: 'healthy', error_rate: 'healthy', ttft: 'healthy', cache: 'healthy', minimum_sample: 50 },
+      trend: [],
+    })
+    getAdminPresentationMatrix.mockResolvedValue({ coverage, group_by: 'platform_group', items: [] })
+    getAdminPresentationModels.mockResolvedValue({ items: [] })
+    getAdminPresentationErrors.mockResolvedValue({ items: [] })
+    getAdminPresentationUsers.mockResolvedValue({ items: [] })
   })
 
   it('keeps a composite group in the picker when one of its concrete platforms is selected', async () => {
@@ -165,6 +208,35 @@ describe('ChannelStatusV2View dimension filters', () => {
     expect(getSnapshot.mock.calls.at(-1)?.[3]).toBe(nextAsOf)
     expect(getMatrix.mock.calls.at(-1)?.[4]).toBe(nextAsOf)
     expect(getUsers.mock.calls.at(-1)?.[3]).toBe(nextAsOf)
+    wrapper.unmount()
+  })
+
+  it('uses admin presentation resources on the shared monitor page', async () => {
+    authState.isAdmin = true
+    route.query = {}
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(getAdminPresentationDimensions).toHaveBeenCalled()
+    expect(getAdminPresentationSnapshot).toHaveBeenCalled()
+    expect(getAdminPresentationMatrix).toHaveBeenCalled()
+    expect(getAdminPresentationModels).toHaveBeenCalled()
+    expect(getAdminPresentationErrors).not.toHaveBeenCalled()
+    expect(getAdminPresentationUsers).not.toHaveBeenCalled()
+
+    await wrapper.findAll('[role="tab"]')[1].trigger('click')
+    await flushPromises()
+    expect(getAdminPresentationErrors).toHaveBeenCalled()
+
+    await wrapper.findAll('[role="tab"]')[2].trigger('click')
+    await flushPromises()
+    expect(getAdminPresentationUsers).toHaveBeenCalled()
+    expect(getDimensions).not.toHaveBeenCalled()
+    expect(getSnapshot).not.toHaveBeenCalled()
+    expect(getMatrix).not.toHaveBeenCalled()
+    expect(getModels).not.toHaveBeenCalled()
+    expect(getErrors).not.toHaveBeenCalled()
+    expect(getUsers).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 })

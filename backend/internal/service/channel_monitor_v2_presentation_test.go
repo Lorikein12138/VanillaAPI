@@ -673,6 +673,92 @@ func TestChannelMonitorV2SyntheticProjectionFeedsSixUserEndpoints(t *testing.T) 
 	require.Equal(t, 2, adminUsers.Items[1].Rank)
 	require.Equal(t, 1, adminRepo.dimensionCalls)
 	require.Len(t, adminRepo.matrixFilters, 1, "admin matrix reads one true matrix without projection rollups")
+
+	presentationRepo := makeRepository()
+	presentationService := NewChannelMonitorV2Service(presentationRepo)
+	presentationService.now = func() time.Time { return asOf }
+	presentationDimensions, err := presentationService.PresentationDimensions(context.Background(), filter)
+	require.NoError(t, err)
+	presentationSnapshot, err := presentationService.PresentationSnapshot(context.Background(), filter)
+	require.NoError(t, err)
+	presentationModels, err := presentationService.PresentationModels(context.Background(), filter)
+	require.NoError(t, err)
+	presentationMatrix, err := presentationService.PresentationMatrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel)
+	require.NoError(t, err)
+	presentationErrors, err := presentationService.PresentationErrors(context.Background(), filter)
+	require.NoError(t, err)
+	presentationUsers, err := presentationService.PresentationUsers(context.Background(), filter, viewerID)
+	require.NoError(t, err)
+
+	require.Len(t, presentationDimensions.Models, 1)
+	require.Greater(t, presentationSnapshot.Metrics.RequestCount, adminSnapshot.Metrics.RequestCount)
+	require.NotEmpty(t, presentationModels.Items)
+	require.NotEmpty(t, presentationMatrix.Items)
+	require.NotEmpty(t, presentationErrors.Items)
+	var presentedTimeout *ChannelMonitorV2ErrorRow
+	for i := range presentationErrors.Items {
+		if presentationErrors.Items[i].Category == "timeout" {
+			presentedTimeout = &presentationErrors.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, presentedTimeout)
+	require.NotEmpty(t, presentedTimeout.Details, "admin presentation keeps raw error details")
+	presentedErrorTotal := int64(0)
+	for _, row := range presentationErrors.Items {
+		presentedErrorTotal += row.Count
+	}
+	rawErrorTotal := int64(0)
+	for _, row := range adminErrors.Items {
+		rawErrorTotal += row.Count
+	}
+	require.Greater(t, presentedErrorTotal, rawErrorTotal, "admin presentation merges projected error categories")
+	require.NotEmpty(t, presentationUsers.Items)
+	for _, row := range presentationUsers.Items {
+		require.NotNil(t, row.UserID, "admin presentation keeps user identity")
+	}
+}
+
+func TestChannelMonitorV2AdminPresentationDisabledUsesRawAdminResponses(t *testing.T) {
+	groupID, viewerID, otherID := int64(7), int64(42), int64(43)
+	realMetric := ChannelMonitorV2Metric{SuccessRequests: 8, ErrorRequests: 2, RequestCount: 10, ErrorRate: .2, SuccessRate: .8}
+	coverage := ChannelMonitorV2Coverage{RequestedStart: time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC), RequestedEnd: time.Date(2026, 9, 29, 11, 30, 0, 0, time.UTC), BucketSeconds: 300}
+	newRepo := func() *channelMonitorV2RepoStub {
+		return &channelMonitorV2RepoStub{
+			config:     ChannelMonitorV2Config{Enabled: true, SyntheticEmptyBucketsEnabled: false, RefreshIntervalSeconds: 300, HealthThresholds: DefaultChannelMonitorV2HealthThresholds()},
+			dimensions: &ChannelMonitorV2Dimensions{Models: []ChannelMonitorV2Dimension{{Value: "gpt-5", Platform: "openai"}}},
+			snap:       &ChannelMonitorV2Snapshot{Coverage: coverage, Metrics: realMetric},
+			matrix:     &ChannelMonitorV2Matrix{Coverage: coverage, Items: []ChannelMonitorV2MatrixRow{{Platform: "openai", GroupID: &groupID, Metrics: realMetric, Buckets: []ChannelMonitorV2TrendPoint{{Metrics: realMetric}}}}},
+			errors:     &ChannelMonitorV2List[ChannelMonitorV2ErrorRow]{Coverage: coverage, Items: []ChannelMonitorV2ErrorRow{{Category: "timeout", Count: 2, Rate: 1, Details: []ChannelMonitorV2ErrorDetail{{Count: 2}}}}},
+			users:      &ChannelMonitorV2List[ChannelMonitorV2UserRow]{Coverage: coverage, Items: []ChannelMonitorV2UserRow{{UserID: &otherID, Rank: 1, DisplayLabel: "other"}, {UserID: &viewerID, Rank: 2, DisplayLabel: "viewer"}}},
+		}
+	}
+	filter := ChannelMonitorV2Filter{Range: "90m", Start: coverage.RequestedStart, End: coverage.RequestedEnd, AsOf: coverage.RequestedEnd, Bucket: 5 * time.Minute}
+	repo := newRepo()
+	svc := NewChannelMonitorV2Service(repo)
+
+	dimensions, err := svc.PresentationDimensions(context.Background(), filter)
+	require.NoError(t, err)
+	snapshot, err := svc.PresentationSnapshot(context.Background(), filter)
+	require.NoError(t, err)
+	models, err := svc.PresentationModels(context.Background(), filter)
+	require.NoError(t, err)
+	matrix, err := svc.PresentationMatrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroupModel)
+	require.NoError(t, err)
+	errorsList, err := svc.PresentationErrors(context.Background(), filter)
+	require.NoError(t, err)
+	users, err := svc.PresentationUsers(context.Background(), filter, viewerID)
+	require.NoError(t, err)
+
+	require.Len(t, dimensions.Models, 1)
+	require.Equal(t, realMetric, snapshot.Metrics)
+	require.Nil(t, models)
+	require.Equal(t, realMetric, matrix.Items[0].Metrics)
+	require.Equal(t, int64(2), errorsList.Items[0].Count)
+	require.Len(t, errorsList.Items[0].Details, 1)
+	require.Len(t, users.Items, 2)
+	require.Equal(t, otherID, *users.Items[0].UserID)
+	require.True(t, repo.admin)
 }
 
 func TestChannelMonitorV2SyntheticProjectionDisabledPreservesRepositoryResponses(t *testing.T) {

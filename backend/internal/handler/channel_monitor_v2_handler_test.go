@@ -48,6 +48,16 @@ func TestChannelMonitorV2MatrixHandlerRejectsInvalidGroupBy(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
 }
 
+func TestChannelMonitorV2PresentationMatrixHandlerRejectsInvalidGroupBy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/channel-monitor-v2/presentation/matrix?group_by=invalid", nil)
+	h := NewChannelMonitorV2Handler(service.NewChannelMonitorV2Service(nil), nil)
+	h.PresentationMatrix(c)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+}
+
 func TestChannelMonitorV2ScopeFilterUsesAvailableGroupsForOrdinaryUser(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

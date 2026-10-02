@@ -241,6 +241,7 @@ const requestConfig = (filter: MonitorFilter, signal?: AbortSignal, extraParams:
 })
 
 function base(admin: boolean) { return admin ? '/admin/channel-monitor-v2' : '/channel-monitor-v2' }
+const presentationBase = '/admin/channel-monitor-v2/presentation'
 
 export async function getDimensions(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
   const { data } = await apiClient.get<MonitorDimensions>(`${base(admin)}/dimensions`, requestConfig(filter, signal, {}, asOf))
@@ -264,6 +265,31 @@ export async function getErrors(filter: MonitorFilter, admin = false, signal?: A
 }
 export async function getUsers(filter: MonitorFilter, admin = false, signal?: AbortSignal, asOf?: string) {
   const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(admin)}/users`, requestConfig(filter, signal, {}, asOf))
+  return data
+}
+
+export async function getAdminPresentationDimensions(filter: MonitorFilter, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<MonitorDimensions>(`${presentationBase}/dimensions`, requestConfig(filter, signal, {}, asOf))
+  return data
+}
+export async function getAdminPresentationSnapshot(filter: MonitorFilter, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<MonitorSnapshot>(`${presentationBase}/snapshot`, requestConfig(filter, signal, {}, asOf))
+  return data
+}
+export async function getAdminPresentationMatrix(filter: MonitorFilter, groupBy: MonitorMatrixGroupBy, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<MonitorMatrixResponse>(`${presentationBase}/matrix`, requestConfig(filter, signal, { group_by: groupBy }, asOf))
+  return data
+}
+export async function getAdminPresentationModels(filter: MonitorFilter, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorModelRow[] }>(`${presentationBase}/models`, requestConfig(filter, signal, {}, asOf))
+  return data
+}
+export async function getAdminPresentationErrors(filter: MonitorFilter, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorErrorRow[] }>(`${presentationBase}/errors`, requestConfig(filter, signal, {}, asOf))
+  return data
+}
+export async function getAdminPresentationUsers(filter: MonitorFilter, signal?: AbortSignal, asOf?: string) {
+  const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${presentationBase}/users`, requestConfig(filter, signal, {}, asOf))
   return data
 }
 export async function getConfig() {
