@@ -11,7 +11,8 @@ const concretePlatforms = [
   'zhipu',
   'deepseek',
   'minimax',
-  'opencode_go'
+  'opencode_go',
+  'typesafe'
 ]
 
 describe('platform option catalogs', () => {
@@ -28,11 +29,11 @@ describe('platform option catalogs', () => {
 
   it('keeps exactly the supported group platform catalog without Kiro', () => {
     const values = GROUP_PLATFORM_OPTIONS.map((option) => option.value)
-    expect(values).toHaveLength(11)
+    expect(values).toHaveLength(12)
     expect(values).not.toContain('kiro')
     expect(values).toEqual([
       'anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'kimi',
-      'zhipu', 'deepseek', 'minimax', 'opencode_go', 'composite'
+      'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'composite'
     ])
   })
 })

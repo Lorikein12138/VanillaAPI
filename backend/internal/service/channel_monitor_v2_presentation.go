@@ -190,11 +190,11 @@ func (s *ChannelMonitorV2Service) buildChannelMonitorV2Presentation(
 		if a.Platform != b.Platform {
 			return a.Platform < b.Platform
 		}
-		if a.GroupName != b.GroupName {
-			return a.GroupName < b.GroupName
-		}
 		if channelMonitorV2MatrixGroupID(a.GroupID) != channelMonitorV2MatrixGroupID(b.GroupID) {
 			return channelMonitorV2MatrixGroupID(a.GroupID) < channelMonitorV2MatrixGroupID(b.GroupID)
+		}
+		if a.GroupName != b.GroupName {
+			return a.GroupName < b.GroupName
 		}
 		return a.Model < b.Model
 	})

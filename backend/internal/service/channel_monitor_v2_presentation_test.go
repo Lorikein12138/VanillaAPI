@@ -44,6 +44,46 @@ func TestChannelMonitorV2PresentationAnchorAndRetention(t *testing.T) {
 	}
 }
 
+func TestChannelMonitorV2PresentationTypeSafeAndCompositeEmptyRowsRespectSwitch(t *testing.T) {
+	asOf := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	svc := NewChannelMonitorV2Service(&channelMonitorV2RepoStub{})
+	filter, err := svc.ParseFilterAt("90m", nil, nil, nil, asOf)
+	require.NoError(t, err)
+	dimensions := &ChannelMonitorV2Dimensions{
+		Groups: []ChannelMonitorV2GroupDimension{
+			{ID: 1, Name: "TypeSafe", Platform: "typesafe"},
+			{ID: 2, Name: "Composite", Platform: "composite", Platforms: []string{"typesafe"}},
+		},
+	}
+	cfg := ChannelMonitorV2Config{
+		SyntheticEmptyBucketsEnabled: true,
+		RefreshIntervalSeconds:       300,
+		Platforms: []ChannelMonitorV2PlatformConfig{
+			{Platform: "typesafe", Enabled: true, Models: []string{"jev-latest"}},
+			{Platform: "composite", Enabled: true},
+		},
+		HealthThresholds: DefaultChannelMonitorV2HealthThresholds(),
+	}
+	repo := &channelMonitorV2RepoStub{
+		matrices: map[int]*ChannelMonitorV2Matrix{300: {Items: []ChannelMonitorV2MatrixRow{}}},
+	}
+	svc = NewChannelMonitorV2Service(repo)
+	svc.now = func() time.Time { return asOf }
+	presentation, err := svc.buildChannelMonitorV2Presentation(context.Background(), filter, cfg, dimensions)
+	require.NoError(t, err)
+	require.Len(t, presentation.Rows, 2)
+	require.Equal(t, []string{"typesafe", "typesafe"}, []string{presentation.Rows[0].Platform, presentation.Rows[1].Platform})
+	require.Equal(t, []int64{1, 2}, []int64{*presentation.Rows[0].GroupID, *presentation.Rows[1].GroupID})
+	for _, row := range presentation.Rows {
+		require.Empty(t, row.Buckets, "empty TypeSafe and Composite/TypeSafe leaves remain in the presentation directory")
+	}
+
+	cfg.Platforms[0].Enabled = false
+	disabled, err := svc.buildChannelMonitorV2Presentation(context.Background(), filter, cfg, dimensions)
+	require.NoError(t, err)
+	require.Empty(t, disabled.Rows, "disabled TypeSafe must not produce rows for direct or Composite membership")
+}
+
 func TestChannelMonitorV2PresentationWindowOverlapStableAtoms(t *testing.T) {
 	asOf := time.Date(2026, 9, 30, 23, 59, 0, 0, time.UTC)
 	service := NewChannelMonitorV2Service(&channelMonitorV2RepoStub{})

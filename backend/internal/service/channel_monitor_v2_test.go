@@ -209,7 +209,7 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	require.Equal(t, 300, cfg.RefreshIntervalSeconds)
 	require.Equal(t, "openai", cfg.Platforms[0].Platform)
 	require.Equal(t, "anthropic", cfg.Platforms[1].Platform)
-	require.Len(t, cfg.Platforms, 11)
+	require.Len(t, cfg.Platforms, 12)
 	require.Equal(t, []int64{1, 3}, cfg.GroupIDs)
 	require.Equal(t, "selected", cfg.GroupScopeMode)
 
@@ -261,7 +261,7 @@ func TestChannelMonitorV2ConfigScopeCompatibility(t *testing.T) {
 			require.Equal(t, test.wantMode, cfg.GroupScopeMode)
 			require.Equal(t, test.wantGroup, cfg.GroupIDs)
 			require.Equal(t, test.synthetic, cfg.SyntheticEmptyBucketsEnabled)
-			require.Len(t, cfg.Platforms, 11)
+			require.Len(t, cfg.Platforms, 12)
 		})
 	}
 }
@@ -294,7 +294,7 @@ func TestChannelMonitorV2SupportedPlatformCatalogParity(t *testing.T) {
 		apiPlatforms = append(apiPlatforms, platform.Platform)
 	}
 	require.Equal(t, domain.SupportedGroupPlatforms(), apiPlatforms)
-	require.Len(t, apiPlatforms, 11)
+	require.Len(t, apiPlatforms, 12)
 	require.NotContains(t, apiPlatforms, "kiro")
 
 	platformsFile, err := os.ReadFile(filepath.Join("..", "..", "..", "frontend", "src", "constants", "platforms.ts"))
@@ -305,7 +305,7 @@ func TestChannelMonitorV2SupportedPlatformCatalogParity(t *testing.T) {
 	require.Len(t, concreteBlock, 2, "the concrete platform option block must remain parseable")
 	require.Len(t, groupBlock, 2, "the group platform option block must remain parseable")
 	valuePattern := regexp.MustCompile(`value:\s*'([^']+)'`)
-	frontendPlatforms := make([]string, 0, 11)
+	frontendPlatforms := make([]string, 0, 12)
 	if strings.Contains(groupBlock[1], "...CONCRETE_PLATFORM_OPTIONS") {
 		for _, match := range valuePattern.FindAllStringSubmatch(concreteBlock[1], -1) {
 			frontendPlatforms = append(frontendPlatforms, match[1])
@@ -314,7 +314,7 @@ func TestChannelMonitorV2SupportedPlatformCatalogParity(t *testing.T) {
 	for _, match := range valuePattern.FindAllStringSubmatch(groupBlock[1], -1) {
 		frontendPlatforms = append(frontendPlatforms, match[1])
 	}
-	require.Len(t, frontendPlatforms, 11, "the static group option parser must find exactly 11 values")
+	require.Len(t, frontendPlatforms, 12, "the static group option parser must find exactly 12 values")
 	require.Equal(t, domain.SupportedGroupPlatforms(), frontendPlatforms)
 }
 

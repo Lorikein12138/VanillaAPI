@@ -770,7 +770,9 @@ func channelMonitorV2EffectiveGroupPlatforms(info channelMonitorV2GroupInfo, ena
 			result = append(result, platform)
 		}
 	}
-	if len(result) == 0 && info.platform == domain.PlatformComposite && containsString(enabledPlatforms, domain.PlatformComposite) {
+	// Keep the legacy empty-composite row only when no concrete platform metadata
+	// exists; known platforms that are all disabled must not produce a fallback row.
+	if len(result) == 0 && len(available) == 0 && info.platform == domain.PlatformComposite && containsString(enabledPlatforms, domain.PlatformComposite) {
 		return []string{domain.PlatformComposite}
 	}
 	return result
