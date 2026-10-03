@@ -232,29 +232,55 @@ func TestChannelMonitorV2CompositeMatrixSeedsEnabledEffectivePlatforms(t *testin
 	filter := service.ChannelMonitorV2Filter{}
 	cfg := service.ChannelMonitorV2Config{
 		GroupScopeMode: "selected",
-		GroupIDs:       []int64{1, 2, 3, 4},
+		GroupIDs:       []int64{1, 2, 3, 4, 5},
 		Platforms: []service.ChannelMonitorV2PlatformConfig{
 			{Platform: "openai", Enabled: true},
 			{Platform: "gemini", Enabled: true},
 			{Platform: "composite", Enabled: true},
+			{Platform: "typesafe", Enabled: true},
 			{Platform: "minimax", Enabled: false},
 			{Platform: "kiro", Enabled: true},
 		},
 	}
 	groupInfo := map[int64]channelMonitorV2GroupInfo{
 		1: {name: "disabled", platform: "minimax"},
-		2: {name: "multi", platform: "composite", platforms: []string{"openai", "gemini", "openai", "kiro"}},
+		2: {name: "multi", platform: "composite", platforms: []string{"openai", "gemini", "typesafe", "openai", "kiro"}},
 		3: {name: "empty", platform: "composite"},
 		4: {name: "legacy", platform: "kiro"},
+		5: {name: "typesafe", platform: "typesafe"},
 	}
 	accs := seedChannelMonitorV2MatrixAccumulators(filter, cfg, service.ChannelMonitorV2GroupByPlatformGroup, groupInfo)
-	require.Len(t, accs, 3)
+	require.Len(t, accs, 5)
 	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "openai", groupID: 2})
 	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "gemini", groupID: 2})
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "typesafe", groupID: 2})
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "typesafe", groupID: 5})
 	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: "composite", groupID: 3})
 	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "kiro", groupID: 2})
 	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "minimax", groupID: 1})
 	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "kiro", groupID: 4})
+}
+
+func TestChannelMonitorV2TypeSafeMatrixRowsRespectPlatformSwitch(t *testing.T) {
+	cfg := service.ChannelMonitorV2Config{
+		GroupScopeMode: "selected",
+		GroupIDs:       []int64{1, 2},
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: "typesafe", Enabled: false},
+			{Platform: "composite", Enabled: true},
+		},
+	}
+	groupInfo := map[int64]channelMonitorV2GroupInfo{
+		1: {name: "typesafe", platform: "typesafe"},
+		2: {name: "composite", platform: "composite", platforms: []string{"typesafe"}},
+	}
+	accs := seedChannelMonitorV2MatrixAccumulators(
+		service.ChannelMonitorV2Filter{}, cfg,
+		service.ChannelMonitorV2GroupByPlatformGroup, groupInfo,
+	)
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "typesafe", groupID: 1})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "typesafe", groupID: 2})
+	require.Empty(t, accs)
 }
 
 func TestChannelMonitorV2GroupInfoLoadsCompositeAccountPlatforms(t *testing.T) {
