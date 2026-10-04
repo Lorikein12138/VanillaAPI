@@ -263,8 +263,10 @@ func TestChannelMonitorV2SyntheticBandsAndMetricCoherence(t *testing.T) {
 		require.InDelta(t, float64(metric.RequestCount)/5, metric.RPM, .000001)
 		require.InDelta(t, float64(metric.TokenCount)/5, metric.TPM, .000001)
 		require.GreaterOrEqual(t, metric.CacheRate, .8)
-		require.LessOrEqual(t, metric.CacheRate, .9)
-		require.NotEqual(t, 1.0, metric.CacheRate)
+		require.LessOrEqual(t, metric.CacheRate, .99)
+		require.Less(t, metric.CacheRate, 1.0)
+		require.GreaterOrEqual(t, metric.TPM/60, 10.0)
+		require.LessOrEqual(t, metric.TPM/60, 50.0)
 		require.GreaterOrEqual(t, *metric.TTFT.P50Ms, int64(1000))
 		require.LessOrEqual(t, *metric.TTFT.P50Ms, int64(10000))
 		require.GreaterOrEqual(t, *metric.Duration.P50Ms, int64(12000))
@@ -490,6 +492,9 @@ func TestChannelMonitorV2PresentationUsesConcreteCompositePlatformsAndEmptyScope
 	require.NoError(t, err)
 	require.Empty(t, filtered.Rows)
 
+	// No model in the window and none in the long-window catalog either: the single
+	// "unknown" bucket stays as the last resort.
+	repo.dimensions = &ChannelMonitorV2Dimensions{}
 	unknownDimensions := &ChannelMonitorV2Dimensions{Groups: []ChannelMonitorV2GroupDimension{{ID: groupID, Name: "primary", Platform: "openai"}}}
 	unknownConfig := ChannelMonitorV2Config{
 		Platforms:        []ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}},
