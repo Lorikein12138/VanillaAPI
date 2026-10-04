@@ -78,7 +78,12 @@ func (s *ChannelMonitorV2Service) buildChannelMonitorV2Presentation(
 		return nil, fmt.Errorf("load channel monitor v2 presentation dimensions: empty response")
 	}
 
-	universe := channelMonitorV2PresentationUniverse(filter, cfg, dimensions)
+	universe, shares, err := channelMonitorV2PresentationUniverse(filter, cfg, dimensions, func() (*ChannelMonitorV2Dimensions, error) {
+		return s.channelMonitorV2PresentationCatalog(ctx, filter, cfg)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("load channel monitor v2 presentation model catalog: %w", err)
+	}
 	if len(universe) == 0 {
 		return result, nil
 	}
@@ -142,7 +147,7 @@ func (s *ChannelMonitorV2Service) buildChannelMonitorV2Presentation(
 					}
 					raw, _, generated := channelMonitorV2SyntheticRawForBand(
 						key.platform, key.groupID, key.model, childStart, cfg.HealthThresholds,
-						allowSyntheticErrors,
+						allowSyntheticErrors, shares[key.platform],
 					)
 					if !generated {
 						continue
@@ -205,6 +210,18 @@ func (s *ChannelMonitorV2Service) buildChannelMonitorV2Presentation(
 	return result, nil
 }
 
+// channelMonitorV2PresentationCatalog reads the unfiltered 30 day model catalog
+// within the viewer's server-derived group scope. It is the source of the display
+// models of platforms that have none in the requested window.
+func (s *ChannelMonitorV2Service) channelMonitorV2PresentationCatalog(ctx context.Context, filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config) (*ChannelMonitorV2Dimensions, error) {
+	catalogFilter, err := s.ParseFilterAt("30d", nil, nil, nil, filter.AsOf)
+	if err != nil {
+		return nil, err
+	}
+	catalogFilter.AllowedGroupIDs, catalogFilter.RestrictGroups = filter.AllowedGroupIDs, filter.RestrictGroups
+	return s.repo.GetDimensions(ctx, catalogFilter, cfg)
+}
+
 func channelMonitorV2PresentationBucketFold(row *channelMonitorV2PresentationRow, bucketStart time.Time) *channelMonitorV2MetricFold {
 	key := bucketStart.UTC().UnixNano()
 	fold := row.buckets[key]
@@ -215,7 +232,22 @@ func channelMonitorV2PresentationBucketFold(row *channelMonitorV2PresentationRow
 	return fold
 }
 
-func channelMonitorV2PresentationUniverse(filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config, dimensions *ChannelMonitorV2Dimensions) []channelMonitorV2PresentationKey {
+// channelMonitorV2PresentationCatalogLoader returns the long-window model catalog
+// used when a platform has no model in the requested window. It is only invoked
+// when a platform actually needs it.
+type channelMonitorV2PresentationCatalogLoader func() (*ChannelMonitorV2Dimensions, error)
+
+// channelMonitorV2PresentationUniverse lists the display leaves (platform × group ×
+// model) and, per platform, the number of sibling model leaves their throughput is
+// spread over.
+//
+// A platform whose window carries models (or whose configuration lists models)
+// shows every one of them in every group. A platform without any models would
+// otherwise collapse into a single "unknown" model, so each of its groups is
+// assigned one model from the platform's long-window catalog instead; the
+// assignment only depends on the unfiltered group set and the catalog, never on
+// the platform/group/model selection, so a leaf keeps its identity under filters.
+func channelMonitorV2PresentationUniverse(filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config, dimensions *ChannelMonitorV2Dimensions, loadCatalog channelMonitorV2PresentationCatalogLoader) ([]channelMonitorV2PresentationKey, map[string]int, error) {
 	enabled := map[string]struct{}{}
 	for _, platform := range domain.SupportedGroupPlatforms() {
 		for _, item := range cfg.Platforms {
@@ -225,38 +257,40 @@ func channelMonitorV2PresentationUniverse(filter ChannelMonitorV2Filter, cfg Cha
 			}
 		}
 	}
+	// Model sets are built before the model selection is applied so the throughput
+	// share of a leaf does not change with the selection.
 	modelsByPlatform := map[string]map[string]struct{}{}
+	addModel := func(platform, model string) {
+		if modelsByPlatform[platform] == nil {
+			modelsByPlatform[platform] = map[string]struct{}{}
+		}
+		modelsByPlatform[platform][model] = struct{}{}
+	}
 	for _, model := range dimensions.Models {
 		platform, modelName := strings.ToLower(strings.TrimSpace(model.Platform)), strings.TrimSpace(model.Value)
 		if _, ok := enabled[platform]; !ok || modelName == "" {
 			continue
 		}
-		if len(filter.Models) > 0 && !channelMonitorV2PresentationContains(filter.Models, modelName) {
-			continue
-		}
-		if modelsByPlatform[platform] == nil {
-			modelsByPlatform[platform] = map[string]struct{}{}
-		}
-		modelsByPlatform[platform][modelName] = struct{}{}
+		addModel(platform, modelName)
 	}
 	for _, item := range cfg.Platforms {
 		if _, ok := enabled[item.Platform]; !ok {
 			continue
 		}
 		for _, model := range item.Models {
-			model = strings.TrimSpace(model)
-			if model == "" || (len(filter.Models) > 0 && !channelMonitorV2PresentationContains(filter.Models, model)) {
-				continue
+			if model = strings.TrimSpace(model); model != "" {
+				addModel(item.Platform, model)
 			}
-			if modelsByPlatform[item.Platform] == nil {
-				modelsByPlatform[item.Platform] = map[string]struct{}{}
-			}
-			modelsByPlatform[item.Platform][model] = struct{}{}
 		}
 	}
-	keys := make([]channelMonitorV2PresentationKey, 0)
+	type scopedGroup struct {
+		id        int64
+		platforms []string
+	}
+	groups := make([]scopedGroup, 0, len(dimensions.Groups))
+	groupsByPlatform := map[string][]int64{}
 	for _, group := range dimensions.Groups {
-		if group.ID <= 0 || (len(filter.GroupIDs) > 0 && !containsInt64(filter.GroupIDs, group.ID)) {
+		if group.ID <= 0 {
 			continue
 		}
 		platforms := []string{group.Platform}
@@ -264,13 +298,43 @@ func channelMonitorV2PresentationUniverse(filter ChannelMonitorV2Filter, cfg Cha
 			platforms = append([]string(nil), group.Platforms...)
 		}
 		platforms = normalizePresentationPlatforms(platforms, enabled)
+		groups = append(groups, scopedGroup{id: group.ID, platforms: platforms})
 		for _, platform := range platforms {
+			groupsByPlatform[platform] = append(groupsByPlatform[platform], group.ID)
+		}
+	}
+	assigned := map[string]map[int64]string{}
+	var catalog map[string][]string
+	for platform, groupIDs := range groupsByPlatform {
+		if len(modelsByPlatform[platform]) > 0 {
+			continue
+		}
+		if catalog == nil {
+			loaded, err := channelMonitorV2PresentationCatalogModels(loadCatalog, enabled)
+			if err != nil {
+				return nil, nil, err
+			}
+			catalog = loaded
+		}
+		assigned[platform] = channelMonitorV2PresentationAssignModels(platform, groupIDs, catalog[platform])
+	}
+	shares := map[string]int{}
+	keys := make([]channelMonitorV2PresentationKey, 0)
+	for _, group := range groups {
+		if len(filter.GroupIDs) > 0 && !containsInt64(filter.GroupIDs, group.id) {
+			continue
+		}
+		for _, platform := range group.platforms {
 			models := modelsByPlatform[platform]
-			if len(models) == 0 && (len(filter.Models) == 0 || channelMonitorV2PresentationContains(filter.Models, "unknown")) {
-				models = map[string]struct{}{"unknown": {}}
+			shares[platform] = maxInt(len(models), 1)
+			if len(models) == 0 {
+				models = map[string]struct{}{channelMonitorV2PresentationAssignedModel(assigned[platform], group.id): {}}
 			}
 			for model := range models {
-				keys = append(keys, channelMonitorV2PresentationKey{platform: platform, groupID: group.ID, model: model})
+				if len(filter.Models) > 0 && !channelMonitorV2PresentationContains(filter.Models, model) {
+					continue
+				}
+				keys = append(keys, channelMonitorV2PresentationKey{platform: platform, groupID: group.id, model: model})
 			}
 		}
 	}
@@ -284,7 +348,88 @@ func channelMonitorV2PresentationUniverse(filter ChannelMonitorV2Filter, cfg Cha
 		}
 		return a.model < b.model
 	})
-	return keys
+	return keys, shares, nil
+}
+
+const channelMonitorV2PresentationUnknownModel = "unknown"
+
+func channelMonitorV2PresentationAssignedModel(assigned map[int64]string, groupID int64) string {
+	if model := assigned[groupID]; model != "" {
+		return model
+	}
+	return channelMonitorV2PresentationUnknownModel
+}
+
+// channelMonitorV2PresentationCatalogModels reads the plain model names per
+// enabled platform from the long-window catalog. The unknown bucket and the folded
+// "other models" bucket are not real models and never become display models.
+func channelMonitorV2PresentationCatalogModels(loadCatalog channelMonitorV2PresentationCatalogLoader, enabled map[string]struct{}) (map[string][]string, error) {
+	result := map[string][]string{}
+	if loadCatalog == nil {
+		return result, nil
+	}
+	catalog, err := loadCatalog()
+	if err != nil {
+		return nil, err
+	}
+	if catalog == nil {
+		return result, nil
+	}
+	seen := map[string]struct{}{}
+	for _, item := range catalog.Models {
+		platform, model := strings.ToLower(strings.TrimSpace(item.Platform)), strings.TrimSpace(item.Value)
+		if _, ok := enabled[platform]; !ok || model == "" || model == ChannelMonitorV2OtherModel || strings.EqualFold(model, channelMonitorV2PresentationUnknownModel) {
+			continue
+		}
+		key := platform + "\x00" + model
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result[platform] = append(result[platform], model)
+	}
+	for _, models := range result {
+		sort.Strings(models)
+	}
+	return result, nil
+}
+
+// channelMonitorV2PresentationAssignModels gives every group of a platform one
+// catalog model. Groups take their best-ranked free model in ascending group order
+// (rank is a stable hash of platform, group and model) so groups of one platform
+// show different models while the catalog has enough of them; when it runs out the
+// remaining groups reuse their best-ranked model. A platform without catalog
+// models keeps the unknown bucket (empty assignment).
+func channelMonitorV2PresentationAssignModels(platform string, groupIDs []int64, models []string) map[int64]string {
+	assigned := make(map[int64]string, len(groupIDs))
+	if len(models) == 0 {
+		return assigned
+	}
+	ordered := append([]int64(nil), groupIDs...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	used := make(map[string]struct{}, len(ordered))
+	for _, groupID := range ordered {
+		if _, done := assigned[groupID]; done {
+			continue
+		}
+		best, bestFree := "", ""
+		var bestRank, bestFreeRank uint64
+		for _, model := range models {
+			rank := channelMonitorV2SyntheticLeafSeed(platform, groupID, model)
+			if best == "" || rank > bestRank {
+				best, bestRank = model, rank
+			}
+			if _, taken := used[model]; !taken && (bestFree == "" || rank > bestFreeRank) {
+				bestFree, bestFreeRank = model, rank
+			}
+		}
+		if bestFree != "" {
+			best = bestFree
+		}
+		assigned[groupID] = best
+		used[best] = struct{}{}
+	}
+	return assigned
 }
 
 func channelMonitorV2PresentationMinTime(a, b time.Time) time.Time {
@@ -613,7 +758,7 @@ func channelMonitorV2SyntheticBounds(band string) (channelMonitorV2SyntheticBand
 }
 
 func channelMonitorV2SyntheticMetricForBand(platform string, groupID int64, model string, bucketStart time.Time, thresholds ChannelMonitorV2HealthThresholds, allowErrors bool) (ChannelMonitorV2Metric, string, bool) {
-	raw, band, ok := channelMonitorV2SyntheticRawForBand(platform, groupID, model, bucketStart, thresholds, allowErrors)
+	raw, band, ok := channelMonitorV2SyntheticRawForBand(platform, groupID, model, bucketStart, thresholds, allowErrors, 1)
 	if !ok {
 		return ChannelMonitorV2Metric{}, "", false
 	}
@@ -629,7 +774,10 @@ func channelMonitorV2SyntheticMetricForBand(platform string, groupID int64, mode
 	return metric, actualBand, true
 }
 
-func channelMonitorV2SyntheticRawForBand(platform string, groupID int64, model string, bucketStart time.Time, thresholds ChannelMonitorV2HealthThresholds, allowErrors bool) (channelMonitorV2SyntheticRawMetric, string, bool) {
+// channelMonitorV2SyntheticRawForBand generates one leaf's 5 minute atom. share is
+// the number of sibling model leaves the leaf's throughput is spread over, so that
+// the sum over a platform/group row keeps the displayed 10–50 tokens/second.
+func channelMonitorV2SyntheticRawForBand(platform string, groupID int64, model string, bucketStart time.Time, thresholds ChannelMonitorV2HealthThresholds, allowErrors bool, share int) (channelMonitorV2SyntheticRawMetric, string, bool) {
 	hash := channelMonitorV2PresentationHash(platform, groupID, model, bucketStart)
 	desiredBand := channelMonitorV2SyntheticTargetBandFromHash(hash)
 	bounds, ok := channelMonitorV2SyntheticBounds(desiredBand)
@@ -641,14 +789,19 @@ func channelMonitorV2SyntheticRawForBand(platform string, groupID int64, model s
 	if requestCount <= 0 {
 		return channelMonitorV2SyntheticRawMetric{}, "", false
 	}
-	cachePermille := int64(800 + int(hash[2])%101)
-	outputPerRequest := int64(80 + int(hash[3])%121)
-	cacheDenominator := requestCount * 1000
-	cacheRead := requestCount * cachePermille
+	// Throughput and cache rate follow the leaf's own slowly drifting curves; the
+	// atom's token total is the throughput times the atom length, which is exactly
+	// what the page converts back (TPM ÷ 60) into "tokens per second".
+	seed := channelMonitorV2SyntheticLeafSeed(platform, groupID, model)
+	atom := bucketStart.UTC()
+	tokensPerSecond := channelMonitorV2SyntheticTokensPerSecond(seed, atom) / float64(maxInt(share, 1))
+	totalTokens := maxInt64(channelMonitorV2SyntheticMinAtomTokens, int64(math.Round(tokensPerSecond*channelMonitorV2SyntheticAtomSeconds)))
+	output := totalTokens * int64(6+int(hash[3])%9) / 100
+	cacheDenominator := totalTokens - output
+	cacheRead := channelMonitorV2SyntheticCacheReadTokens(cacheDenominator, channelMonitorV2SyntheticCacheRate(seed, atom))
 	nonCache := cacheDenominator - cacheRead
 	input := nonCache * 4 / 5
 	cacheCreation := nonCache - input
-	output := requestCount * outputPerRequest
 
 	bestErrorCount, bestTTFTP50 := int64(0), int64(0)
 	bestScore, bestDistance := -1.0, math.MaxFloat64
@@ -783,7 +936,7 @@ func channelMonitorV2SyntheticMetricForEmptyInterval(platform string, groupID in
 	generated := false
 	ignoredSet := channelMonitorV2IgnoredCategorySet(ignoredCategories)
 	for atom := start.UTC(); atom.Before(start.Add(interval)); atom = atom.Add(5 * time.Minute) {
-		raw, _, ok := channelMonitorV2SyntheticRawForBand(platform, groupID, model, atom, thresholds, allowErrors)
+		raw, _, ok := channelMonitorV2SyntheticRawForBand(platform, groupID, model, atom, thresholds, allowErrors, 1)
 		if !ok {
 			continue
 		}

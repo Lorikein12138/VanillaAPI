@@ -120,6 +120,37 @@ type channelMonitorV2Histogram struct {
 	Count                                int64
 }
 
+type channelMonitorV2ModelCount struct {
+	platform string
+	model    string
+	count    int64
+}
+
+// channelMonitorV2ModelCounts accumulates model request counts per platform and
+// model. Model dimensions are platform-scoped: identical names can represent
+// different upstream models and must not share counts, so the map key carries the
+// platform while the emitted dimension carries the plain model name (the picker
+// filters by that name and the presentation layer reads it as the model).
+type channelMonitorV2ModelCounts map[string]channelMonitorV2ModelCount
+
+func (c channelMonitorV2ModelCounts) add(platform, model string, count int64) {
+	key := platform + "\x00" + model
+	current := c[key]
+	current.count += count
+	if current.platform == "" {
+		current.platform, current.model = platform, model
+	}
+	c[key] = current
+}
+
+func (c channelMonitorV2ModelCounts) dimensions() []service.ChannelMonitorV2Dimension {
+	items := make([]service.ChannelMonitorV2Dimension, 0, len(c))
+	for _, meta := range c {
+		items = append(items, service.ChannelMonitorV2Dimension{Value: meta.model, Label: channelMonitorV2ModelLabel(meta.model), Platform: meta.platform, RequestCount: meta.count})
+	}
+	return items
+}
+
 func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) (*service.ChannelMonitorV2Dimensions, error) {
 	if channelMonitorV2RestrictedGroupScopeEmpty(filter, cfg) {
 		return &service.ChannelMonitorV2Dimensions{
@@ -149,13 +180,7 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 	}
 	defer func() { _ = rows.Close() }()
 	platformCounts := map[string]int64{}
-	type modelValue struct {
-		platform string
-		count    int64
-	}
-	// Model dimensions are platform-scoped; identical names can represent
-	// different upstream models and must not share counts.
-	modelCounts := map[string]modelValue{}
+	modelCounts := channelMonitorV2ModelCounts{}
 	type groupValue struct {
 		name      string
 		platform  string
@@ -170,7 +195,7 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 				continue
 			}
 			for _, model := range p.Models {
-				modelCounts[platform+"\x00"+model] = modelValue{platform: platform, count: 0}
+				modelCounts.add(platform, model, 0)
 			}
 		}
 	}
@@ -195,14 +220,7 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 			return nil, err
 		}
 		platformCounts[platform] += count
-		displayModel := channelMonitorV2DisplayModel(cfg, platform, model)
-		modelKey := platform + "\x00" + displayModel
-		currentModel := modelCounts[modelKey]
-		currentModel.count += count
-		if currentModel.platform == "" {
-			currentModel.platform = platform
-		}
-		modelCounts[modelKey] = currentModel
+		modelCounts.add(platform, channelMonitorV2DisplayModel(cfg, platform, model), count)
 		if groupID > 0 {
 			current := groupCounts[groupID]
 			current.name = groupName
@@ -222,9 +240,7 @@ func (r *channelMonitorV2Repository) GetDimensions(ctx context.Context, filter s
 	for value, count := range platformCounts {
 		result.Platforms = append(result.Platforms, service.ChannelMonitorV2Dimension{Value: value, Label: value, RequestCount: count})
 	}
-	for value, meta := range modelCounts {
-		result.Models = append(result.Models, service.ChannelMonitorV2Dimension{Value: value, Label: channelMonitorV2ModelLabel(value), Platform: meta.platform, RequestCount: meta.count})
-	}
+	result.Models = modelCounts.dimensions()
 	for id, value := range groupCounts {
 		effectivePlatforms := channelMonitorV2EffectiveGroupPlatforms(channelMonitorV2GroupInfo{platform: value.platform, platforms: value.platforms}, channelMonitorV2EnabledPlatforms(cfg))
 		if len(effectivePlatforms) == 0 {

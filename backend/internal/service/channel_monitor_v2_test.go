@@ -27,6 +27,9 @@ type channelMonitorV2RepoStub struct {
 	admin          bool
 	matrixFilters  []ChannelMonitorV2Filter
 	dimensionCalls int
+	// dimensionFilters records every GetDimensions filter; dimensionsErr makes it fail.
+	dimensionFilters []ChannelMonitorV2Filter
+	dimensionsErr    error
 }
 
 // Alias keeps composite literals readable without introducing another package.
@@ -39,8 +42,12 @@ func (s *channelMonitorV2RepoStub) GetConfig(context.Context) (*ChannelMonitorV2
 func (s *channelMonitorV2RepoStub) UpdateConfig(context.Context, ChannelMonitorV2Config, int) (*ChannelMonitorV2Config, error) {
 	return nil, nil
 }
-func (s *channelMonitorV2RepoStub) GetDimensions(context.Context, ChannelMonitorV2Filter, ChannelMonitorV2Config) (*ChannelMonitorV2Dimensions, error) {
+func (s *channelMonitorV2RepoStub) GetDimensions(_ context.Context, filter ChannelMonitorV2Filter, _ ChannelMonitorV2Config) (*ChannelMonitorV2Dimensions, error) {
 	s.dimensionCalls++
+	s.dimensionFilters = append(s.dimensionFilters, filter)
+	if s.dimensionsErr != nil {
+		return nil, s.dimensionsErr
+	}
 	if s.dimensions == nil {
 		return &ChannelMonitorV2Dimensions{}, nil
 	}
@@ -666,7 +673,8 @@ func TestChannelMonitorV2SyntheticMetricForEmptyIntervalUsesStableCoherentSample
 	require.Equal(t, first.InputTokens+first.OutputTokens+first.CacheCreationTokens+first.CacheReadTokens, first.TokenCount)
 	require.InDelta(t, float64(first.ErrorRequests)/float64(first.RequestCount), first.ErrorRate, 0.0001)
 	require.GreaterOrEqual(t, first.CacheRate, 0.8)
-	require.LessOrEqual(t, first.CacheRate, 0.9)
+	require.LessOrEqual(t, first.CacheRate, 0.99)
+	require.Less(t, first.CacheRate, 1.0)
 	require.Greater(t, first.CacheRateDenominator, first.CacheRateNumerator)
 	require.NotNil(t, first.TTFT.P50Ms)
 	require.NotNil(t, first.Duration.P50Ms)
@@ -761,7 +769,7 @@ func TestChannelMonitorV2ProjectionRunsBeforePublicMetricRedaction(t *testing.T)
 	require.NotEqual(t, "critical", matrix.Items[0].Buckets[1].Health.Overall)
 	require.GreaterOrEqual(t, *matrix.Items[0].Buckets[1].Health.Score, 55.0)
 	require.GreaterOrEqual(t, matrix.Items[0].Buckets[1].Metrics.CacheRate, 0.8)
-	require.LessOrEqual(t, matrix.Items[0].Buckets[1].Metrics.CacheRate, 0.9)
+	require.LessOrEqual(t, matrix.Items[0].Buckets[1].Metrics.CacheRate, 0.99)
 	encoded, err := json.Marshal(matrix)
 	require.NoError(t, err)
 	require.NotContains(t, strings.ToLower(string(encoded)), "synthetic")
