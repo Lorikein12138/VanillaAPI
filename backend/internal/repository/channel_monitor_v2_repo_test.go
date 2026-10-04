@@ -43,6 +43,29 @@ func TestChannelMonitorV2DisplayModelIsPlatformScoped(t *testing.T) {
 	require.True(t, channelMonitorV2ModelSelected(service.ChannelMonitorV2Filter{Models: []string{service.ChannelMonitorV2OtherModel}}, cfg, "grok", "shared"))
 }
 
+func TestChannelMonitorV2ModelDimensionsCarryPlainModelNames(t *testing.T) {
+	counts := channelMonitorV2ModelCounts{}
+	counts.add("openai", "gpt-5", 0)
+	counts.add("openai", "gpt-5", 7)
+	counts.add("grok", "gpt-5", 3)
+	counts.add("openai", service.ChannelMonitorV2OtherModel, 2)
+
+	byKey := map[string]service.ChannelMonitorV2Dimension{}
+	for _, item := range counts.dimensions() {
+		require.NotContains(t, item.Value, "\x00")
+		require.NotContains(t, item.Label, "\x00")
+		byKey[item.Platform+"/"+item.Value] = item
+	}
+	// Same model name on two platforms stays two dimensions with separate counts.
+	require.Len(t, byKey, 3)
+	require.Equal(t, int64(7), byKey["openai/gpt-5"].RequestCount)
+	require.Equal(t, "gpt-5", byKey["openai/gpt-5"].Label)
+	require.Equal(t, int64(3), byKey["grok/gpt-5"].RequestCount)
+	other := byKey["openai/"+service.ChannelMonitorV2OtherModel]
+	require.Equal(t, int64(2), other.RequestCount)
+	require.Equal(t, "Other models", other.Label)
+}
+
 func TestChannelMonitorV2MatrixDimensionKey(t *testing.T) {
 	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{"gpt-5"}}}}
 	key := channelMonitorV2MatrixDimensionKey(service.ChannelMonitorV2GroupByPlatformGroupModel, cfg, "openai", 7, "gpt-5")
