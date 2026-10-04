@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	"sort"
 	"strconv"
 	"strings"
@@ -1201,21 +1202,76 @@ func channelMonitorV2EnforceLatencyOrder(latency *ChannelMonitorV2Latency) {
 	}
 }
 
+// channelMonitorV2PairSet is a bitset over the (platform, group) pairs of one
+// presentation. It counts how many distinct pairs contributed throughput.
+type channelMonitorV2PairSet []uint64
+
+func (s channelMonitorV2PairSet) mark(id int) { s[id>>6] |= 1 << uint(id&63) }
+
+func (s channelMonitorV2PairSet) count() int {
+	n := 0
+	for _, word := range s {
+		n += bits.OnesCount64(word)
+	}
+	return n
+}
+
+// channelMonitorV2MeanPerPair turns the folded throughput of every leaf into the
+// mean per (platform, group) pair, the granularity of the platform-group rows
+// whose throughput the status page shows. Fewer than two contributing pairs
+// leave the value untouched.
+func channelMonitorV2MeanPerPair(sum float64, pairs int) float64 {
+	if pairs <= 1 {
+		return sum
+	}
+	return sum / float64(pairs)
+}
+
 func channelMonitorV2PresentationSnapshot(presentation *ChannelMonitorV2Presentation, filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config) *ChannelMonitorV2Snapshot {
+	type pairKey struct {
+		platform string
+		groupID  int64
+	}
+	type trendBucket struct {
+		fold  *channelMonitorV2MetricFold
+		pairs channelMonitorV2PairSet
+	}
 	minutes := channelMonitorV2PresentationCoveredMinutes(filter, presentation.Coverage)
+	pairIDs := map[pairKey]int{}
+	rowPairs := make([]int, len(presentation.Rows))
+	for i, row := range presentation.Rows {
+		key := pairKey{platform: row.Platform, groupID: channelMonitorV2MatrixGroupID(row.GroupID)}
+		id, ok := pairIDs[key]
+		if !ok {
+			id = len(pairIDs)
+			pairIDs[key] = id
+		}
+		rowPairs[i] = id
+	}
+	words := (len(pairIDs) + 63) / 64
 	total := newChannelMonitorV2MetricFold()
-	trend := map[int64]*channelMonitorV2MetricFold{}
-	for _, row := range presentation.Rows {
+	totalPairs := make(channelMonitorV2PairSet, words)
+	trend := map[int64]*trendBucket{}
+	for i, row := range presentation.Rows {
 		total.add(row.Metrics)
+		if row.Metrics.TokenCount > 0 {
+			totalPairs.mark(rowPairs[i])
+		}
 		for _, point := range row.Buckets {
 			key := point.BucketStart.UTC().UnixNano()
-			if trend[key] == nil {
-				trend[key] = newChannelMonitorV2MetricFold()
+			bucket := trend[key]
+			if bucket == nil {
+				bucket = &trendBucket{fold: newChannelMonitorV2MetricFold(), pairs: make(channelMonitorV2PairSet, words)}
+				trend[key] = bucket
 			}
-			trend[key].add(point.Metrics)
+			bucket.fold.add(point.Metrics)
+			if point.Metrics.TokenCount > 0 {
+				bucket.pairs.mark(rowPairs[i])
+			}
 		}
 	}
 	metrics := total.metric(minutes)
+	metrics.TPM = channelMonitorV2MeanPerPair(metrics.TPM, totalPairs.count())
 	trendKeys := make([]int64, 0, len(trend))
 	for key := range trend {
 		trendKeys = append(trendKeys, key)
@@ -1223,7 +1279,8 @@ func channelMonitorV2PresentationSnapshot(presentation *ChannelMonitorV2Presenta
 	sort.Slice(trendKeys, func(i, j int) bool { return trendKeys[i] < trendKeys[j] })
 	points := make([]ChannelMonitorV2TrendPoint, 0, len(trendKeys))
 	for _, key := range trendKeys {
-		bucketMetrics := trend[key].metric(filter.Bucket.Minutes())
+		bucketMetrics := trend[key].fold.metric(filter.Bucket.Minutes())
+		bucketMetrics.TPM = channelMonitorV2MeanPerPair(bucketMetrics.TPM, trend[key].pairs.count())
 		points = append(points, ChannelMonitorV2TrendPoint{
 			BucketStart: time.Unix(0, key).UTC(), Metrics: bucketMetrics,
 			Health: ChannelMonitorV2HealthForWithThresholds(bucketMetrics, cfg.HealthThresholds),
