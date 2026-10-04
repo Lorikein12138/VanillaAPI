@@ -23,3 +23,6 @@ Dockerfile text eol=lf
 
 # 冻结的参考源补丁与压缩包（含校验和），逐字节保留，不做行尾转换也不做空白检查
 openspec/changes/archive/*/source-freeze/* binary
+
+# PowerShell 脚本（二开工具 tools/review-gates.ps1）
+*.ps1 text eol=lf
