@@ -294,18 +294,24 @@ describe('OpsOpenAITokenStatsCard', () => {
 
   it('接口异常时显示错误提示', async () => {
     mockGetOpenAITokenStats.mockRejectedValue(new Error('加载失败'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    const wrapper = mount(OpsOpenAITokenStatsCard, {
-      props: { refreshToken: 0 },
-      global: {
-        stubs: {
-          Select: SelectStub,
-          EmptyState: EmptyStateStub,
+    try {
+      const wrapper = mount(OpsOpenAITokenStatsCard, {
+        props: { refreshToken: 0 },
+        global: {
+          stubs: {
+            Select: SelectStub,
+            EmptyState: EmptyStateStub,
+          },
         },
-      },
-    })
-    await flushPromises()
+      })
+      await flushPromises()
 
-    expect(wrapper.text()).toContain('加载失败')
+      expect(wrapper.text()).toContain('加载失败')
+      expect(consoleError).toHaveBeenCalledWith('[OpsOpenAITokenStatsCard] Failed to load data', expect.any(Error))
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 })

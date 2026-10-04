@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import AccountStatusIndicator from '../AccountStatusIndicator.vue'
+import { loadLocaleMessages } from '@/i18n'
 import type { Account } from '@/types'
 
 vi.mock('vue-i18n', async () => {
@@ -53,6 +54,11 @@ function makeAccount(overrides: Partial<Account>): Account {
 }
 
 describe('AccountStatusIndicator', () => {
+  // formatCountdownWithSuffix 等未被 mock 的格式化函数走真实 i18n，需要先载入英文消息，否则 vue-i18n 会向 stderr 报缺键
+  beforeAll(async () => {
+    await loadLocaleMessages('en')
+  })
+
   afterEach(() => {
     vi.useRealTimers()
   })
@@ -142,6 +148,35 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.findAll('.badge')).toHaveLength(1)
     wrapper.unmount()
     vi.useRealTimers()
+  })
+
+  it('splits a cooldown longer than the setTimeout limit instead of overflowing the delay', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-23T12:00:00.000Z'))
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+    const wrapper = mount(AccountStatusIndicator, {
+      props: {
+        account: makeAccount({
+          smart_health: {
+            state: 'cooldown',
+            reason: 'ttft',
+            next_probe_at: '2099-07-28T13:00:00Z',
+            backoff_step: 1
+          }
+        })
+      },
+      global: { stubs: { Icon: true } }
+    })
+
+    const delays = setTimeoutSpy.mock.calls.map(([, delay]) => Number(delay))
+    expect(delays.length).toBeGreaterThan(0)
+    expect(Math.max(...delays)).toBeLessThanOrEqual(2_147_483_647)
+
+    await vi.advanceTimersByTimeAsync(2_147_483_647)
+    expect(wrapper.text()).toContain('admin.accounts.status.smartHealthCooldown')
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    wrapper.unmount()
+    setTimeoutSpy.mockRestore()
   })
 
   it('falls back for invalid snapshots and exposes health accessibly beside every hard status', () => {

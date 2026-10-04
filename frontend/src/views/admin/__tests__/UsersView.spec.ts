@@ -231,6 +231,7 @@ describe('admin UsersView', () => {
     { failedIds: [43], remaining: '43', deleted: 1 },
     { failedIds: [42, 43], remaining: '42,43', deleted: 0 }
   ])('deletes across pages and retains failures: $remaining', async ({ failedIds, remaining, deleted }) => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     listUsers.mockImplementation(async (page: number) => ({
       items: [createAdminUser({ id: page === 2 ? 43 : 42 })],
       total: 2, page, page_size: 20, pages: 2
@@ -261,6 +262,8 @@ describe('admin UsersView', () => {
     }
     if (failedIds.length) expect(showError).toHaveBeenCalledWith(`admin.users.bulkDelete.failed:${failedIds.length}`)
     else expect(showError).not.toHaveBeenCalled()
+    expect(consoleError.mock.calls.filter(([message]) => message === 'Error deleting user:')).toHaveLength(failedIds.length)
+    consoleError.mockRestore()
     wrapper.unmount()
   })
 

@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import AnnouncementPopup from '../AnnouncementPopup.vue'
+import { loadLocaleMessages } from '@/i18n'
 import { useAnnouncementStore } from '@/stores/announcements'
 
 const announcementMarkdownStyles = readFileSync(
@@ -34,6 +35,11 @@ const announcement = {
 }
 
 describe('AnnouncementPopup', () => {
+  // 弹窗里的相对时间走真实 i18n（utils/format），需要先载入英文消息，否则 vue-i18n 会向 stderr 报缺键
+  beforeAll(async () => {
+    await loadLocaleMessages('en')
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
   })

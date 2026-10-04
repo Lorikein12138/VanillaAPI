@@ -159,6 +159,7 @@ describe('admin AccountsView usage windows hint', () => {
   })
 
   it('keeps groups available when loading proxies fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     getAllProxies.mockRejectedValue(new Error('proxy service unavailable'))
     getAllGroups.mockResolvedValue([{ id: 7, name: 'production' }])
 
@@ -166,6 +167,8 @@ describe('admin AccountsView usage windows hint', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-test="account-filters"]').attributes('data-group-count')).toBe('1')
+    expect(consoleError).toHaveBeenCalledWith('Failed to load proxies:', expect.any(Error))
+    consoleError.mockRestore()
   })
 
   it('renders an explanatory tooltip next to the usage windows column header', async () => {
