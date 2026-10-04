@@ -811,19 +811,30 @@ func (s *emailBindSettingRepoStub) Delete(context.Context, string) error {
 }
 
 type emailBindCacheStub struct {
+	// mu 保护 data 与 setEmails：BindEmailIdentity 的并发用例会让多个 goroutine 同时校验验证码。
+	mu        sync.Mutex
 	data      *service.VerificationCodeData
 	err       error
 	setEmails []string
 }
 
 func (s *emailBindCacheStub) GetVerificationCode(context.Context, string) (*service.VerificationCodeData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
 	}
-	return s.data, nil
+	if s.data == nil {
+		return nil, nil
+	}
+	// 返回副本，避免调用方读取字段时与 IncrVerificationCodeAttempts 的写入竞争。
+	cloned := *s.data
+	return &cloned, nil
 }
 
 func (s *emailBindCacheStub) SetVerificationCode(_ context.Context, email string, _ *service.VerificationCodeData, _ time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.setEmails = append(s.setEmails, email)
 	return nil
 }
@@ -1167,6 +1178,8 @@ func cloneEmailBindUser(user *service.User) *service.User {
 }
 
 func (s *emailBindCacheStub) IncrVerificationCodeAttempts(context.Context, string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.data == nil {
 		return 0, errors.New("verification code not found")
 	}

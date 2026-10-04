@@ -2,7 +2,7 @@
  * Vitest 测试环境设置
  * 提供全局 mock 和测试工具
  */
-import { config } from '@vue/test-utils'
+import { config, RouterLinkStub } from '@vue/test-utils'
 import { vi } from 'vitest'
 
 function createMemoryStorage(): Storage {
@@ -90,8 +90,11 @@ class MockResizeObserver {
 globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver
 
 // Vue Test Utils 全局配置
+// 未安装 router 插件的组件测试里，模板中的 <router-link> 无法解析，会在 stderr 打出
+// [Vue warn]: Failed to resolve component；这里统一用 RouterLinkStub 兜底。
+// 用例自己安装 router 插件或在 mount 选项里提供 stubs 时，以用例为准。
 config.global.stubs = {
-  // 可以在这里添加全局 stub
+  RouterLink: RouterLinkStub
 }
 
 // 设置全局测试超时

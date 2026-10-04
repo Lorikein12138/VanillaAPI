@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
+import { installLocaleTitleSync } from './router/localeTitleSync'
 import i18n, { initI18n } from './i18n'
 import { useAppStore } from '@/stores/app'
 import { updateFavicon } from '@/utils/branding'
@@ -51,6 +52,7 @@ async function bootstrap() {
   updateFavicon(appStore.siteLogo)
 
   await initI18n()
+  installLocaleTitleSync()
 
   app.use(router)
   app.use(i18n)

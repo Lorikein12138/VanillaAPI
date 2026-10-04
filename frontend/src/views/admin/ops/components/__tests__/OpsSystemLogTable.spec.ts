@@ -205,11 +205,17 @@ describe('rolling log retention settings', () => {
 
   it('does not overwrite saved retention with defaults after a load failure', async () => {
     mockGetRuntimeLogConfig.mockRejectedValue(new Error('unavailable'))
-    const wrapper = mountTable()
-    await flushPromises()
-    expect(saveButton(wrapper).attributes('disabled')).toBeDefined()
-    await saveButton(wrapper).trigger('click')
-    expect(mockUpdateRuntimeLogConfig).not.toHaveBeenCalled()
-    wrapper.unmount()
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const wrapper = mountTable()
+      await flushPromises()
+      expect(saveButton(wrapper).attributes('disabled')).toBeDefined()
+      await saveButton(wrapper).trigger('click')
+      expect(mockUpdateRuntimeLogConfig).not.toHaveBeenCalled()
+      expect(consoleError).toHaveBeenCalledWith('[OpsSystemLogTable] Failed to load runtime log config', expect.any(Error))
+      wrapper.unmount()
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 })

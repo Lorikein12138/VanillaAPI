@@ -33,6 +33,7 @@ const {
   createProvider,
   deleteProvider,
   fetchPublicSettings,
+  listAffiliateUsers,
   adminSettingsFetch,
   showError,
   showSuccess,
@@ -73,6 +74,7 @@ const {
   updateProvider: vi.fn(),
   createProvider: vi.fn(),
   deleteProvider: vi.fn(),
+  listAffiliateUsers: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 }),
   fetchPublicSettings: vi.fn(),
   adminSettingsFetch: vi.fn(),
   showError: vi.fn(),
@@ -118,6 +120,15 @@ vi.mock("@/api", () => ({
     },
   },
 }));
+
+// 管理员返利用户列表在开启返利功能后由页面直接经 @/api/admin/affiliates 拉取，不 mock 会让 jsdom 真的发出 XHR
+vi.mock("@/api/admin/affiliates", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/admin/affiliates")>();
+  return {
+    ...actual,
+    affiliatesAPI: { ...actual.affiliatesAPI, listUsers: listAffiliateUsers },
+  };
+});
 
 vi.mock("@/stores", () => ({
   useAppStore: () => ({

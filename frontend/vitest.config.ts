@@ -10,6 +10,10 @@ export default defineConfig({
       'vue-i18n': 'vue-i18n/dist/vue-i18n.runtime.esm-bundler.js'
     }
   },
+  define: {
+    // 与 vite.config.ts 一致：运行时版本没有消息编译器，需要 JIT 才能编译字符串消息，否则 t() 会返回键名并向 stderr 报警
+    __INTLIFY_JIT_COMPILATION__: true
+  },
   test: {
     globals: true,
     environment: 'jsdom',
