@@ -325,6 +325,7 @@ describe('admin UsersView', () => {
     expect(wrapper.get('[data-test="row-state"]').text()).toBe('42:active:0')
     expect(showError).toHaveBeenCalledWith('admin.users.failedToToggle')
     expect(showSuccess).not.toHaveBeenCalled()
+    expect(errorSpy).toHaveBeenCalledWith('Error toggling user status:', expect.any(Error))
     errorSpy.mockRestore()
     wrapper.unmount()
   })

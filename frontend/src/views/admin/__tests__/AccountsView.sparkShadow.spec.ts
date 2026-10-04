@@ -167,6 +167,7 @@ describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
     await flushPromises()
 
     expect(showError).toHaveBeenCalledWith('duplicate failed')
+    expect(consoleError).toHaveBeenCalledWith('Failed to duplicate account:', expect.any(Error))
     consoleError.mockRestore()
     wrapper.unmount()
   })
