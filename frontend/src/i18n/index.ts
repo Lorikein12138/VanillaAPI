@@ -59,6 +59,23 @@ export async function initI18n(): Promise<void> {
   document.documentElement.setAttribute('lang', current)
 }
 
+type LocaleChangeListener = (locale: LocaleCode) => void | Promise<void>
+
+const localeChangeListeners = new Set<LocaleChangeListener>()
+
+/**
+ * 订阅语言切换：`setLocale` 应用新语言后依次 await 监听器。
+ * 页签标题等依赖 router/stores 的联动由 `@/router/localeTitleSync` 注册，
+ * 这里不直接引用它们（router/title.ts 反向依赖本模块，直接引用会形成循环）。
+ * 返回注销函数。
+ */
+export function onLocaleChange(listener: LocaleChangeListener): () => void {
+  localeChangeListeners.add(listener)
+  return () => {
+    localeChangeListeners.delete(listener)
+  }
+}
+
 export async function setLocale(locale: string): Promise<void> {
   if (!isLocaleCode(locale)) {
     return
@@ -69,21 +86,9 @@ export async function setLocale(locale: string): Promise<void> {
   localStorage.setItem(LOCALE_KEY, locale)
   document.documentElement.setAttribute('lang', locale)
 
-  // 同步更新浏览器页签标题，使其跟随语言切换
-  const { resolveRouteDocumentTitle } = await import('@/router/title')
-  const { default: router } = await import('@/router')
-  const { useAppStore } = await import('@/stores/app')
-  const { useAuthStore } = await import('@/stores/auth')
-  const { useAdminSettingsStore } = await import('@/stores/adminSettings')
-  const route = router.currentRoute.value
-  const appStore = useAppStore()
-  const authStore = useAuthStore()
-  const adminSettingsStore = useAdminSettingsStore()
-  const customMenuItems = [
-    ...(appStore.cachedPublicSettings?.custom_menu_items ?? []),
-    ...(authStore.isAdmin ? adminSettingsStore.customMenuItems : []),
-  ]
-  document.title = resolveRouteDocumentTitle(route, appStore.siteName, customMenuItems)
+  for (const listener of [...localeChangeListeners]) {
+    await listener(locale)
+  }
 }
 
 export function getLocale(): LocaleCode {

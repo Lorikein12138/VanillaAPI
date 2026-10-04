@@ -139,9 +139,15 @@ describe('useSubscriptionStore', () => {
 
     it('API 错误时抛出异常', async () => {
       mockGetActiveSubscriptions.mockRejectedValue(new Error('Network error'))
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
       const store = useSubscriptionStore()
 
-      await expect(store.fetchActiveSubscriptions()).rejects.toThrow('Network error')
+      try {
+        await expect(store.fetchActiveSubscriptions()).rejects.toThrow('Network error')
+        expect(consoleError).toHaveBeenCalledWith('Failed to fetch active subscriptions:', expect.any(Error))
+      } finally {
+        consoleError.mockRestore()
+      }
     })
   })
 

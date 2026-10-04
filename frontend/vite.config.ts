@@ -86,8 +86,10 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       vue(),
+      // 构建前的 `vue-tsc -b`（build 脚本）已做类型检查；vite build 阶段关闭插件检查，避免它以 shell: true 派生子进程触发 Node DEP0190 警告
       checker({
-        vueTsc: true
+        vueTsc: true,
+        enableBuild: false
       }),
       injectPublicSettings(backendUrl)
     ],
@@ -106,6 +108,8 @@ export default defineConfig(({ mode }) => {
   build: {
     outDir: '../backend/internal/web/dist',
     emptyOutDir: true,
+    // 基线（v0.2.13）下最大的 AccountsView 分包约 813.70 kB，已按路由拆分且无更多可拆的收益；阈值设为 1000 kB，超过再提示
+    chunkSizeWarningLimit: 1000,
     rollupOptions: {
       output: {
         /**

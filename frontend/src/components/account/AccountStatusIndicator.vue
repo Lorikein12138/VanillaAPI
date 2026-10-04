@@ -203,6 +203,8 @@ const emit = defineEmits<{
 
 const smartHealthNow = ref(Date.now())
 let smartHealthExpiryTimer: ReturnType<typeof setTimeout> | undefined
+// setTimeout 的延迟上限是 2^31-1 毫秒（约 24.8 天），超出会被当成 1 毫秒立刻触发；超长冷却分段等待，到点后重新排程
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 const smartHealthDeadline = computed(() => {
   const value = props.account.smart_health?.next_probe_at
@@ -255,9 +257,9 @@ const scheduleSmartHealthExpiry = () => {
   const deadline = smartHealthDeadline.value
   if (props.account.smart_health?.state !== 'cooldown' || deadline === null || deadline <= Date.now()) return
   smartHealthExpiryTimer = setTimeout(() => {
-    smartHealthNow.value = Date.now()
     smartHealthExpiryTimer = undefined
-  }, deadline - Date.now())
+    scheduleSmartHealthExpiry()
+  }, Math.min(deadline - Date.now(), MAX_TIMER_DELAY_MS))
 }
 
 watch(() => [props.account.smart_health?.state, props.account.smart_health?.next_probe_at], scheduleSmartHealthExpiry, { immediate: true })

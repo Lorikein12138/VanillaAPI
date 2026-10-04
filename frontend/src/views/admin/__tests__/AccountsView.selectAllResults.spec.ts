@@ -237,6 +237,7 @@ describe('admin AccountsView select all filtered results', () => {
   })
 
   it('keeps the original page selection when loading all results fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
     const currentPage = makeAccounts(20)
     listAccounts.mockImplementation(async (_page: number, pageSize: number) => {
       if (pageSize === 1000) {
@@ -263,5 +264,6 @@ describe('admin AccountsView select all filtered results', () => {
     expect(wrapper.get('[data-test="selected-count"]').text()).toBe('20')
     expect(wrapper.get('[data-test="all-results-selected"]').text()).toBe('false')
     expect(showError).toHaveBeenCalledWith('admin.accounts.bulkActions.selectAllFailed')
+    expect(consoleError).toHaveBeenCalledWith('Failed to select all account results:', expect.any(Error))
   })
 })
