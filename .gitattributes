@@ -26,3 +26,6 @@ openspec/changes/archive/*/source-freeze/* binary
 
 # PowerShell 脚本（二开工具 tools/review-gates.ps1）
 *.ps1 text eol=lf
+
+# 审查/代码窗口证据目录是工具原始输出，需逐字保留，不做空白检查
+openspec/changes/**/reports/evidence-*/** -whitespace
