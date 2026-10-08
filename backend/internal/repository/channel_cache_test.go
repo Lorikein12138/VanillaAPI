@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestChannelCachePubSub(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	received := make(chan struct{}, 1)
-	subscriber.SubscribeUpdates(ctx, func() {
+	done := subscriber.SubscribeUpdates(ctx, func() {
 		select {
 		case received <- struct{}{}:
 		default:
@@ -41,4 +42,48 @@ func TestChannelCachePubSub(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("channel cache invalidation notification was not received")
 	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("channel cache subscriber did not stop after cancel")
+	}
+}
+
+func TestChannelCacheConsumeMessagesIgnoresNilAndStopsOnClose(t *testing.T) {
+	messages := make(chan *redis.Message, 2)
+	messages <- nil
+	messages <- &redis.Message{Channel: channelCachePubSubKey}
+	close(messages)
+
+	calls := 0
+	reason := consumePubSubMessages(context.Background(), messages, func() { calls++ })
+
+	require.Equal(t, pubSubStopChannelClosed, reason)
+	require.Equal(t, 1, calls)
+}
+
+func TestChannelCacheConsumeMessagesDoesNotHandleAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	messages := make(chan *redis.Message, 1)
+	messages <- &redis.Message{Channel: channelCachePubSubKey}
+
+	calls := 0
+	reason := consumePubSubMessages(ctx, messages, func() { calls++ })
+
+	require.Equal(t, pubSubStopContextDone, reason)
+	require.Zero(t, calls)
+}
+
+func TestChannelCacheIsStoppedByCancelOnlyForExplicitCancel(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.True(t, isStoppedByCancel(canceled, context.Canceled))
+
+	expired, cancelExpired := context.WithTimeout(context.Background(), 0)
+	defer cancelExpired()
+	require.False(t, isStoppedByCancel(expired, context.DeadlineExceeded))
+	require.False(t, isStoppedByCancel(canceled, errors.New("boom")))
 }

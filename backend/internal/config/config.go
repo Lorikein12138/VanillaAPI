@@ -1996,7 +1996,10 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	}
 
 	if !cfg.Security.URLAllowlist.Enabled {
-		slog.Warn("security.url_allowlist.enabled=false; allowlist/SSRF checks disabled (minimal format validation only).")
+		slog.Info("security.url_allowlist.disabled: allowlist/SSRF checks disabled by configuration",
+			"enabled", false,
+			"validation", "minimal_format",
+		)
 	}
 	if !cfg.Security.ResponseHeaders.Enabled {
 		slog.Warn("security.response_headers.enabled=false; configurable header filtering disabled (default allowlist only).")
