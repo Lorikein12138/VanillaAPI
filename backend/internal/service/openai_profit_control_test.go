@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 
 	"testing"
@@ -260,56 +261,27 @@ func TestProfitControlSchedulerFiltersCandidates(t *testing.T) {
 	})
 }
 
-func TestOpenAIProfitControlVetoLatest_PreservesSmartProbeIdentity(t *testing.T) {
+func TestOpenAIProfitControlVetoLatestPreservesCachedPricing(t *testing.T) {
 	now := time.Unix(1776000000, 0).UTC()
-	newService := func(t *testing.T, threshold float64) (*OpenAIGatewayService, *Account, *Account, *openAIAccountRuntimeStats, context.Context) {
-		t.Helper()
-		shared := &Account{ID: 7801, UpdatedAt: now, RateMultiplier: float64PtrForTest(0.5)}
-		selected := &Account{ID: 7801, UpdatedAt: now, smartHealthProbeID: 81}
-		stats := newOpenAIAccountRuntimeStats()
-		seedSmartDegradedAccount(t, stats, selected.ID, "error_rate", now)
-		stat := openAIAccountRuntimeStatForTest(t, stats, selected.ID)
-		probeID := stats.probeSequence.Add(1)
-		stat.mu.Lock()
-		stat.probeID = probeID
-		stat.probeActive.Store(true)
-		stat.probeLeaseUntil.Store(now.Add(openAIAccountHealthProbeLease).UnixNano())
-		stat.mu.Unlock()
-		selected.smartHealthProbeID = probeID
-		service := &OpenAIGatewayService{
-			schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{accountsByID: map[int64]*Account{shared.ID: shared}}},
-		}
-		service.openaiAccountStatsPublished.Store(stats)
-		ctx := context.WithValue(context.Background(), openAIProfitControlGateCtxKey{}, &openAIProfitControlGate{threshold: threshold, pricingAt: now})
-		return service, selected, shared, stats, ctx
+	for _, threshold := range []float64{0.7, 0.1} {
+		t.Run(fmt.Sprintf("threshold=%v", threshold), func(t *testing.T) {
+			shared := &Account{ID: 7801, UpdatedAt: now, RateMultiplier: float64PtrForTest(0.5)}
+			selected := &Account{ID: 7801, UpdatedAt: now}
+			svc := &OpenAIGatewayService{schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{accountsByID: map[int64]*Account{shared.ID: shared}}}}
+			ctx := context.WithValue(context.Background(), openAIProfitControlGateCtxKey{}, &openAIProfitControlGate{threshold: threshold, pricingAt: now})
+			latest, vetoed, reason := svc.ProfitControlVetoLatest(ctx, selected)
+			require.Equal(t, threshold < .5, vetoed)
+			if vetoed {
+				require.Equal(t, openAIProfitFilterReasonThreshold, reason)
+			} else {
+				require.Empty(t, reason)
+			}
+			require.Equal(t, shared.ID, latest.ID)
+			require.Equal(t, .5, *shared.RateMultiplier)
+			require.Nil(t, selected.RateMultiplier)
+		})
 	}
-
-	t.Run("request_copy_receives_identity_without_mutating_cached_account", func(t *testing.T) {
-		service, selected, shared, _, ctx := newService(t, 0.7)
-		latest, vetoed, reason := service.ProfitControlVetoLatest(ctx, selected)
-		require.False(t, vetoed)
-		require.Empty(t, reason)
-		require.NotSame(t, selected, latest)
-		require.NotSame(t, shared, latest)
-		require.Equal(t, selected.smartHealthProbeID, latest.smartHealthProbeID)
-		require.Zero(t, shared.smartHealthProbeID)
-	})
-
-	t.Run("veto_releases_only_the_matching_probe_lease", func(t *testing.T) {
-		service, selected, shared, stats, ctx := newService(t, 0.1)
-		latest, vetoed, reason := service.ProfitControlVetoLatest(ctx, selected)
-		require.True(t, vetoed)
-		require.Equal(t, openAIProfitFilterReasonThreshold, reason)
-		require.Equal(t, selected.smartHealthProbeID, latest.smartHealthProbeID)
-		require.Zero(t, shared.smartHealthProbeID)
-		stat := openAIAccountRuntimeStatForTest(t, stats, selected.ID)
-		stat.mu.Lock()
-		require.Zero(t, stat.probeID)
-		require.False(t, stat.probeActive.Load())
-		stat.mu.Unlock()
-	})
 }
-
 func float64PtrForTest(value float64) *float64 { return &value }
 
 func TestValidateProfitControlConfig(t *testing.T) {

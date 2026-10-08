@@ -11,12 +11,6 @@ const {
   getModels,
   getErrors,
   getUsers,
-  getAdminPresentationDimensions,
-  getAdminPresentationSnapshot,
-  getAdminPresentationMatrix,
-  getAdminPresentationModels,
-  getAdminPresentationErrors,
-  getAdminPresentationUsers,
   showError,
 } = vi.hoisted(() => ({
   route: { query: {} as Record<string, unknown> },
@@ -28,12 +22,6 @@ const {
   getModels: vi.fn(),
   getErrors: vi.fn(),
   getUsers: vi.fn(),
-  getAdminPresentationDimensions: vi.fn(),
-  getAdminPresentationSnapshot: vi.fn(),
-  getAdminPresentationMatrix: vi.fn(),
-  getAdminPresentationModels: vi.fn(),
-  getAdminPresentationErrors: vi.fn(),
-  getAdminPresentationUsers: vi.fn(),
   showError: vi.fn(),
 }))
 
@@ -54,12 +42,6 @@ vi.mock('@/api/channelMonitorV2', () => ({
   getModels,
   getErrors,
   getUsers,
-  getAdminPresentationDimensions,
-  getAdminPresentationSnapshot,
-  getAdminPresentationMatrix,
-  getAdminPresentationModels,
-  getAdminPresentationErrors,
-  getAdminPresentationUsers,
 }))
 vi.mock('vue-i18n', async (importOriginal) => ({
   ...await importOriginal<typeof import('vue-i18n')>(),
@@ -135,25 +117,13 @@ describe('ChannelStatusV2View dimension filters', () => {
       coverage,
       config: { refresh_interval_seconds: 300 },
       metrics: emptyMetrics,
-      health: { overall: 'healthy', error_rate: 'healthy', ttft: 'healthy', cache: 'healthy', minimum_sample: 50 },
+      health: { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 },
       trend: [],
     })
     getMatrix.mockResolvedValue({ coverage, group_by: 'platform_group', items: [] })
     getModels.mockResolvedValue({ items: [] })
     getErrors.mockResolvedValue({ items: [] })
     getUsers.mockResolvedValue({ items: [] })
-    getAdminPresentationDimensions.mockResolvedValue(dimensions)
-    getAdminPresentationSnapshot.mockResolvedValue({
-      coverage,
-      config: { refresh_interval_seconds: 300 },
-      metrics: emptyMetrics,
-      health: { overall: 'healthy', error_rate: 'healthy', ttft: 'healthy', cache: 'healthy', minimum_sample: 50 },
-      trend: [],
-    })
-    getAdminPresentationMatrix.mockResolvedValue({ coverage, group_by: 'platform_group', items: [] })
-    getAdminPresentationModels.mockResolvedValue({ items: [] })
-    getAdminPresentationErrors.mockResolvedValue({ items: [] })
-    getAdminPresentationUsers.mockResolvedValue({ items: [] })
   })
 
   it('keeps a composite group in the picker when one of its concrete platforms is selected', async () => {
@@ -182,61 +152,29 @@ describe('ChannelStatusV2View dimension filters', () => {
     wrapper.unmount()
   })
 
-  it('reuses one UTC as_of anchor across refresh surfaces and tab changes', async () => {
+  it.each([false, true])('uses original reads with admin=%s and no as_of', async (admin) => {
+    authState.isAdmin = admin
     route.query = {}
     const wrapper = mountView()
     await flushPromises()
-
-    const asOf = getDimensions.mock.calls[0][3]
-    expect(asOf).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
-    expect(getSnapshot.mock.calls[0][3]).toBe(asOf)
-    expect(getMatrix.mock.calls[0][4]).toBe(asOf)
-    expect(getModels.mock.calls[0][3]).toBe(asOf)
-
+    expect(getDimensions).toHaveBeenCalledWith(expect.objectContaining({ platforms: [], groupIds: [], models: [] }), admin, expect.any(AbortSignal))
+    expect(getSnapshot).toHaveBeenCalledWith(expect.any(Object), admin, expect.any(AbortSignal))
+    expect(getMatrix).toHaveBeenCalledWith(expect.any(Object), expect.any(String), admin, expect.any(AbortSignal))
+    expect(getModels).toHaveBeenCalledWith(expect.any(Object), admin, expect.any(AbortSignal))
     await wrapper.findAll('[role="tab"]')[1].trigger('click')
     await flushPromises()
-    expect(getErrors.mock.calls.at(-1)?.[3]).toBe(asOf)
-
+    expect(getErrors).toHaveBeenCalledWith(expect.any(Object), admin, undefined)
     await wrapper.findAll('[role="tab"]')[2].trigger('click')
     await flushPromises()
-    expect(getUsers.mock.calls.at(-1)?.[3]).toBe(asOf)
-
+    expect(getUsers).toHaveBeenCalledWith(expect.any(Object), admin, undefined)
+    for (const read of [getDimensions, getSnapshot, getModels, getErrors, getUsers]) {
+      expect(read.mock.calls.every((args) => args.length === 3)).toBe(true)
+    }
+    expect(getMatrix.mock.calls.every((args) => args.length === 4)).toBe(true)
+    expect(showError).not.toHaveBeenCalled()
     await wrapper.get('[data-testid="change-group-by"]').trigger('click')
     await flushPromises()
-    const nextAsOf = getDimensions.mock.calls.at(-1)?.[3]
-    expect(nextAsOf).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
-    expect(getSnapshot.mock.calls.at(-1)?.[3]).toBe(nextAsOf)
-    expect(getMatrix.mock.calls.at(-1)?.[4]).toBe(nextAsOf)
-    expect(getUsers.mock.calls.at(-1)?.[3]).toBe(nextAsOf)
-    wrapper.unmount()
-  })
-
-  it('uses admin presentation resources on the shared monitor page', async () => {
-    authState.isAdmin = true
-    route.query = {}
-    const wrapper = mountView()
-    await flushPromises()
-
-    expect(getAdminPresentationDimensions).toHaveBeenCalled()
-    expect(getAdminPresentationSnapshot).toHaveBeenCalled()
-    expect(getAdminPresentationMatrix).toHaveBeenCalled()
-    expect(getAdminPresentationModels).toHaveBeenCalled()
-    expect(getAdminPresentationErrors).not.toHaveBeenCalled()
-    expect(getAdminPresentationUsers).not.toHaveBeenCalled()
-
-    await wrapper.findAll('[role="tab"]')[1].trigger('click')
-    await flushPromises()
-    expect(getAdminPresentationErrors).toHaveBeenCalled()
-
-    await wrapper.findAll('[role="tab"]')[2].trigger('click')
-    await flushPromises()
-    expect(getAdminPresentationUsers).toHaveBeenCalled()
-    expect(getDimensions).not.toHaveBeenCalled()
-    expect(getSnapshot).not.toHaveBeenCalled()
-    expect(getMatrix).not.toHaveBeenCalled()
-    expect(getModels).not.toHaveBeenCalled()
-    expect(getErrors).not.toHaveBeenCalled()
-    expect(getUsers).not.toHaveBeenCalled()
+    expect(getSnapshot.mock.calls.at(-1)?.[1]).toBe(admin)
     wrapper.unmount()
   })
 })

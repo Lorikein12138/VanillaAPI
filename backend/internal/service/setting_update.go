@@ -105,9 +105,6 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 }
 
 func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, settings *SystemSettings) (map[string]string, error) {
-	if settings.OpenAIFirstOutputTimeoutSeconds < 0 || settings.OpenAIFirstOutputTimeoutSeconds > 300 {
-		return nil, infraerrors.BadRequest("INVALID_OPENAI_FIRST_OUTPUT_TIMEOUT_SECONDS", "openai_first_output_timeout_seconds must be between 0 and 300 seconds")
-	}
 	if err := s.validateDefaultSubscriptionGroups(ctx, settings.DefaultSubscriptions); err != nil {
 		return nil, err
 	}
@@ -516,8 +513,6 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingPaymentVisibleMethodAlipayEnabled] = strconv.FormatBool(settings.PaymentVisibleMethodAlipayEnabled)
 	updates[SettingPaymentVisibleMethodWxpayEnabled] = strconv.FormatBool(settings.PaymentVisibleMethodWxpayEnabled)
 	updates[SettingKeyOpenAILowUpstreamRatePriorityEnabled] = strconv.FormatBool(settings.OpenAILowUpstreamRatePriorityEnabled)
-	updates[SettingKeySmartSchedulingEnabled] = strconv.FormatBool(settings.SmartSchedulingEnabled)
-	updates[SettingKeyOpenAIFirstOutputTimeoutSeconds] = strconv.Itoa(settings.OpenAIFirstOutputTimeoutSeconds)
 	updates[SettingKeyOpenAIOAuthSchedulingRateMultiplier] = ""
 	if rate := settings.OpenAIOAuthSchedulingRateMultiplier; rate != nil {
 		updates[SettingKeyOpenAIOAuthSchedulingRateMultiplier] = strconv.FormatFloat(*rate, 'f', -1, 64)

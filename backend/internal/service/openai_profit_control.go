@@ -335,16 +335,6 @@ func (s *OpenAIGatewayService) ProfitControlVetoLatest(ctx context.Context, sele
 		return selected, false, ""
 	}
 	latest, vetoed, reason := profitControlVetoLatest(ctx, selected, s.schedulerSnapshot)
-	if selected != nil && selected.smartHealthProbeID != 0 && latest != nil && latest != selected {
-		requestCopy := *latest
-		requestCopy.smartHealthProbeID = selected.smartHealthProbeID
-		latest = &requestCopy
-	}
-	if vetoed && selected != nil && selected.smartHealthProbeID != 0 {
-		if stats := s.openaiAccountStatsPublished.Load(); stats != nil {
-			stats.cancelProbeLeaseForID(selected.ID, selected.smartHealthProbeID, time.Now())
-		}
-	}
 	return latest, vetoed, reason
 }
 

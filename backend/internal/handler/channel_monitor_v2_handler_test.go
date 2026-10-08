@@ -19,6 +19,23 @@ type channelMonitorV2GroupAuthorizerStub struct {
 	calls  []int64
 }
 
+func TestChannelMonitorV2IgnoresRetiredAsOfQuery(t *testing.T) {
+	h := NewChannelMonitorV2Handler(service.NewChannelMonitorV2Service(nil), nil)
+	for _, value := range []string{"not-a-time", "2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z"} {
+		t.Run(value, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodGet, "/?range=90m&as_of="+value, nil)
+			before := time.Now().UTC().Truncate(5 * time.Minute).Add(5 * time.Minute)
+			filter, ok := h.parseFilter(c)
+			require.True(t, ok)
+			after := time.Now().UTC().Truncate(5 * time.Minute).Add(5 * time.Minute)
+			require.False(t, filter.End.Before(before))
+			require.False(t, filter.End.After(after))
+			require.Equal(t, 90*time.Minute, filter.End.Sub(filter.Start))
+		})
+	}
+}
+
 func (s *channelMonitorV2GroupAuthorizerStub) GetAvailableGroups(_ context.Context, userID int64) ([]service.Group, error) {
 	s.calls = append(s.calls, userID)
 	return s.groups, s.err
@@ -45,16 +62,6 @@ func TestChannelMonitorV2MatrixHandlerRejectsInvalidGroupBy(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/channel-monitor-v2/matrix?group_by=invalid", nil)
 	h := NewChannelMonitorV2Handler(service.NewChannelMonitorV2Service(nil), nil)
 	h.Matrix(c)
-	require.Equal(t, http.StatusBadRequest, recorder.Code)
-}
-
-func TestChannelMonitorV2PresentationMatrixHandlerRejectsInvalidGroupBy(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/admin/channel-monitor-v2/presentation/matrix?group_by=invalid", nil)
-	h := NewChannelMonitorV2Handler(service.NewChannelMonitorV2Service(nil), nil)
-	h.PresentationMatrix(c)
 	require.Equal(t, http.StatusBadRequest, recorder.Code)
 }
 
@@ -95,30 +102,4 @@ func TestChannelMonitorV2ScopeFilterLeavesAdminUnrestricted(t *testing.T) {
 	require.False(t, filter.RestrictGroups)
 	require.Nil(t, filter.AllowedGroupIDs)
 	require.Empty(t, authorizer.calls)
-}
-
-func TestParseChannelMonitorV2AsOfBoundsAndUTC(t *testing.T) {
-	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
-
-	got, err := parseChannelMonitorV2AsOf("", now)
-	require.NoError(t, err)
-	require.Equal(t, now, got)
-
-	got, err = parseChannelMonitorV2AsOf("2026-09-29T14:00:00+02:00", now)
-	require.NoError(t, err)
-	require.Equal(t, now, got)
-
-	_, err = parseChannelMonitorV2AsOf("not-a-time", now)
-	require.ErrorIs(t, err, service.ErrChannelMonitorV2InvalidAsOf)
-	_, err = parseChannelMonitorV2AsOf(now.Add(61*time.Second).Format(time.RFC3339Nano), now)
-	require.ErrorIs(t, err, service.ErrChannelMonitorV2InvalidAsOf)
-	_, err = parseChannelMonitorV2AsOf(now.Add(-24*time.Hour-time.Nanosecond).Format(time.RFC3339Nano), now)
-	require.ErrorIs(t, err, service.ErrChannelMonitorV2InvalidAsOf)
-
-	got, err = parseChannelMonitorV2AsOf(now.Add(time.Minute).Format(time.RFC3339Nano), now)
-	require.NoError(t, err)
-	require.Equal(t, now.Add(time.Minute), got)
-	got, err = parseChannelMonitorV2AsOf(now.Add(-24*time.Hour).Format(time.RFC3339Nano), now)
-	require.NoError(t, err)
-	require.Equal(t, now.Add(-24*time.Hour), got)
 }

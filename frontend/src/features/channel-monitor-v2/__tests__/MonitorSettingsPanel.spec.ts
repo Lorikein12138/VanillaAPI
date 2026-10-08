@@ -38,7 +38,7 @@ import MonitorSettingsPanel from '../MonitorSettingsPanel.vue'
 
 const platformNames = [
   'anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'kimi',
-  'zhipu', 'deepseek', 'minimax', 'opencode_go', 'composite',
+  'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'composite',
 ]
 
 const baseConfig = (overrides: Partial<MonitorConfig> = {}): MonitorConfig => ({
@@ -48,7 +48,6 @@ const baseConfig = (overrides: Partial<MonitorConfig> = {}): MonitorConfig => ({
   platforms: platformNames.map((platform) => ({ platform, enabled: true, models: [] })),
   group_ids: [],
   group_scope_mode: 'all',
-  synthetic_empty_buckets_enabled: false,
   health_thresholds: {
     minimum_sample: 50,
     warning_error_rate: 0.05,
@@ -97,31 +96,29 @@ describe('MonitorSettingsPanel', () => {
     expect(wrapper.text()).toContain('MiniMax')
     expect(wrapper.text()).toContain('OpenCode')
     expect(wrapper.text()).toContain('Composite')
+    expect(wrapper.text()).toContain('typesafe')
     expect(wrapper.text()).not.toContain('Kiro')
-    expect(wrapper.findAll('input[type="text"]')).toHaveLength(11)
+    expect(wrapper.findAll('input[type="text"]')).toHaveLength(12)
     wrapper.unmount()
   })
 
-  it('places the synthetic data toggle below aggregation frequency and persists it', async () => {
+  it('omits the retired toggle and drops archived response data from saves', async () => {
+    getConfig.mockResolvedValue({ ...baseConfig(), synthetic_empty_buckets_enabled: true })
     const wrapper = mountPanel()
     await flushPromises()
-
+    expect(wrapper.text()).not.toContain('channelMonitorV2.settings.syntheticEmptyBucketsTitle')
     const settingsRows = wrapper.findAll('.card.divide-y > div')
+    expect(settingsRows).toHaveLength(2)
     expect(settingsRows[1].text()).toContain('channelMonitorV2.settings.refreshTitle')
-    expect(settingsRows[2].text()).toContain('channelMonitorV2.settings.syntheticEmptyBucketsTitle')
-    const switches = wrapper.findAll('[role="switch"]')
-    expect(switches[1].attributes('aria-checked')).toBe('false')
-    await switches[1].trigger('click')
+    await wrapper.findAll('[role="switch"]')[0].trigger('click')
     await wrapper.get('button.btn-primary').trigger('click')
     await flushPromises()
-
-    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
-      synthetic_empty_buckets_enabled: true,
-    }))
+    expect(updateConfig).toHaveBeenCalledTimes(1)
+    expect(updateConfig.mock.calls[0][0]).not.toHaveProperty('synthetic_empty_buckets_enabled')
+    expect(updateConfig.mock.calls[0][0].platforms).toEqual(baseConfig().platforms)
     expect(showError).not.toHaveBeenCalled()
     wrapper.unmount()
   })
-
   it('keeps selected-empty scope when the last selected group is unchecked', async () => {
     getConfig.mockResolvedValue(baseConfig({
       group_ids: [1],
@@ -170,14 +167,13 @@ describe('MonitorSettingsPanel', () => {
     getConfig.mockResolvedValue(baseConfig({
       group_ids: [],
       group_scope_mode: undefined,
-      synthetic_empty_buckets_enabled: undefined,
     }))
     const wrapper = mountPanel()
     await flushPromises()
 
     expect(wrapper.text()).toContain('channelMonitorV2.settings.groupsAll')
     expect(wrapper.text()).not.toContain('channelMonitorV2.settings.groupsScopeEmpty')
-    expect(wrapper.findAll('[role="switch"]')[1].attributes('aria-checked')).toBe('false')
+    expect(wrapper.findAll('.card.divide-y > div')).toHaveLength(2)
     expect(showError).not.toHaveBeenCalled()
     wrapper.unmount()
   })

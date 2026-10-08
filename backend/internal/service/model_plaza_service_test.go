@@ -184,6 +184,8 @@ func TestListPlazaGroups_MappedKeyDisplayAndPricing(t *testing.T) {
 	require.Len(t, out[0].Models, 1)
 	require.Equal(t, "client-name", out[0].Models[0].Name)
 	require.NotNil(t, out[0].Models[0].Pricing)
+	require.Equal(t, 3e-6, *out[0].Models[0].Pricing.InputPrice)
+	require.Equal(t, "upstream-name", members.accountsByGroup[10][0].GetModelMapping()["client-name"])
 }
 
 func TestListPlazaGroups_AutomaticAccountReadFailureFailsClosed(t *testing.T) {

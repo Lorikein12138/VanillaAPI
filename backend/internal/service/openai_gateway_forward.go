@@ -37,13 +37,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, err
 	}
 	startTime := time.Now()
-	var firstOutputSettings openAIAdvancedSchedulerRuntimeSettings
-	if account != nil && account.Platform == PlatformOpenAI {
-		// The Gin context survives handler-level account failover. Keep S and its
-		// timeout value together so every transport and switched attempt uses the
-		// request-start generation.
-		firstOutputSettings = s.openAIFirstOutputRuntimeSettings(ctx, c)
-	}
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
 
@@ -380,7 +373,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if imageIntent && !imageGenerationAllowed {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"type": "permission_error", "message": ImageGenerationPermissionMessage()}})
-		return nil, withOpenAIAccountFailureAttribution(errors.New("image generation disabled for group"), openAIAccountFailureRequestInvalid)
+		return nil, errors.New("image generation disabled for group")
 	}
 
 	isCompactRequest := compactPath
@@ -430,7 +423,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if imageIntent && !imageGenerationAllowed {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
 		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"type": "permission_error", "message": ImageGenerationPermissionMessage()}})
-		return nil, withOpenAIAccountFailureAttribution(errors.New("image generation disabled for group"), openAIAccountFailureRequestInvalid)
+		return nil, errors.New("image generation disabled for group")
 	}
 
 	// /responses/compact 是会话压缩请求：上游不接受 tool_choice（400 unknown_parameter），
@@ -1030,7 +1023,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	firstOutputTimeout := time.Duration(0)
 	if reqStream && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeoutForSettings(reasoningEffortValue, firstOutputSettings)
+		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
 	}
 
 	httpInvalidEncryptedContentRetryTried := false

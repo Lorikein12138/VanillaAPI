@@ -518,8 +518,6 @@ const baseSettingsResponse = {
   payment_visible_method_wxpay_enabled: true,
   openai_low_upstream_rate_priority_enabled: false,
   openai_oauth_scheduling_rate_multiplier: 1,
-  smart_scheduling_enabled: false,
-  openai_first_output_timeout_seconds: 30,
   openai_advanced_scheduler_enabled: false,
   openai_advanced_scheduler_sticky_weighted_enabled: false,
   openai_advanced_scheduler_subscription_priority_enabled: false,
@@ -1748,11 +1746,13 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(receivedProviders[0].supported_types).toEqual([]);
   });
 
-  it("keeps smart and experimental scheduling independent across all combinations", async () => {
+  it("keeps the advanced scheduler independent and ignores retired settings", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
-      smart_scheduling_enabled: false,
+      smart_scheduling_enabled: true,
+      openai_first_output_timeout_seconds: 1,
       openai_advanced_scheduler_enabled: false,
+      openai_low_upstream_rate_priority_enabled: true,
     });
     updateSettings.mockImplementation(async (payload) => ({
       ...baseSettingsResponse,
@@ -1762,213 +1762,28 @@ describe("admin SettingsView payment visible method controls", () => {
     const wrapper = mountView();
     await flushPromises();
     await openFeaturesTab(wrapper);
+    expect(wrapper.find('[data-testid="smart-scheduling-toggle"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="smart-scheduling-first-output-timeout"]').exists()).toBe(false);
 
-    const smartToggle = wrapper.find<HTMLInputElement>('[data-testid="smart-scheduling-toggle"]');
-    expect(smartToggle.element.checked).toBe(false);
     await openGatewayTab(wrapper);
-    expect(wrapper.find('[data-testid="openai-advanced-scheduler-toggle"]').exists()).toBe(true);
+    const advancedToggle = wrapper.find<HTMLInputElement>('[data-testid="openai-advanced-scheduler-toggle"]');
+    expect(advancedToggle.exists()).toBe(true);
+    expect(advancedToggle.element.checked).toBe(false);
     expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(true);
 
-    await smartToggle.setValue(true);
-    await flushPromises();
-    expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="openai-advanced-scheduler-toggle"]').exists()).toBe(true);
-
-    const advancedToggle = wrapper.find<HTMLInputElement>('[data-testid="openai-advanced-scheduler-toggle"]');
     await advancedToggle.setValue(true);
     await flushPromises();
     expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(false);
 
-    await smartToggle.setValue(false);
+    await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
-    expect(advancedToggle.element.checked).toBe(true);
-    expect(wrapper.find('[data-testid="openai-low-rate-priority-toggle"]').exists()).toBe(false);
-  });
-
-  it("defaults a missing smart scheduling response field to false and saves it independently", async () => {
-    getSettings.mockResolvedValue({
-      ...baseSettingsResponse,
-      openai_advanced_scheduler_enabled: true,
-    });
-    updateSettings.mockImplementation(async (payload) => ({
-      ...baseSettingsResponse,
-      openai_advanced_scheduler_enabled: true,
-      ...payload,
-    }));
-
-    const wrapper = mountView();
-    await flushPromises();
-    const smartToggle = wrapper.find<HTMLInputElement>('[data-testid="smart-scheduling-toggle"]');
-    expect(smartToggle.element.checked).toBe(false);
-    await smartToggle.setValue(true);
-    await wrapper.find("form").trigger("submit");
-    await flushPromises();
-
-    expect(updateSettings).toHaveBeenCalled();
     const payload = updateSettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(payload.smart_scheduling_enabled).toBe(true);
     expect(payload.openai_advanced_scheduler_enabled).toBe(true);
-    expect(zhSettings.settings.features.smartScheduling).toEqual(
-      expect.objectContaining({ title: expect.any(String), enabled: expect.any(String) }),
-    );
-    expect(enSettings.settings.features.smartScheduling).toEqual(
-      expect.objectContaining({ title: expect.any(String), enabled: expect.any(String) }),
-    );
-    expect(zhSettings.settings.openaiExperimentalScheduler.smartOnlyRelation).toBeTruthy();
-    expect(enSettings.settings.openaiExperimentalScheduler.smartOnlyRelation).toBeTruthy();
-  });
-
-  it("SmartSchedulingStall loads missing timeout as 30 and preserves explicit zero", async () => {
-    const { openai_first_output_timeout_seconds: _ignored, ...missingTimeout } = baseSettingsResponse;
-    getSettings.mockResolvedValueOnce(missingTimeout);
-    const missingWrapper = mountView();
-    await flushPromises();
-    await openFeaturesTab(missingWrapper);
-    const missingInput = missingWrapper.get<HTMLInputElement>(
-      '[data-testid="smart-scheduling-first-output-timeout"]',
-    );
-    expect(missingInput.element.value).toBe("30");
-    await missingWrapper.find("form").trigger("submit.prevent");
-    await flushPromises();
-    expect(updateSettings).toHaveBeenLastCalledWith(
-      expect.objectContaining({ openai_first_output_timeout_seconds: 30 }),
-    );
-    missingWrapper.unmount();
-
-    getSettings.mockResolvedValueOnce({
-      ...baseSettingsResponse,
-      openai_first_output_timeout_seconds: 0,
-    });
-    const zeroWrapper = mountView();
-    await flushPromises();
-    await openFeaturesTab(zeroWrapper);
-    const zeroInput = zeroWrapper.get<HTMLInputElement>(
-      '[data-testid="smart-scheduling-first-output-timeout"]',
-    );
-    expect(zeroInput.element.value).toBe("0");
-    await zeroWrapper.find("form").trigger("submit.prevent");
-    await flushPromises();
-    expect(updateSettings).toHaveBeenLastCalledWith(
-      expect.objectContaining({ openai_first_output_timeout_seconds: 0 }),
-    );
-    zeroWrapper.unmount();
-  });
-
-  it("SmartSchedulingStall accepts boundary integers and rejects decimals or values outside 0-300", async () => {
-    for (const value of [0, 1, 30, 300]) {
-      getSettings.mockResolvedValueOnce({
-        ...baseSettingsResponse,
-        openai_first_output_timeout_seconds: value,
-      });
-      const wrapper = mountView();
-      await flushPromises();
-      await openFeaturesTab(wrapper);
-      const input = wrapper.get<HTMLInputElement>(
-        '[data-testid="smart-scheduling-first-output-timeout"]',
-      );
-      expect(input.attributes("min")).toBe("0");
-      expect(input.attributes("max")).toBe("300");
-      expect(input.attributes("step")).toBe("1");
-      await wrapper.find("form").trigger("submit.prevent");
-      await flushPromises();
-      expect(updateSettings).toHaveBeenLastCalledWith(
-        expect.objectContaining({ openai_first_output_timeout_seconds: value }),
-      );
-      wrapper.unmount();
-    }
-
-    for (const value of [-1, 301, 1.5]) {
-      showError.mockClear();
-      updateSettings.mockClear();
-      getSettings.mockResolvedValueOnce({
-        ...baseSettingsResponse,
-        openai_first_output_timeout_seconds: 30,
-      });
-      const wrapper = mountView();
-      await flushPromises();
-      await openFeaturesTab(wrapper);
-      await wrapper
-        .get('[data-testid="smart-scheduling-first-output-timeout"]')
-        .setValue(String(value));
-      await wrapper.find("form").trigger("submit.prevent");
-      await flushPromises();
-      expect(updateSettings).not.toHaveBeenCalled();
-      expect(showError).toHaveBeenCalled();
-      wrapper.unmount();
-    }
-  });
-
-  it("SmartSchedulingStall references matching translated range, default, scope and billing-risk copy", () => {
-    for (const locale of [zhSettings.settings.features.smartScheduling, enSettings.settings.features.smartScheduling]) {
-      expect(locale.firstOutputTimeoutLabel).toBeTruthy();
-      expect(locale.firstOutputTimeoutHint).toBeTruthy();
-      expect(locale.firstOutputTimeoutRisk).toBeTruthy();
-      expect(locale.firstOutputTimeoutInvalid).toBeTruthy();
-    }
-    expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("30");
-    expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("300");
-    expect(zhSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("重复计费");
-    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("30");
-    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutHint).toContain("300");
-    expect(enSettings.settings.features.smartScheduling.firstOutputTimeoutRisk).toContain("bill twice");
-  });
-
-  it("uses shared full-width input styles and preserves all smart-scheduling copy points", async () => {
-    const wrapper = mountView();
-    await flushPromises();
-    await openFeaturesTab(wrapper);
-
-    const input = wrapper.get<HTMLInputElement>(
-      '[data-testid="smart-scheduling-first-output-timeout"]',
-    );
-    const label = wrapper.get('label[for="smart-scheduling-first-output-timeout"]');
-    expect(input.classes()).toContain("input");
-    expect(input.classes()).not.toContain("form-input");
-    expect(label.classes()).toContain("input-label");
-    expect(input.element.parentElement?.classList.contains("max-w-sm")).toBe(false);
-    const card = wrapper
-      .findAll(".card")
-      .find((candidate) => candidate.text().includes("admin.settings.features.smartScheduling.title"));
-    expect(card).toBeDefined();
-    expect(card!.find(".input-hint").exists()).toBe(true);
-    expect(card!.text()).toContain("admin.settings.features.smartScheduling.firstOutputTimeoutRisk");
-
-    const zh = zhSettings.settings.features.smartScheduling;
-    const en = enSettings.settings.features.smartScheduling;
-    expect(Object.keys(zh)).toEqual(Object.keys(en));
-    expect(zh.description).toContain("模型、能力、传输、配额和熔断门槛");
-    expect(zh.description).toContain("近期健康数据充足");
-    expect(zh.enabledHint).toContain("按健康状态选账");
-    expect(zh.enabledHint).toContain("独立");
-    expect(zh.enabledHint).toContain("分别开启");
-    expect(zh.firstOutputTimeoutHint).toContain("0–300 的整数");
-    expect(zh.firstOutputTimeoutHint).toContain("默认 30");
-    expect(zh.firstOutputTimeoutHint).toContain("0 为关闭");
-    expect(zh.firstOutputTimeoutHint).toContain("仅开启智能调度时生效");
-    expect(zh.firstOutputTimeoutHint).toContain("关闭后按 config.yaml");
-    expect(zh.firstOutputTimeoutRisk).toContain("换号一次");
-    expect(zh.firstOutputTimeoutRisk).toContain("上游可能已处理并计费");
-    expect(zh.firstOutputTimeoutRisk).toContain("重试可能重复计费");
-    expect(zh.firstOutputTimeoutInvalid).toContain("0–300 的整数");
-
-    expect(en.description).toContain("model, capability, transport, quota, and circuit gates");
-    expect(en.description).toContain("recent health data");
-    expect(en.enabledHint).toContain("Route by health");
-    expect(en.enabledHint).toContain("independent");
-    expect(en.enabledHint).toContain("enabled separately");
-    expect(en.firstOutputTimeoutHint).toContain("Integer 0–300");
-    expect(en.firstOutputTimeoutHint).toContain("default 30");
-    expect(en.firstOutputTimeoutHint).toContain("0 disables it");
-    expect(en.firstOutputTimeoutHint).toContain("smart scheduling on");
-    expect(en.firstOutputTimeoutHint).toContain("config.yaml");
-    expect(en.firstOutputTimeoutRisk).toContain("switch accounts once");
-    expect(en.firstOutputTimeoutRisk).toContain("processed and billed");
-    expect(en.firstOutputTimeoutRisk).toContain("bill twice");
-    expect(en.firstOutputTimeoutInvalid).toContain("integer from 0 to 300");
+    expect(payload).not.toHaveProperty("smart_scheduling_enabled");
+    expect(payload).not.toHaveProperty("openai_first_output_timeout_seconds");
     wrapper.unmount();
   });
 });
-
 describe("admin SettingsView wechat connect controls", () => {
   beforeEach(() => {
     getSettings.mockReset();

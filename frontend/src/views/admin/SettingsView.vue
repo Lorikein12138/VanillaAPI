@@ -5094,7 +5094,7 @@
               </div>
 
               <div
-                v-if="!form.smart_scheduling_enabled && !form.openai_advanced_scheduler_enabled"
+                v-if="!form.openai_advanced_scheduler_enabled"
                 class="flex items-center justify-between border-t border-gray-100 pt-5 dark:border-dark-700"
               >
                 <div>
@@ -5116,7 +5116,7 @@
               </div>
 
               <div
-                v-if="!form.smart_scheduling_enabled && !form.openai_advanced_scheduler_enabled && form.openai_low_upstream_rate_priority_enabled"
+                v-if="!form.openai_advanced_scheduler_enabled && form.openai_low_upstream_rate_priority_enabled"
                 class="flex flex-col items-stretch gap-3 border-t border-gray-100 pt-5 sm:flex-row sm:items-start sm:justify-between sm:gap-6 dark:border-dark-700"
               >
                 <div class="min-w-0">
@@ -5157,21 +5157,6 @@
                     {{
                       t("admin.settings.openaiExperimentalScheduler.description")
                     }}
-                  </p>
-                  <p
-                    v-if="!form.smart_scheduling_enabled"
-                    class="mt-1 text-xs text-gray-500 dark:text-gray-400"
-                  >
-                    {{ t("admin.settings.openaiExperimentalScheduler.smartDisabledRelation") }}
-                  </p>
-                  <p
-                    v-else-if="!form.openai_advanced_scheduler_enabled"
-                    class="mt-1 text-xs text-gray-500 dark:text-gray-400"
-                  >
-                    {{ t("admin.settings.openaiExperimentalScheduler.smartOnlyRelation") }}
-                  </p>
-                  <p v-else class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    {{ t("admin.settings.openaiExperimentalScheduler.smartAndExperimentalRelation") }}
                   </p>
                 </div>
                 <Toggle
@@ -7176,58 +7161,6 @@
 
 	        <!-- Tab: Features (功能开关) -->
 	        <div v-show="activeTab === 'features'" class="space-y-6">
-
-        <div class="card">
-          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
-              {{ t('admin.settings.features.smartScheduling.title') }}
-            </h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              {{ t('admin.settings.features.smartScheduling.description') }}
-            </p>
-          </div>
-          <div class="p-6">
-            <div class="flex items-center justify-between">
-              <div>
-                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  {{ t('admin.settings.features.smartScheduling.enabled') }}
-                </label>
-                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t('admin.settings.features.smartScheduling.enabledHint') }}
-                </p>
-              </div>
-              <Toggle
-                v-model="form.smart_scheduling_enabled"
-                data-testid="smart-scheduling-toggle"
-              />
-            </div>
-            <div class="mt-5">
-              <label
-                for="smart-scheduling-first-output-timeout"
-                class="input-label"
-              >
-                {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutLabel') }}
-              </label>
-              <input
-                id="smart-scheduling-first-output-timeout"
-                v-model.number="form.openai_first_output_timeout_seconds"
-                type="number"
-                min="0"
-                max="300"
-                step="1"
-                data-testid="smart-scheduling-first-output-timeout"
-                class="input"
-              />
-              <p class="input-hint">
-                {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutHint') }}
-              </p>
-              <p class="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                {{ t('admin.settings.features.smartScheduling.firstOutputTimeoutRisk') }}
-              </p>
-            </div>
-          </div>
-        </div>
-
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
@@ -9806,8 +9739,6 @@ type SettingsForm = Omit<
   google_oauth_client_secret: string;
   force_email_on_third_party_signup: boolean;
   openai_low_upstream_rate_priority_enabled: boolean;
-  smart_scheduling_enabled: boolean;
-  openai_first_output_timeout_seconds: number;
   openai_oauth_scheduling_rate_multiplier: number | "" | null;
   openai_advanced_scheduler_enabled: boolean;
   openai_advanced_scheduler_sticky_weighted_enabled: boolean;
@@ -10059,8 +9990,6 @@ const form = reactive<SettingsForm>({
   // 分组隔离
   allow_ungrouped_key_scheduling: false,
   openai_low_upstream_rate_priority_enabled: false,
-  smart_scheduling_enabled: false,
-  openai_first_output_timeout_seconds: 30,
   openai_oauth_scheduling_rate_multiplier: 1,
   openai_advanced_scheduler_enabled: false,
   openai_advanced_scheduler_sticky_weighted_enabled: false,
@@ -11112,18 +11041,6 @@ async function loadSettings() {
     const settings = await adminAPI.settings.getSettings();
     settings.payment_load_balance_strategy =
       settings.payment_load_balance_strategy || "round-robin";
-    if (
-      !Object.prototype.hasOwnProperty.call(settings, "smart_scheduling_enabled") ||
-      settings.smart_scheduling_enabled == null
-    ) {
-      form.smart_scheduling_enabled = false;
-    }
-    if (
-      !Object.prototype.hasOwnProperty.call(settings, "openai_first_output_timeout_seconds") ||
-      settings.openai_first_output_timeout_seconds == null
-    ) {
-      form.openai_first_output_timeout_seconds = 30;
-    }
     // Only assign non-null values from backend (null means unconfigured, keep defaults)
     for (const [key, value] of Object.entries(settings)) {
       if (value !== null && value !== undefined) {
@@ -11394,14 +11311,6 @@ const siteBillingModeHint = computed(() =>
 async function saveSettings() {
   saving.value = true;
   try {
-    if (
-      !Number.isInteger(form.openai_first_output_timeout_seconds) ||
-      form.openai_first_output_timeout_seconds < 0 ||
-      form.openai_first_output_timeout_seconds > 300
-    ) {
-      appStore.showError(t("admin.settings.features.smartScheduling.firstOutputTimeoutInvalid"));
-      return;
-    }
     const normalizedTableDefaultPageSize = Math.floor(
       Number(form.table_default_page_size),
     );
@@ -11824,9 +11733,6 @@ async function saveSettings() {
         form.payment_alipay_mobile_precreate_deep_link,
       openai_low_upstream_rate_priority_enabled:
         form.openai_low_upstream_rate_priority_enabled,
-      smart_scheduling_enabled: form.smart_scheduling_enabled,
-      openai_first_output_timeout_seconds:
-        form.openai_first_output_timeout_seconds,
       openai_oauth_scheduling_rate_multiplier:
         oauthSchedulingRate === "" ? null : oauthSchedulingRate,
       openai_advanced_scheduler_enabled: form.openai_advanced_scheduler_enabled,

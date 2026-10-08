@@ -453,10 +453,6 @@ export default {
         overloadedUntil: '负载过重，重置时间：{time}',
         viewTempUnschedDetails: '查看临时不可调度详情',
         tempUnschedulableUntil: '预计 {time} 恢复',
-        smartHealthCooldown: '回避冷却',
-        smartHealthReady: '等待探测',
-        smartHealthProbing: '正在探测',
-        smartHealthNextProbeTime: '下次探测时间：{time}'
       },
       tempUnschedulable: {
         title: '临时不可调度',

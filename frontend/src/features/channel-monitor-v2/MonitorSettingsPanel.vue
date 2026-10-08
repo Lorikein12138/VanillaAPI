@@ -81,13 +81,6 @@
             </button>
           </div>
         </div>
-        <div class="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-          <div>
-            <strong class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('channelMonitorV2.settings.syntheticEmptyBucketsTitle') }}</strong>
-            <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">{{ t('channelMonitorV2.settings.syntheticEmptyBucketsHint') }}</p>
-          </div>
-          <Toggle v-model="syntheticEmptyBucketsEnabled" />
-        </div>
       </div>
 
       <div class="card overflow-hidden !rounded-3xl !border-0 shadow-sm ring-1 ring-gray-900/5 dark:!bg-dark-800 dark:ring-dark-700">
@@ -293,12 +286,6 @@ const saving = ref(false)
 const draft = ref<MonitorConfig | null>(null)
 const original = ref('')
 const groups = ref<AdminGroup[]>([])
-const syntheticEmptyBucketsEnabled = computed({
-  get: () => Boolean(draft.value?.synthetic_empty_buckets_enabled),
-  set: (value: boolean) => {
-    if (draft.value) draft.value.synthetic_empty_buckets_enabled = value
-  },
-})
 
 const dirty = computed(() => (draft.value ? JSON.stringify(draft.value) !== original.value : false))
 const namedModelCount = computed(
@@ -432,12 +419,14 @@ function normalizeConfig(value: MonitorConfig, availableGroups?: AdminGroup[]): 
       : 'all'
   const existingGroupIDs = availableGroups ? new Set(availableGroups.map((group) => group.id)) : null
   return {
-    ...value,
+    version: value.version,
+    enabled: value.enabled,
+    refresh_interval_seconds: value.refresh_interval_seconds,
+    platforms: value.platforms,
     group_scope_mode: groupScopeMode,
     group_ids: groupScopeMode === 'all'
       ? []
       : groupIDs.filter((id) => existingGroupIDs == null || existingGroupIDs.has(id)),
-    synthetic_empty_buckets_enabled: value.synthetic_empty_buckets_enabled ?? false,
     health_thresholds: { ...defaultThresholds, ...(value.health_thresholds || {}) },
     // Preserve explicit empty arrays from the server (operator cleared all).
     ignored_error_categories: [

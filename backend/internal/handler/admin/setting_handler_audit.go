@@ -512,12 +512,6 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.OpenAILowUpstreamRatePriorityEnabled != after.OpenAILowUpstreamRatePriorityEnabled {
 		changed = append(changed, "openai_low_upstream_rate_priority_enabled")
 	}
-	if before.SmartSchedulingEnabled != after.SmartSchedulingEnabled {
-		changed = append(changed, "smart_scheduling_enabled")
-	}
-	if before.OpenAIFirstOutputTimeoutSeconds != after.OpenAIFirstOutputTimeoutSeconds {
-		changed = append(changed, "openai_first_output_timeout_seconds")
-	}
 	if !equalNullableFloat(before.OpenAIOAuthSchedulingRateMultiplier, after.OpenAIOAuthSchedulingRateMultiplier) {
 		changed = append(changed, "openai_oauth_scheduling_rate_multiplier")
 	}

@@ -568,7 +568,6 @@ const refreshing = ref(false)
 const expandedErrors = ref(new Set<string>())
 let controller: AbortController | null = null
 let sequence = 0
-let refreshAsOf = new Date().toISOString()
 let autoRefreshTimer: number | null = null
 
 const hasDimensionFilter = computed(
@@ -711,7 +710,7 @@ function syncQuery() {
   })
 }
 /** Dimensions catalog: range only — never re-filtered by platform/group/model selection. */
-async function loadDimensions(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
+async function loadDimensions(signal?: AbortSignal, id = sequence) {
   if (id === sequence) dimensionsReady.value = false
   const rangeOnly: MonitorFilter = {
     range: filter.value.range,
@@ -719,29 +718,22 @@ async function loadDimensions(signal?: AbortSignal, id = sequence, asOf = refres
     groupIds: [],
     models: [],
   }
-  const next = isAdmin.value
-    ? await api.getAdminPresentationDimensions(rangeOnly, signal, asOf)
-    : await api.getDimensions(rangeOnly, false, signal, asOf)
+  const next = await api.getDimensions(rangeOnly, isAdmin.value, signal)
   if (id !== sequence) return
   dimensions.value = next
   dimensionsReady.value = true
 }
 
-async function loadMetrics(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
-  const [nextSnapshot, nextMatrix] = isAdmin.value
-    ? await Promise.all([
-        api.getAdminPresentationSnapshot(filter.value, signal, asOf),
-        api.getAdminPresentationMatrix(filter.value, matrixGroupBy.value, signal, asOf),
-      ])
-    : await Promise.all([
-        api.getSnapshot(filter.value, false, signal, asOf),
-        api.getMatrix(filter.value, matrixGroupBy.value, false, signal, asOf),
-      ])
+async function loadMetrics(signal?: AbortSignal, id = sequence) {
+  const [nextSnapshot, nextMatrix] = await Promise.all([
+    api.getSnapshot(filter.value, isAdmin.value, signal),
+    api.getMatrix(filter.value, matrixGroupBy.value, isAdmin.value, signal),
+  ])
   if (id !== sequence) return
   snapshot.value = nextSnapshot
   matrix.value = nextMatrix
   scheduleAutoRefresh()
-  await loadTab(signal, id, asOf)
+  await loadTab(signal, id)
 }
 
 async function reload(silent = true) {
@@ -749,15 +741,13 @@ async function reload(silent = true) {
   const request = new AbortController()
   controller = request
   const id = ++sequence
-  const asOf = new Date().toISOString()
-  refreshAsOf = asOf
   refreshing.value = true
   if (!silent) loading.value = true
   try {
     // Catalog + metrics in parallel; catalog ignores dimension filters so options never shrink.
     await Promise.all([
-      loadDimensions(request.signal, id, asOf),
-      loadMetrics(request.signal, id, asOf),
+      loadDimensions(request.signal, id),
+      loadMetrics(request.signal, id),
     ])
   } catch (error) {
     if ((error as { name?: string }).name !== 'CanceledError') {
@@ -772,20 +762,18 @@ async function reload(silent = true) {
   }
 }
 
-/** Filter and grouping changes start a fresh anchored read while dimensions stay range-only. */
+/** Filter and grouping changes start a fresh read while dimensions stay range-only. */
 async function reloadMetricsOnly(silent = true) {
   controller?.abort()
   const request = new AbortController()
   controller = request
   const id = ++sequence
-  const asOf = new Date().toISOString()
-  refreshAsOf = asOf
   refreshing.value = true
   if (!silent) loading.value = true
   try {
     await Promise.all([
-      loadDimensions(request.signal, id, asOf),
-      loadMetrics(request.signal, id, asOf),
+      loadDimensions(request.signal, id),
+      loadMetrics(request.signal, id),
     ])
   } catch (error) {
     if ((error as { name?: string }).name !== 'CanceledError') {
@@ -799,21 +787,15 @@ async function reloadMetricsOnly(silent = true) {
     }
   }
 }
-async function loadTab(signal?: AbortSignal, id = sequence, asOf = refreshAsOf) {
+async function loadTab(signal?: AbortSignal, id = sequence) {
   tabLoading.value = true
   try {
     if (activeTab.value === 'models') {
-      modelRows.value = (await (isAdmin.value
-        ? api.getAdminPresentationModels(filter.value, signal, asOf)
-        : api.getModels(filter.value, false, signal, asOf))).items || []
+      modelRows.value = (await api.getModels(filter.value, isAdmin.value, signal)).items || []
     } else if (activeTab.value === 'errors') {
-      errorRows.value = (await (isAdmin.value
-        ? api.getAdminPresentationErrors(filter.value, signal, asOf)
-        : api.getErrors(filter.value, false, signal, asOf))).items || []
+      errorRows.value = (await api.getErrors(filter.value, isAdmin.value, signal)).items || []
     } else if (showUserRanking.value) {
-      userRows.value = (await (isAdmin.value
-        ? api.getAdminPresentationUsers(filter.value, signal, asOf)
-        : api.getUsers(filter.value, false, signal, asOf))).items || []
+      userRows.value = (await api.getUsers(filter.value, isAdmin.value, signal)).items || []
     } else {
       userRows.value = []
     }

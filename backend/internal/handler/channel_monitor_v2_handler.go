@@ -3,11 +3,9 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -94,115 +92,15 @@ func (h *ChannelMonitorV2Handler) Dimensions(c *gin.Context) {
 
 func (h *ChannelMonitorV2Handler) Snapshot(c *gin.Context)      { h.snapshot(c, false) }
 func (h *ChannelMonitorV2Handler) AdminSnapshot(c *gin.Context) { h.snapshot(c, true) }
-func (h *ChannelMonitorV2Handler) PresentationSnapshot(c *gin.Context) {
-	h.presentationSnapshot(c)
-}
+
 func (h *ChannelMonitorV2Handler) Models(c *gin.Context)      { h.models(c, false) }
 func (h *ChannelMonitorV2Handler) AdminModels(c *gin.Context) { h.models(c, true) }
-func (h *ChannelMonitorV2Handler) PresentationModels(c *gin.Context) {
-	h.presentationModels(c)
-}
+
 func (h *ChannelMonitorV2Handler) Matrix(c *gin.Context)      { h.matrix(c, false) }
 func (h *ChannelMonitorV2Handler) AdminMatrix(c *gin.Context) { h.matrix(c, true) }
-func (h *ChannelMonitorV2Handler) PresentationMatrix(c *gin.Context) {
-	h.presentationMatrix(c)
-}
+
 func (h *ChannelMonitorV2Handler) Users(c *gin.Context)      { h.users(c, false) }
 func (h *ChannelMonitorV2Handler) AdminUsers(c *gin.Context) { h.users(c, true) }
-func (h *ChannelMonitorV2Handler) PresentationUsers(c *gin.Context) {
-	h.presentationUsers(c)
-}
-
-func (h *ChannelMonitorV2Handler) PresentationDimensions(c *gin.Context) {
-	filter, ok := h.parseFilter(c)
-	if !ok || !h.scopeFilter(c, &filter, true) {
-		return
-	}
-	result, err := h.service.PresentationDimensions(c.Request.Context(), filter)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
-}
-
-func (h *ChannelMonitorV2Handler) PresentationErrors(c *gin.Context) {
-	filter, ok := h.parseFilter(c)
-	if !ok || !h.scopeFilter(c, &filter, true) {
-		return
-	}
-	result, err := h.service.PresentationErrors(c.Request.Context(), filter)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
-}
-
-func (h *ChannelMonitorV2Handler) presentationSnapshot(c *gin.Context) {
-	filter, ok := h.parseFilter(c)
-	if !ok || !h.scopeFilter(c, &filter, true) {
-		return
-	}
-	result, err := h.service.PresentationSnapshot(c.Request.Context(), filter)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
-}
-
-func (h *ChannelMonitorV2Handler) presentationModels(c *gin.Context) {
-	filter, ok := h.parseFilter(c)
-	if !ok || !h.scopeFilter(c, &filter, true) {
-		return
-	}
-	result, err := h.service.PresentationModels(c.Request.Context(), filter)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
-}
-
-func (h *ChannelMonitorV2Handler) presentationMatrix(c *gin.Context) {
-	filter, ok := h.parseFilter(c)
-	if !ok {
-		return
-	}
-	groupBy, err := service.ParseChannelMonitorV2GroupBy(c.Query("group_by"))
-	if err != nil {
-		response.BadRequest(c, err.Error())
-		return
-	}
-	if !h.scopeFilter(c, &filter, true) {
-		return
-	}
-	result, err := h.service.PresentationMatrix(c.Request.Context(), filter, groupBy)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
-}
-
-func (h *ChannelMonitorV2Handler) presentationUsers(c *gin.Context) {
-	filter, ok := h.parseFilter(c)
-	if !ok || !h.scopeFilter(c, &filter, true) {
-		return
-	}
-	subject, exists := middleware.GetAuthSubjectFromContext(c)
-	if !exists {
-		response.Error(c, http.StatusUnauthorized, "user not found in context")
-		return
-	}
-	result, err := h.service.PresentationUsers(c.Request.Context(), filter, subject.UserID)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, result)
-}
 
 func (h *ChannelMonitorV2Handler) snapshot(c *gin.Context, admin bool) {
 	filter, ok := h.parseFilter(c)
@@ -327,37 +225,12 @@ func (h *ChannelMonitorV2Handler) parseFilter(c *gin.Context) (service.ChannelMo
 		response.BadRequest(c, "invalid group_id")
 		return service.ChannelMonitorV2Filter{}, false
 	}
-	asOf, err := parseChannelMonitorV2AsOf(c.Query("as_of"), time.Now().UTC())
-	if err != nil {
-		response.BadRequest(c, err.Error())
-		return service.ChannelMonitorV2Filter{}, false
-	}
-	filter, err := h.service.ParseFilterAt(c.Query("range"), queryList(c, "platform"), queryList(c, "model"), groups, asOf)
+	filter, err := h.service.ParseFilter(c.Query("range"), queryList(c, "platform"), queryList(c, "model"), groups)
 	if err != nil {
 		response.BadRequest(c, err.Error())
 		return service.ChannelMonitorV2Filter{}, false
 	}
 	return filter, true
-}
-
-func parseChannelMonitorV2AsOf(value string, now time.Time) (time.Time, error) {
-	now = now.UTC()
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return now, nil
-	}
-	asOf, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("%w: must be an RFC3339 timestamp", service.ErrChannelMonitorV2InvalidAsOf)
-	}
-	asOf = asOf.UTC()
-	if asOf.After(now.Add(time.Minute)) {
-		return time.Time{}, fmt.Errorf("%w: timestamp is too far in the future", service.ErrChannelMonitorV2InvalidAsOf)
-	}
-	if asOf.Before(now.Add(-24 * time.Hour)) {
-		return time.Time{}, fmt.Errorf("%w: timestamp is too old", service.ErrChannelMonitorV2InvalidAsOf)
-	}
-	return asOf, nil
 }
 
 func queryList(c *gin.Context, key string) []string {

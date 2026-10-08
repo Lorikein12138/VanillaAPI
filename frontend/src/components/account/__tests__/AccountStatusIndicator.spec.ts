@@ -97,105 +97,31 @@ describe('AccountStatusIndicator', () => {
     expect(wrapper.text()).not.toContain('claude-sonnet-5')
   })
 
-  it('renders smart health in one primary status badge', () => {
-    const states = [
-      { state: 'cooldown' as const, reason: 'error_rate' as const, next_probe_at: '2099-07-28T13:00:00Z', backoff_step: 1 },
-      { state: 'ready' as const, reason: 'ttft' as const, next_probe_at: null, backoff_step: 2 },
-      { state: 'probing' as const, reason: 'error_rate' as const, next_probe_at: null, backoff_step: 3 }
-    ]
-    const expected = [
-      'admin.accounts.status.smartHealthCooldown',
-      'admin.accounts.status.smartHealthReady',
-      'admin.accounts.status.smartHealthProbing'
-    ]
-
-    states.forEach((smart_health, index) => {
-      const wrapper = mount(AccountStatusIndicator, {
-        props: { account: makeAccount({ smart_health }) },
-        global: { stubs: { Icon: true } }
-      })
-      expect(wrapper.findAll('.badge')).toHaveLength(1)
-      expect(wrapper.find('.badge-warning').text()).toBe(expected[index])
-      wrapper.unmount()
-    })
-  })
-
-  it('shows the local absolute cooldown time and changes to ready at expiry', async () => {
-    vi.useFakeTimers()
-    const now = new Date('2026-09-23T12:00:00.000Z')
-    vi.setSystemTime(now)
+  it('ignores a retired health snapshot and keeps the ordinary active status', () => {
+    const account = {
+      ...makeAccount({}),
+      smart_health: { state: 'cooldown', reason: 'ttft', next_probe_at: '2099-07-28T13:00:00Z', backoff_step: 1 }
+    } as Account
     const wrapper = mount(AccountStatusIndicator, {
-      props: {
-        account: makeAccount({
-          smart_health: {
-            state: 'cooldown',
-            reason: 'ttft',
-            next_probe_at: '2026-09-23T12:01:00.000Z',
-            backoff_step: 1
-          }
-        })
-      },
+      props: { account },
       global: { stubs: { Icon: true } }
     })
-
     expect(wrapper.findAll('.badge')).toHaveLength(1)
-    expect(wrapper.text()).toContain('admin.accounts.status.smartHealthCooldown')
-    expect(wrapper.text()).toContain('local:')
-    expect(wrapper.find('[aria-label*="smartHealthNextProbeTime"]').attributes('aria-label')).toContain('local:')
-    await vi.advanceTimersByTimeAsync(60_000)
-    expect(wrapper.text()).toContain('admin.accounts.status.smartHealthReady')
+    expect(wrapper.find('.badge').text()).toBe('admin.accounts.status.active')
+    expect(wrapper.text()).not.toContain('smartHealth')
     expect(wrapper.text()).not.toContain('local:')
-    expect(wrapper.findAll('.badge')).toHaveLength(1)
     wrapper.unmount()
-    vi.useRealTimers()
   })
 
-  it('splits a cooldown longer than the setTimeout limit instead of overflowing the delay', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-09-23T12:00:00.000Z'))
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
-    const wrapper = mount(AccountStatusIndicator, {
-      props: {
-        account: makeAccount({
-          smart_health: {
-            state: 'cooldown',
-            reason: 'ttft',
-            next_probe_at: '2099-07-28T13:00:00Z',
-            backoff_step: 1
-          }
-        })
-      },
-      global: { stubs: { Icon: true } }
-    })
-
-    const delays = setTimeoutSpy.mock.calls.map(([, delay]) => Number(delay))
-    expect(delays.length).toBeGreaterThan(0)
-    expect(Math.max(...delays)).toBeLessThanOrEqual(2_147_483_647)
-
-    await vi.advanceTimersByTimeAsync(2_147_483_647)
-    expect(wrapper.text()).toContain('admin.accounts.status.smartHealthCooldown')
-    expect(vi.getTimerCount()).toBeGreaterThan(0)
-    wrapper.unmount()
-    setTimeoutSpy.mockRestore()
-  })
-
-  it('falls back for invalid snapshots and exposes health accessibly beside every hard status', () => {
-    const normal = mount(AccountStatusIndicator, {
-      props: { account: makeAccount({}) },
-      global: { stubs: { Icon: true } }
-    })
-    expect(normal.text()).not.toContain('smartHealth')
-    expect(normal.findAll('.badge')).toHaveLength(1)
-    normal.unmount()
-
-    const cases: { overrides: Partial<Account>; label: string; health: string; hasDeadline?: boolean }[] = [
-      { overrides: { rate_limit_reset_at: '2099-07-28T13:00:00Z', smart_health: { state: 'ready', reason: 'ttft', next_probe_at: null, backoff_step: 1 } }, label: 'rateLimited', health: 'smartHealthReady' },
-      { overrides: { overload_until: '2099-07-28T13:00:00Z', smart_health: { state: 'probing', reason: 'ttft', next_probe_at: null, backoff_step: 1 } }, label: 'overloaded', health: 'smartHealthProbing' },
-      { overrides: { status: 'error' as const, smart_health: { state: 'cooldown' as const, reason: 'error_rate' as const, next_probe_at: '2099-07-28T13:00:00Z', backoff_step: 1 } }, label: 'error', health: 'smartHealthCooldown', hasDeadline: true },
-      { overrides: { temp_unschedulable_until: '2099-07-28T13:00:00Z', smart_health: { state: 'ready', reason: 'ttft', next_probe_at: null, backoff_step: 1 } }, label: 'tempUnschedulable', health: 'smartHealthReady' },
-      { overrides: { status: 'inactive' as const, smart_health: { state: 'ready', reason: 'ttft', next_probe_at: null, backoff_step: 1 } }, label: 'inactive', health: 'smartHealthReady' },
-      { overrides: { quota_used: 100, quota_limit: 100, smart_health: { state: 'probing', reason: 'ttft', next_probe_at: null, backoff_step: 1 } }, label: 'quotaExceeded', health: 'smartHealthProbing' },
-      { overrides: { schedulable: false, smart_health: { state: 'ready', reason: 'ttft', next_probe_at: null, backoff_step: 1 } }, label: 'paused', health: 'smartHealthReady' }
+  it('keeps rate limits, overload, errors, temporary suspension and ordinary status badges', () => {
+    const cases: { overrides: Partial<Account>; label: string }[] = [
+      { overrides: { rate_limit_reset_at: '2099-07-28T13:00:00Z' }, label: 'rateLimited' },
+      { overrides: { overload_until: '2099-07-28T13:00:00Z' }, label: 'overloaded' },
+      { overrides: { status: 'error' }, label: 'error' },
+      { overrides: { temp_unschedulable_until: '2099-07-28T13:00:00Z' }, label: 'tempUnschedulable' },
+      { overrides: { status: 'inactive' }, label: 'inactive' },
+      { overrides: { quota_used: 100, quota_limit: 100 }, label: 'quotaExceeded' },
+      { overrides: { schedulable: false }, label: 'paused' }
     ]
     for (const item of cases) {
       const wrapper = mount(AccountStatusIndicator, {
@@ -203,43 +129,10 @@ describe('AccountStatusIndicator', () => {
         global: { stubs: { Icon: true } }
       })
       expect(wrapper.findAll('.badge')).toHaveLength(1)
-      const mainBadge = wrapper.find('.badge')
-      expect(mainBadge.text()).toContain(`admin.accounts.status.${item.label}`)
-      expect(mainBadge.attributes('aria-label')).toContain(`admin.accounts.status.${item.health}`)
-      if (item.hasDeadline) {
-        expect(mainBadge.attributes('aria-label')).toContain('smartHealthNextProbeTime')
-        expect(mainBadge.attributes('aria-label')).toContain('local:')
-      }
+      expect(wrapper.find('.badge').text()).toContain(`admin.accounts.status.${item.label}`)
+      expect(wrapper.text()).not.toContain('smartHealth')
       wrapper.unmount()
     }
-
-    const invalidCooldown = mount(AccountStatusIndicator, {
-      props: {
-        account: makeAccount({
-          smart_health: { state: 'cooldown', reason: 'ttft', next_probe_at: 'invalid-date', backoff_step: 1 }
-        })
-      },
-      global: { stubs: { Icon: true } }
-    })
-    expect(invalidCooldown.find('.badge').text()).toBe('admin.accounts.status.active')
-    expect(invalidCooldown.text()).not.toContain('smartHealth')
-    expect(invalidCooldown.text()).not.toContain('local:')
-    invalidCooldown.unmount()
-
-    const unknownSnapshot = {
-      state: 'unknown',
-      reason: 'ttft',
-      next_probe_at: '2099-07-28T13:00:00Z',
-      backoff_step: 1
-    } as unknown as NonNullable<Account['smart_health']>
-    const invalidState = mount(AccountStatusIndicator, {
-      props: { account: makeAccount({ smart_health: unknownSnapshot }) },
-      global: { stubs: { Icon: true } }
-    })
-    expect(invalidState.find('.badge').text()).toBe('admin.accounts.status.active')
-    expect(invalidState.text()).not.toContain('smartHealth')
-    expect(invalidState.text()).not.toContain('local:')
-    invalidState.unmount()
   })
 
   it('Grok 账号额度限流时显示自动恢复时间而非临时不可调度', () => {

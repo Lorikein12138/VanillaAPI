@@ -237,51 +237,40 @@ describe('admin AccountsView lite account list', () => {
     wrapper.unmount()
   })
 
-  it('preserves smart_health on a 304 and replaces the row when a 200 changes only smart_health', async () => {
+  it('preserves the row on a 304 and replaces it when concurrency changes', async () => {
     vi.useFakeTimers()
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
     localStorage.setItem('account-auto-refresh', JSON.stringify({ enabled: true, interval_seconds: 5 }))
-    const cooldownRow = {
+    const initialRow = {
       ...listRow,
       updated_at: '2026-03-15T00:00:00Z',
-      smart_health: {
-        state: 'cooldown',
-        reason: 'error_rate',
-        next_probe_at: '2099-07-28T13:00:00Z',
-        backoff_step: 2
-      }
+      current_concurrency: 0,
+      scheduler_score: { base_score: 90, sticky_weighted_enabled: false }
     }
-    const readyRow = {
-      ...cooldownRow,
-      smart_health: {
-        state: 'ready',
-        reason: 'error_rate',
-        next_probe_at: null,
-        backoff_step: 2
-      }
-    }
-    listAccounts.mockResolvedValueOnce({ items: [cooldownRow], total: 1, page: 1, page_size: 20, pages: 1 })
+    const changedRow = { ...initialRow, current_concurrency: 1 }
+    listAccounts.mockResolvedValueOnce({ items: [initialRow], total: 1, page: 1, page_size: 20, pages: 1 })
     listWithEtag
-      .mockResolvedValueOnce({ notModified: true, etag: 'smart-etag-1', data: null })
+      .mockResolvedValueOnce({ notModified: true, etag: 'account-etag-1', data: null })
       .mockResolvedValueOnce({
         notModified: false,
-        etag: 'smart-etag-2',
-        data: { items: [readyRow], total: 1, page: 1, page_size: 20, pages: 1 }
+        etag: 'account-etag-2',
+        data: { items: [changedRow], total: 1, page: 1, page_size: 20, pages: 1 }
       })
-
     const wrapper = mountView()
     await flushPromises()
-    const rows = () => wrapper.getComponent(DataTableStub).props('data') as Array<typeof cooldownRow>
-    expect(rows()[0].smart_health.state).toBe('cooldown')
-
+    const rows = () => wrapper.getComponent(DataTableStub).props('data') as Array<typeof initialRow>
+    expect(rows()[0].current_concurrency).toBe(0)
+    expect(rows()[0]).not.toHaveProperty('smart_health')
     await vi.advanceTimersByTimeAsync(6000)
     await flushPromises()
-    expect(rows()[0].smart_health.state).toBe('cooldown')
-
+    expect(rows()[0].current_concurrency).toBe(0)
+    expect(rows()[0].scheduler_score.base_score).toBe(90)
     await vi.advanceTimersByTimeAsync(6000)
     await flushPromises()
-    expect(rows()[0].updated_at).toBe(cooldownRow.updated_at)
-    expect(rows()[0].smart_health.state).toBe('ready')
+    expect(rows()[0].updated_at).toBe(initialRow.updated_at)
+    expect(rows()[0].current_concurrency).toBe(1)
+    expect(rows()[0].scheduler_score.base_score).toBe(90)
+    expect(rows()[0]).not.toHaveProperty('smart_health')
     wrapper.unmount()
   })
 

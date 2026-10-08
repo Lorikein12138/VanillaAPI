@@ -14,16 +14,6 @@ export default {
         payment: '支付设置',
       },
       features: {
-        smartScheduling: {
-          title: '智能调度',
-          description: '保留模型、能力、传输、配额和熔断门槛，优先选近期健康数据充足的账号。',
-          enabled: '启用智能调度',
-          enabledHint: '开启后按健康状态选账；与 OpenAI 实验调度独立，可分别开启。',
-          firstOutputTimeoutLabel: '首个语义输出超时（秒）',
-          firstOutputTimeoutHint: '0–300 的整数，默认 30；0 为关闭。仅开启智能调度时生效，关闭后按 config.yaml。',
-          firstOutputTimeoutRisk: '语义输出前超时可能换号一次。上游可能已处理并计费，重试可能重复计费。',
-          firstOutputTimeoutInvalid: '首个语义输出超时请输入 0–300 的整数。',
-        },
         channelMonitor: {
           title: '渠道监控',
           description: '启用后在 V1 主动探测与 V2 被动用量监控中二选一。关闭后两种模式的后台任务均停止，用户端入口隐藏。',
@@ -1269,9 +1259,6 @@ export default {
       openaiExperimentalScheduler: {
         title: 'OpenAI 实验调度策略',
         description: '默认关闭。开启后仅影响本网关在 OpenAI 账号间的实验性调度选择逻辑，不代表上游 OpenAI 官方能力。',
-        smartDisabledRelation: '智能调度关闭时，本模块是唯一生效的实验调度策略。',
-        smartOnlyRelation: '智能调度已开启，但实验覆盖未开启；健康感知路由使用配置或内置默认评分。',
-        smartAndExperimentalRelation: '两个模块均已开启；这些实验参数只会在健康感知路由允许的账号池内排序。',
         lowRatePriorityTitle: '低倍率优先',
         lowRatePriorityDescription: '开启后优先选择计费倍率较低的账号；倍率相同时，再比较账号优先级和当前负载等。启用实验调度策略后，此开关不生效。',
         oauthRateTitle: 'OAuth 调度参考倍率',
