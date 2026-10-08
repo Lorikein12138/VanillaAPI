@@ -59,7 +59,7 @@ func plazaAccountModelPatterns(account *Account, requestPlatform string) []strin
 		return nil
 	}
 	crossPlatform := account.Platform != requestPlatform
-	if crossPlatform && !(account.Platform == PlatformAntigravity && plazaAntigravityServes(requestPlatform)) {
+	if crossPlatform && (account.Platform != PlatformAntigravity || !plazaAntigravityServes(requestPlatform)) {
 		return nil
 	}
 	if !crossPlatform && account.Platform == PlatformOpenAI && account.IsOpenAIPassthroughEnabled() {
