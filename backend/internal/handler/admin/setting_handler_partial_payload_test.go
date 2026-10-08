@@ -11,20 +11,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSmartSchedulingStall_SettingsAPIPartialPayload(t *testing.T) {
+func TestSettingHandler_IgnoresRetiredKeysInPartialPayload(t *testing.T) {
 	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
-		service.SettingKeyOpenAIFirstOutputTimeoutSeconds: "45",
+		"smart_scheduling_enabled":            "true",
+		"openai_first_output_timeout_seconds": "45",
 	})
 
-	rec := doUpdateSettings(t, h, map[string]any{"risk_control_enabled": true}, nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "45", repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
-
-	rec = doUpdateSettings(t, h, map[string]any{
+	rec := doUpdateSettings(t, h, map[string]any{
+		"risk_control_enabled":                true,
+		"smart_scheduling_enabled":            false,
 		"openai_first_output_timeout_seconds": 0,
 	}, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, "0", repo.values[service.SettingKeyOpenAIFirstOutputTimeoutSeconds])
+	require.Equal(t, "true", repo.values["smart_scheduling_enabled"])
+	require.Equal(t, "45", repo.values["openai_first_output_timeout_seconds"])
+	require.NotContains(t, repo.lastUpdates, "smart_scheduling_enabled")
+	require.NotContains(t, repo.lastUpdates, "openai_first_output_timeout_seconds")
+
+	rec = doUpdateSettings(t, h, map[string]any{"openai_first_output_timeout_seconds": 0}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "true", repo.values["smart_scheduling_enabled"])
+	require.Equal(t, "45", repo.values["openai_first_output_timeout_seconds"])
 }
 
 // Saving settings is a whole-document PUT. A client that sends only the field it

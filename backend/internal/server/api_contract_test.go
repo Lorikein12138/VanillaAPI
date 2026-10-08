@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"testing"
 	"time"
@@ -25,6 +26,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChannelMonitorV2RouteContractHasOnlyRealReads(t *testing.T) {
+	data, err := os.ReadFile("routes/admin.go")
+	require.NoError(t, err)
+	source := string(data)
+	require.NotContains(t, source, `monitor.Group("/presentation")`)
+	require.NotContains(t, source, "h.ChannelMonitorV2.Presentation")
+	for _, endpoint := range []string{"dimensions", "snapshot", "models", "matrix", "errors", "users"} {
+		t.Run(endpoint, func(t *testing.T) {
+			require.Contains(t, source, `reads.GET("/`+endpoint+`"`)
+		})
+	}
+	require.Contains(t, source, `config.GET("/config"`)
+	require.Contains(t, source, `config.PUT("/config"`)
+}
 
 func TestAPIContracts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -922,8 +938,6 @@ func TestAPIContracts(t *testing.T) {
 					"payment_visible_method_alipay_enabled": true,
 					"payment_visible_method_wxpay_enabled": false,
 					"openai_low_upstream_rate_priority_enabled": true,
-					"smart_scheduling_enabled": false,
-					"openai_first_output_timeout_seconds": 30,
 					"openai_oauth_scheduling_rate_multiplier": 0.05,
 					"openai_ttft_mode": "semantic",
 					"openai_advanced_scheduler_enabled": true,
@@ -1248,8 +1262,6 @@ func TestAPIContracts(t *testing.T) {
 					"payment_visible_method_alipay_enabled": false,
 					"payment_visible_method_wxpay_enabled": false,
 					"openai_low_upstream_rate_priority_enabled": false,
-					"smart_scheduling_enabled": false,
-					"openai_first_output_timeout_seconds": 30,
 					"openai_oauth_scheduling_rate_multiplier": 1,
 					"openai_ttft_mode": "semantic",
 					"openai_advanced_scheduler_enabled": false,
@@ -1429,6 +1441,10 @@ func TestAPIContracts(t *testing.T) {
 			status, body := doRequest(t, deps.router, tt.method, tt.path, tt.body, tt.headers)
 			require.Equal(t, tt.wantStatus, status)
 			require.JSONEq(t, tt.wantJSON, body)
+			if tt.path == "/api/v1/admin/settings" {
+				require.NotContains(t, body, "smart_scheduling_enabled")
+				require.NotContains(t, body, "openai_first_output_timeout_seconds")
+			}
 			if tt.path == "/api/v1/admin/accounts/bulk-update" {
 				require.Equal(t, []int64{101, 102}, deps.accountRepo.bulkUpdateIDs)
 				require.Equal(t, []int64{101, 102}, deps.accountRepo.getByIDsIDs)

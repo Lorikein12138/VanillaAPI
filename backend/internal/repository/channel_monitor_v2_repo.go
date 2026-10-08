@@ -25,13 +25,13 @@ func (r *channelMonitorV2Repository) GetConfig(ctx context.Context) (*service.Ch
 	var platforms, thresholds []byte
 	err := r.db.QueryRowContext(ctx, `
 		SELECT version, enabled, refresh_interval_seconds, platforms, group_ids,
-		       group_scope_mode, synthetic_empty_buckets_enabled,
+		       group_scope_mode,
 		       COALESCE(ignored_error_categories, '{}'),
 		       COALESCE(health_thresholds, '{}'::jsonb),
 		       updated_at, updated_by
 		FROM channel_monitor_v2_config WHERE id = 1`).Scan(
 		&cfg.Version, &cfg.Enabled, &cfg.RefreshIntervalSeconds, &platforms,
-		pq.Array(&cfg.GroupIDs), &cfg.GroupScopeMode, &cfg.SyntheticEmptyBucketsEnabled,
+		pq.Array(&cfg.GroupIDs), &cfg.GroupScopeMode,
 		pq.Array(&cfg.IgnoredErrorCategories),
 		&thresholds,
 		&cfg.UpdatedAt, &cfg.UpdatedBy,
@@ -72,18 +72,18 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 		UPDATE channel_monitor_v2_config
 		SET version = version + 1, enabled = $1, refresh_interval_seconds = $2,
 		    platforms = $3, group_ids = $4, group_scope_mode = $5,
-		    synthetic_empty_buckets_enabled = $6, ignored_error_categories = $7,
-		    health_thresholds = $8, updated_by = $9, updated_at = NOW()
-		WHERE id = 1 AND version = $10
+		    ignored_error_categories = $6,
+		    health_thresholds = $7, updated_by = $8, updated_at = NOW()
+		WHERE id = 1 AND version = $9
 		RETURNING version, enabled, refresh_interval_seconds, platforms, group_ids,
-		          group_scope_mode, synthetic_empty_buckets_enabled,
+		          group_scope_mode,
 		          COALESCE(ignored_error_categories, '{}'),
 		          COALESCE(health_thresholds, '{}'::jsonb),
 		          updated_at, updated_by`,
 		cfg.Enabled, cfg.RefreshIntervalSeconds, platforms, pq.Array(cfg.GroupIDs),
-		cfg.GroupScopeMode, cfg.SyntheticEmptyBucketsEnabled, pq.Array(cfg.IgnoredErrorCategories), thresholds, cfg.UpdatedBy, expectedVersion,
+		cfg.GroupScopeMode, pq.Array(cfg.IgnoredErrorCategories), thresholds, cfg.UpdatedBy, expectedVersion,
 	).Scan(&updated.Version, &updated.Enabled, &updated.RefreshIntervalSeconds, &raw,
-		pq.Array(&updated.GroupIDs), &updated.GroupScopeMode, &updated.SyntheticEmptyBucketsEnabled,
+		pq.Array(&updated.GroupIDs), &updated.GroupScopeMode,
 		pq.Array(&updated.IgnoredErrorCategories),
 		&rawThresholds,
 		&updated.UpdatedAt, &updated.UpdatedBy)

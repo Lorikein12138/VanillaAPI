@@ -200,7 +200,7 @@ func TestAccountHandlerGetAvailableModels_ExplicitMappingReturnsSortedKeys(t *te
 			Type:     service.AccountTypeAPIKey,
 			Status:   service.StatusActive,
 			Credentials: map[string]any{
-				"model_mapping": map[string]string{
+				"model_mapping": map[string]any{
 					" zeta-alias ": " target-zeta ",
 					"zeta-alias":   "other-target",
 					"alpha-alias":  "target-alpha",
@@ -224,6 +224,7 @@ func TestAccountHandlerGetAvailableModels_ExplicitMappingReturnsSortedKeys(t *te
 	}, models)
 	require.NotContains(t, rec.Body.String(), "target-alpha")
 	require.NotContains(t, rec.Body.String(), "target-zeta")
+	require.Equal(t, "target-alpha", svc.account.GetModelMapping()["alpha-alias"], "model listing preserves the account mapping cache")
 }
 
 func TestAccountHandlerGetAvailableModels_ExplicitMappingFiltersInvalidMixedEntries(t *testing.T) {

@@ -63,7 +63,7 @@ func TestOpenAIWSIngressEndedByClient_ClientCancelDuringTurnIsNotAccountFailure(
 	require.True(t, openAIWSIngressEndedByClient(err))
 }
 
-func TestSmartSchedulingStall_Cancel(t *testing.T) {
+func TestOpenAIClientCancelRemainsNeutral(t *testing.T) {
 	clientCancel := service.NewOpenAIWSClientCloseError(
 		coderws.StatusGoingAway, "websocket request canceled", context.Canceled)
 	cleanClientClose := coderws.CloseError{Code: coderws.StatusNormalClosure}
@@ -72,7 +72,7 @@ func TestSmartSchedulingStall_Cancel(t *testing.T) {
 	require.True(t, openAIWSIngressEndedByClient(cleanClientClose))
 }
 
-func TestSmartSchedulingStall_WS(t *testing.T) {
+func TestOpenAIWSTimeoutUsesBaselineFailureReporting(t *testing.T) {
 	firstOutputTimeout := service.NewOpenAIWSClientCloseError(
 		coderws.StatusGoingAway, "upstream produced no semantic output; please reconnect", context.DeadlineExceeded)
 	require.False(t, openAIWSIngressEndedByClient(firstOutputTimeout), "a gateway first-output timeout is not a client close")

@@ -238,8 +238,6 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		// 分组隔离（默认不允许未分组 Key 调度）
 		SettingKeyAllowUngroupedKeyScheduling:                        "false",
 		SettingKeyOpenAILowUpstreamRatePriorityEnabled:               "false",
-		SettingKeySmartSchedulingEnabled:                             "false",
-		SettingKeyOpenAIFirstOutputTimeoutSeconds:                    "30",
 		SettingKeyOpenAIOAuthSchedulingRateMultiplier:                "1",
 		SettingKeyEnableAnthropicCacheTTL1hInjection:                 "false",
 		SettingKeyRewriteMessageCacheControl:                         strconv.FormatBool(s.defaultRewriteMessageCacheControl()),
@@ -930,9 +928,6 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.PaymentVisibleMethodAlipayEnabled = settings[SettingPaymentVisibleMethodAlipayEnabled] == "true"
 	result.PaymentVisibleMethodWxpayEnabled = settings[SettingPaymentVisibleMethodWxpayEnabled] == "true"
 	result.OpenAILowUpstreamRatePriorityEnabled = settings[SettingKeyOpenAILowUpstreamRatePriorityEnabled] == "true"
-	result.SmartSchedulingEnabled = settings[SettingKeySmartSchedulingEnabled] == "true"
-	firstOutputTimeoutRaw, firstOutputTimeoutPresent := settings[SettingKeyOpenAIFirstOutputTimeoutSeconds]
-	result.OpenAIFirstOutputTimeoutSeconds = parseOpenAIFirstOutputTimeoutSeconds(firstOutputTimeoutRaw, firstOutputTimeoutPresent)
 	result.OpenAIOAuthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(settings)
 	result.OpenAIAdvancedSchedulerEnabled = settings[openAIAdvancedSchedulerSettingKey] == "true"
 	result.OpenAIAdvancedSchedulerStickyWeightedEnabled = settings[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled] == "true"
@@ -1148,22 +1143,6 @@ func (s *SettingService) normalizeOpenAIAdvancedSchedulerOverrides(settings *Sys
 		return infraerrors.BadRequest("INVALID_OPENAI_ADVANCED_SCHEDULER_WEIGHT", "openai advanced scheduler weights must have finite non-zero base and total sums")
 	}
 	return nil
-}
-
-func parseOpenAIFirstOutputTimeoutSeconds(raw string, present bool) int {
-	if !present {
-		return 30
-	}
-	seconds, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || seconds < 0 || seconds > 300 {
-		return 30
-	}
-	return seconds
-}
-
-func settingValuePresent(settings map[string]string, key string) bool {
-	_, ok := settings[key]
-	return ok
 }
 
 func parseOpenAIOAuthSchedulingRateMultiplier(settings map[string]string) *float64 {

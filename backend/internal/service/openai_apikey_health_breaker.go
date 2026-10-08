@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,18 +20,30 @@ func isOpenAIAPIKeyHealthBreakerAccount(account *Account) bool {
 }
 
 func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
-	if err == nil || !classifyOpenAIAccountFailure(err).attributable || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return 0, nil, false
 	}
 
 	var failoverErr *UpstreamFailoverError
 	if errors.As(err, &failoverErr) {
-		return failoverErr.StatusCode, failoverErr.ResponseBody, failoverErr != nil
+		// These failures already have dedicated recovery/state handling or are not
+		// attributable to the selected account.
+		if failoverErr.IsCredentialFailure() ||
+			failoverErr.RequestScopedTransient ||
+			failoverErr.RetryableOnSameAccount ||
+			failoverErr.Scope == GatewayFailureScopeRequest ||
+			failoverErr.Scope == GatewayFailureScopeProvider {
+			return failoverErr.StatusCode, failoverErr.ResponseBody, false
+		}
+		if failoverErr.StatusCode == http.StatusTooManyRequests || failoverErr.StatusCode >= http.StatusInternalServerError {
+			return failoverErr.StatusCode, failoverErr.ResponseBody, true
+		}
+		return failoverErr.StatusCode, failoverErr.ResponseBody, false
 	}
 
 	var imageErr *OpenAIImagesUpstreamError
 	if errors.As(err, &imageErr) {
-		if imageErr != nil && classifyOpenAIAccountFailure(imageErr).attributable {
+		if imageErr.StatusCode == http.StatusTooManyRequests || imageErr.StatusCode >= http.StatusInternalServerError {
 			return imageErr.StatusCode, []byte(strings.TrimSpace(imageErr.Message)), true
 		}
 	}

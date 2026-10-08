@@ -35,15 +35,7 @@ type stagedPassthroughConn struct {
 }
 
 func newStagedPassthroughConn() *stagedPassthroughConn {
-	return newStagedPassthroughConnWithFrameCapacity(4)
-}
-
-func newStagedPassthroughConnWithFrameCapacity(frameCapacity int) *stagedPassthroughConn {
-	return &stagedPassthroughConn{
-		frames: make(chan stagedPassthroughFrame, frameCapacity),
-		writes: make(chan []byte, 4),
-		closed: make(chan struct{}),
-	}
+	return &stagedPassthroughConn{frames: make(chan stagedPassthroughFrame, 4), writes: make(chan []byte, 4), closed: make(chan struct{})}
 }
 
 func (c *stagedPassthroughConn) Send(payload string) {
@@ -573,7 +565,6 @@ func TestPassthroughLifecycle_LeaseLossSendsRetryClose(t *testing.T) {
 	controlCtx, cancelControl := context.WithCancelCause(context.Background())
 	upstream := newStagedPassthroughConn()
 	upstream.Send(`{"type":"response.created","response":{"id":"resp_lease","model":"gpt-5.1"}}`)
-	upstream.Send(`{"type":"response.output_text.delta","response_id":"resp_lease","delta":"ready"}`)
 	server, serverErr := startPassthroughLifecycleServer(t, controlCtx, newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream), passthroughLifecycleAccount())
 	defer server.Close()
 	clientConn := dialPassthroughLifecycleClient(t, server)
@@ -582,9 +573,6 @@ func TestPassthroughLifecycle_LeaseLossSendsRetryClose(t *testing.T) {
 	event, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, "response.created", gjson.GetBytes(event, "type").String())
-	event, err = readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
-	require.NoError(t, err)
-	require.Equal(t, "response.output_text.delta", gjson.GetBytes(event, "type").String())
 	cancelControl(ErrOpenAIWSIngressLeaseLost)
 
 	_, err = readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
@@ -666,8 +654,11 @@ func TestPassthroughLifecycle_PreambleAllowsPromptClientCancel(t *testing.T) {
 	defer func() { _ = clientConn.CloseNow() }()
 	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
 
+	created, err := readPassthroughLifecycleFrame(t, clientConn, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
 	writeCtx, cancelWrite := context.WithTimeout(context.Background(), time.Second)
-	err := clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.cancel","response_id":"resp_cancel"}`))
+	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.cancel","response_id":"resp_cancel"}`))
 	cancelWrite()
 	require.NoError(t, err)
 	cancelFrame := requirePassthroughUpstreamWrite(t, upstream, 500*time.Millisecond)
@@ -694,8 +685,11 @@ func TestPassthroughLifecycle_RejectsOverlappingResponseCreate(t *testing.T) {
 	defer func() { _ = clientConn.CloseNow() }()
 	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
 
+	created, err := readPassthroughLifecycleFrame(t, clientConn, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
 	writeCtx, cancelWrite := context.WithTimeout(context.Background(), time.Second)
-	err := clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1"}`))
+	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1"}`))
 	cancelWrite()
 	require.NoError(t, err)
 
@@ -819,38 +813,7 @@ func TestPassthroughLifecycle_FirstOutputTimeoutRemainsBounded(t *testing.T) {
 	}
 }
 
-func TestSmartSchedulingStall_WS(t *testing.T) {
-	resetOpenAIAdvancedSchedulerSettingCacheForTest()
-	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
-	controlCtx, cancelControl := context.WithCancelCause(context.Background())
-	defer cancelControl(context.Canceled)
-	cfg := passthroughLifecycleConfig()
-	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 0
-	upstream := newStagedPassthroughConn()
-	svc := newPassthroughLifecycleService(cfg, upstream)
-	repo := &openAIAdvancedSchedulerSettingRepoStub{values: map[string]string{
-		SettingKeySmartSchedulingEnabled:          "true",
-		SettingKeyOpenAIFirstOutputTimeoutSeconds: "1",
-	}}
-	svc.rateLimitService = &RateLimitService{settingService: NewSettingService(repo, cfg)}
-	server, serverErr := startPassthroughLifecycleServer(t, controlCtx, svc, passthroughLifecycleAccount())
-	defer server.Close()
-	clientConn := dialPassthroughLifecycleClient(t, server)
-	defer func() { _ = clientConn.CloseNow() }()
-
-	select {
-	case err := <-serverErr:
-		var failoverErr *UpstreamFailoverError
-		require.ErrorAs(t, err, &failoverErr)
-		require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode,
-			"smart scheduling's one-second backend setting overrides the disabled YAML value")
-		require.Contains(t, string(failoverErr.ResponseBody), "first_output_timeout")
-	case <-time.After(2500 * time.Millisecond):
-		t.Fatal("WebSocket first semantic output was left unbounded")
-	}
-}
-
-func TestSmartSchedulingStall_WSPreambleTimeoutCanFailOver(t *testing.T) {
+func TestPassthroughLifecycle_ResponseCreatedTimeoutClosesWithoutFailover(t *testing.T) {
 	controlCtx, cancelControl := context.WithCancelCause(context.Background())
 	defer cancelControl(context.Canceled)
 	upstream := newStagedPassthroughConn()
@@ -860,110 +823,25 @@ func TestSmartSchedulingStall_WSPreambleTimeoutCanFailOver(t *testing.T) {
 	clientConn := dialPassthroughLifecycleClient(t, server)
 	defer func() { _ = clientConn.CloseNow() }()
 
-	readCtx, cancelRead := context.WithTimeout(context.Background(), 2500*time.Millisecond)
-	_, _, clientReadErr := clientConn.Read(readCtx)
-	cancelRead()
-	require.Error(t, clientReadErr, "pre-semantic metadata must remain private while failover is possible")
+	created, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
+	_, err = readPassthroughLifecycleFrame(t, clientConn, 2500*time.Millisecond)
+	var websocketCloseErr coderws.CloseError
+	require.ErrorAs(t, err, &websocketCloseErr)
+	require.Equal(t, coderws.StatusGoingAway, websocketCloseErr.Code)
+	require.Equal(t, "upstream produced no semantic output; please reconnect", websocketCloseErr.Reason)
 	select {
 	case err := <-serverErr:
 		var failoverErr *UpstreamFailoverError
-		require.ErrorAs(t, err, &failoverErr)
-		require.Equal(t, http.StatusGatewayTimeout, failoverErr.StatusCode)
-		require.True(t, failoverErr.SafeToFailoverAfterWrite)
-		require.Contains(t, string(failoverErr.ResponseBody), "first_output_timeout")
+		require.NotErrorAs(t, err, &failoverErr)
+		var closeErr *OpenAIWSClientCloseError
+		require.ErrorAs(t, err, &closeErr)
+		require.Equal(t, coderws.StatusGoingAway, closeErr.StatusCode())
+		require.Equal(t, "upstream produced no semantic output; please reconnect", closeErr.Reason())
 	case <-time.After(2500 * time.Millisecond):
-		t.Fatal("response.created timeout did not remain eligible for failover")
+		t.Fatal("response.created timeout did not close the passthrough connection")
 	}
-}
-
-func TestSmartSchedulingStall_WSStagingLimit(t *testing.T) {
-	controlCtx, cancelControl := context.WithCancelCause(context.Background())
-	defer cancelControl(context.Canceled)
-	upstream := newStagedPassthroughConnWithFrameCapacity(16)
-	for i := 0; i < 9; i++ {
-		upstream.Send(`{"type":"response.in_progress","padding":"` + strings.Repeat("x", 1<<20) + `"}`)
-	}
-	server, serverErr := startPassthroughLifecycleServer(t, controlCtx, newPassthroughLifecycleService(passthroughLifecycleConfig(), upstream), passthroughLifecycleAccount())
-	defer server.Close()
-	clientConn := dialPassthroughLifecycleClient(t, server)
-	defer func() { _ = clientConn.CloseNow() }()
-	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, time.Second), "type").String())
-
-	select {
-	case err := <-serverErr:
-		var failoverErr *UpstreamFailoverError
-		require.ErrorAs(t, err, &failoverErr)
-		require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
-		require.True(t, failoverErr.SafeToFailoverAfterWrite)
-		require.Contains(t, string(failoverErr.ResponseBody), "staging limit")
-	case <-time.After(3 * time.Second):
-		t.Fatal("oversized pre-semantic frames did not produce a bounded failover")
-	}
-	readCtx, cancelRead := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	_, _, clientReadErr := clientConn.Read(readCtx)
-	cancelRead()
-	require.Error(t, clientReadErr, "staged metadata must not leak before safe failover")
-}
-
-func TestPassthroughLifecycle_FirstOutputGuardTerminalBypass(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		terminal string
-		wantType string
-	}{
-		{name: "error", terminal: `{"type":"error"}`, wantType: "error"},
-		{name: "response failed", terminal: `{"type":"response.failed"}`, wantType: "response.failed"},
-		{name: "response incomplete", terminal: `{"type":"response.incomplete"}`, wantType: "response.incomplete"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			upstream := newStagedPassthroughConn()
-			upstream.Send(`{"type":"response.created","response":{}}`)
-			upstream.Send(tt.terminal)
-			guard := &openAIWSPassthroughFirstOutputFrameConn{
-				inner:                upstream,
-				firstSemanticPending: true,
-			}
-
-			msgType, payload, err := guard.ReadFrame(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, coderws.MessageText, msgType)
-			require.Equal(t, tt.wantType, gjson.GetBytes(payload, "type").String())
-			require.False(t, guard.hasStagedFrames(), "terminal failure must discard metadata staged before it")
-		})
-	}
-
-	t.Run("nonterminal metadata is replayed in order after semantic output", func(t *testing.T) {
-		upstream := newStagedPassthroughConn()
-		upstream.Send(`{"type":"response.created"}`)
-		upstream.Send(`{"type":"response.in_progress"}`)
-		upstream.Send(`{"type":"response.output_text.delta","delta":"ready"}`)
-		guard := &openAIWSPassthroughFirstOutputFrameConn{
-			inner:                upstream,
-			firstSemanticPending: true,
-		}
-
-		for _, wantType := range []string{"response.created", "response.in_progress", "response.output_text.delta"} {
-			msgType, payload, err := guard.ReadFrame(context.Background())
-			require.NoError(t, err)
-			require.Equal(t, coderws.MessageText, msgType)
-			require.Equal(t, wantType, gjson.GetBytes(payload, "type").String())
-		}
-	})
-
-	t.Run("staging cap remains enforced", func(t *testing.T) {
-		upstream := newStagedPassthroughConnWithFrameCapacity(openAIWSPassthroughFirstOutputStageMaxFrames + 1)
-		for i := 0; i <= openAIWSPassthroughFirstOutputStageMaxFrames; i++ {
-			upstream.Send(`{"type":"response.in_progress"}`)
-		}
-		guard := &openAIWSPassthroughFirstOutputFrameConn{
-			inner:                upstream,
-			firstSemanticPending: true,
-		}
-
-		_, _, err := guard.ReadFrame(context.Background())
-		require.ErrorIs(t, err, errOpenAIWSPassthroughFirstOutputStageLimit)
-		require.False(t, guard.hasStagedFrames())
-	})
 }
 
 func TestPassthroughLifecycle_SecondTurnTimeoutIsNotFailoverSafe(t *testing.T) {
@@ -975,7 +853,6 @@ func TestPassthroughLifecycle_SecondTurnTimeoutIsNotFailoverSafe(t *testing.T) {
 	defer server.Close()
 	clientConn := dialPassthroughLifecycleClient(t, server)
 	defer func() { _ = clientConn.CloseNow() }()
-	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, 3*time.Second), "type").String())
 
 	completed, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
 	require.NoError(t, err)
@@ -984,9 +861,11 @@ func TestPassthroughLifecycle_SecondTurnTimeoutIsNotFailoverSafe(t *testing.T) {
 	err = clientConn.Write(writeCtx, coderws.MessageText, []byte(`{"type":"response.create","model":"gpt-5.1","previous_response_id":"resp_first"}`))
 	cancelWrite()
 	require.NoError(t, err)
-	require.Equal(t, "response.create", gjson.GetBytes(requirePassthroughUpstreamWrite(t, upstream, 3*time.Second), "type").String())
 	upstream.Send(`{"type":"response.created","response":{"id":"resp_second","model":"gpt-5.1"}}`)
 
+	created, err := readPassthroughLifecycleFrame(t, clientConn, 3*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "response.created", gjson.GetBytes(created, "type").String())
 	_, err = readPassthroughLifecycleFrame(t, clientConn, 2500*time.Millisecond)
 	var websocketCloseErr coderws.CloseError
 	require.ErrorAs(t, err, &websocketCloseErr)

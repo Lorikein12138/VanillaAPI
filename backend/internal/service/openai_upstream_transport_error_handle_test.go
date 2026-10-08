@@ -6,10 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"syscall"
 	"testing"
 	"time"
 
@@ -86,8 +84,6 @@ func TestHandleOpenAIUpstreamTransportError_PersistentEvictsAndFailsOver(t *test
 	var fo *UpstreamFailoverError
 	require.True(t, errors.As(retErr, &fo), "persistent error must return *UpstreamFailoverError")
 	require.Equal(t, http.StatusBadGateway, fo.StatusCode)
-	require.True(t, fo.ShouldReportAccountScheduleFailure(), "explicit proxy credential rejection is account attributable")
-	require.Equal(t, openAIAccountFailureProxyAuthentication, fo.accountFailureAttribution)
 
 	// Persistent → account temporarily unscheduled for ~10min, reason carries cause.
 	require.Len(t, repo.tempUnschedCalls, 1)
@@ -132,7 +128,7 @@ func TestHandleOpenAIUpstreamTransportError_TransientFailsOverWithoutEviction(t 
 	require.Equal(t, 0, rec.Body.Len())
 }
 
-func TestHandleOpenAIUpstreamTransportError_AmbiguousNetworkFailsOverWithoutEviction(t *testing.T) {
+func TestHandleOpenAIUpstreamTransportErrorRestoresPersistentNetworkClassification(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
@@ -152,9 +148,14 @@ func TestHandleOpenAIUpstreamTransportError_AmbiguousNetworkFailsOverWithoutEvic
 			err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, tc.err, false)
 			var failoverErr *UpstreamFailoverError
 			require.ErrorAs(t, err, &failoverErr, "environment transport failures still use bounded account failover")
-			require.False(t, failoverErr.ShouldReportAccountScheduleFailure())
-			require.Empty(t, repo.tempUnschedCalls)
-			require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			require.True(t, failoverErr.ShouldReportAccountScheduleFailure())
+			if tc.name == "TLS handshake" {
+				require.Empty(t, repo.tempUnschedCalls)
+				require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			} else {
+				require.Len(t, repo.tempUnschedCalls, 1)
+				require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			}
 			require.Equal(t, 0, rec.Body.Len())
 			_, ok := c.Get(OpsUpstreamErrorsKey)
 			require.True(t, ok, "the real Ops transport event remains recorded")
@@ -390,52 +391,4 @@ func TestHandleOpenAIAccountUpstreamError_RecordsOllamaActivityOnly(t *testing.T
 	require.True(t, ok, "Ollama Cloud non-2xx must schedule last_used activity")
 	_, ok = deferred.lastUsedUpdates.Load(int64(505))
 	require.False(t, ok, "non-Ollama non-2xx must not schedule Ollama activity")
-}
-
-func TestOpenAITransportAttributionIndependentOfSmartSwitch(t *testing.T) {
-	for _, smart := range []bool{false, true} {
-		for _, tc := range []struct {
-			name    string
-			err     error
-			account bool
-		}{
-			{"refused", syscall.ECONNREFUSED, false},
-			{"host", syscall.EHOSTUNREACH, false},
-			{"network", syscall.ENETUNREACH, false},
-			{"dns", &net.DNSError{IsNotFound: true, Err: "missing"}, false},
-			{"tls", errors.New("tls: handshake failure"), false},
-			{"proxy", errors.New("proxy authentication required"), true},
-		} {
-			t.Run(fmt.Sprintf("S=%v/%s", smart, tc.name), func(t *testing.T) {
-				repo := &openaiTransportAccountRepoStub{}
-				svc := &OpenAIGatewayService{accountRepo: repo, rateLimitService: newIsolatedOpenAISchedulerModeRateLimitServiceForTest(t, smart, true)}
-				account := &Account{ID: 99201, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-				c, rec := newOpenAITransportErrTestContext()
-				err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, tc.err, false)
-				var fo *UpstreamFailoverError
-				require.ErrorAs(t, err, &fo)
-				require.Equal(t, tc.account, fo.ShouldReportAccountScheduleFailure())
-				require.True(t, fo.ShouldRetryNextAccount())
-				require.Equal(t, string(openAITransportFailoverBody), string(fo.ResponseBody))
-				want := 0
-				if tc.account {
-					want = 1
-				}
-				require.Len(t, repo.tempUnschedCalls, want)
-				require.Equal(t, tc.account, svc.isOpenAIAccountRuntimeBlocked(account))
-				require.Zero(t, rec.Body.Len())
-				raw, ok := c.Get(OpsUpstreamErrorsKey)
-				require.True(t, ok)
-				require.Len(t, raw.([]*OpsUpstreamErrorEvent), 1)
-				svc.ReportOpenAIAccountScheduleResult(account, "model", false, nil, err)
-				scheduler := svc.getOpenAIAccountScheduler(context.Background()).(*defaultOpenAIAccountScheduler)
-				stat := openAIAccountRuntimeStatForTest(t, scheduler.stats, account.ID)
-				if smart && !tc.account {
-					require.Zero(t, stat.sampleCount.Load())
-				} else {
-					require.EqualValues(t, 1, stat.sampleCount.Load())
-				}
-			})
-		}
-	}
 }

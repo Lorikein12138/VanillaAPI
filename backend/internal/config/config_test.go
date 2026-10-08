@@ -472,7 +472,7 @@ func TestLoadOpenAIFirstOutputTimeoutsFromEnv(t *testing.T) {
 	require.Equal(t, 240, cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds)
 }
 
-func TestSmartSchedulingStall_ConfigBounds(t *testing.T) {
+func TestValidateOpenAIFirstOutputTimeoutBounds(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	base, err := Load()
 	require.NoError(t, err)
@@ -483,10 +483,12 @@ func TestSmartSchedulingStall_ConfigBounds(t *testing.T) {
 	}{
 		{name: "negative", seconds: -1},
 		{name: "disabled", seconds: 0, valid: true},
-		{name: "one second", seconds: 1, valid: true},
+		{name: "one second", seconds: 1},
+		{name: "below minimum", seconds: 29},
 		{name: "thirty seconds", seconds: 30, valid: true},
-		{name: "maximum", seconds: 300, valid: true},
-		{name: "above maximum", seconds: 301},
+		{name: "three hundred seconds", seconds: 300, valid: true},
+		{name: "maximum", seconds: 600, valid: true},
+		{name: "above maximum", seconds: 601},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := *base
@@ -503,8 +505,10 @@ func TestSmartSchedulingStall_ConfigBounds(t *testing.T) {
 	// The high-effort YAML override keeps its own legacy range and can exceed
 	// the standard timeout without being truncated to that value.
 	cfg := *base
-	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 1
+	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 30
 	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 1800
+	require.NoError(t, cfg.Validate())
+	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 30
 	require.NoError(t, cfg.Validate())
 	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 29
 	require.ErrorContains(t, cfg.Validate(), "gateway.openai_high_effort_first_output_timeout_seconds")

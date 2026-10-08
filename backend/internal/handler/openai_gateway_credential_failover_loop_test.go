@@ -978,11 +978,11 @@ func TestOpenAIHandlerLegacyProviderFailureDoesNotCreateRuntimeSamples(t *testin
 		for _, mode := range []string{"provider", "budget"} {
 			t.Run(endpoint.name+"/"+mode, func(t *testing.T) {
 				settings := service.NewSettingService(&smartSchedulingStallSettingsRepo{values: map[string]string{
-					service.SettingKeySmartSchedulingEnabled: "false",
-					"openai_advanced_scheduler_enabled":      "true",
+					"smart_scheduling_enabled":          "false",
+					"openai_advanced_scheduler_enabled": "true",
 				}}, &config.Config{})
 				require.NoError(t, settings.UpdateSettings(context.Background(), &service.SystemSettings{
-					SmartSchedulingEnabled: false, OpenAIAdvancedSchedulerEnabled: true,
+					OpenAIAdvancedSchedulerEnabled: true,
 				}))
 				t.Cleanup(func() {
 					require.NoError(t, settings.UpdateSettings(context.Background(), &service.SystemSettings{}))
@@ -1028,10 +1028,13 @@ func TestOpenAIHandlerLegacyProviderFailureDoesNotCreateRuntimeSamples(t *testin
 				require.Empty(t, upstream.accountHits())
 				require.Empty(t, repo.errorIDs())
 				require.Zero(t, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount)
-				// All three suppressed scopes use the same central boundary for each
-				// entry; account scope remains a legacy observation.
+				// The baseline handler gate excludes non-account credential scopes.
 				for _, scope := range []service.GatewayFailureScope{"", service.GatewayFailureScopeRequest, service.GatewayFailureScopeProvider} {
-					h.gatewayService.ReportOpenAIAccountScheduleResult(&service.Account{ID: 99001, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}, "model", false, nil, &service.UpstreamFailoverError{Stage: service.GatewayFailureStageAccountAuth, Scope: scope, StatusCode: 401})
+					err := &service.UpstreamFailoverError{Stage: service.GatewayFailureStageAccountAuth, Scope: scope, StatusCode: 401}
+					require.False(t, err.ShouldReportAccountScheduleFailure())
+					if err.ShouldReportAccountScheduleFailure() {
+						h.gatewayService.ReportOpenAIAccountScheduleResult(&service.Account{ID: 99001, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}, "model", false, nil, err)
+					}
 					require.Zero(t, h.gatewayService.SnapshotOpenAIAccountSchedulerMetrics().RuntimeStatsAccountCount)
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(&service.Account{ID: 99001, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}, "model", false, nil, &service.UpstreamFailoverError{Stage: service.GatewayFailureStageAccountAuth, Scope: service.GatewayFailureScopeAccount, StatusCode: 401})

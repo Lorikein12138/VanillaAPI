@@ -63,10 +63,6 @@ type Account struct {
 	ParentAccountID *int64 // non-nil → 影子账号（不持凭据，透传母账号凭据）
 	QuotaDimension  string // 用量维度："" / "global" / "spark"
 
-	// smartHealthProbeID is private to one selected request and is never serialized
-	// or persisted with scheduler snapshots.
-	smartHealthProbeID uint64
-
 	Proxy         *Proxy
 	AccountGroups []AccountGroup
 	GroupIDs      []int64

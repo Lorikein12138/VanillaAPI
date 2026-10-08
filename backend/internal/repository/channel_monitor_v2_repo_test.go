@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,47 @@ import (
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChannelMonitorV2RealMetricCountsAndEmptyHealth(t *testing.T) {
+	empty := newMetricAccumulator().metric(5, true)
+	require.Zero(t, empty.RequestCount)
+	require.Zero(t, empty.TokenCount)
+	require.Nil(t, empty.TTFT.P50Ms)
+	require.Equal(t, "unknown", service.ChannelMonitorV2HealthFor(empty).Overall)
+	a := newMetricAccumulator()
+	a.addFact(channelMonitorV2Fact{Success: 8, Errors: 2, Input: 80, Output: 20})
+	a.addFact(channelMonitorV2Fact{Success: 4, Errors: 1, Input: 40, Output: 10})
+	m := a.metric(5, true)
+	require.EqualValues(t, 15, m.RequestCount)
+	require.EqualValues(t, 150, m.TokenCount)
+	require.InDelta(t, .2, m.ErrorRate, .000001)
+	require.Equal(t, 30.0, m.TPM, "real throughput sums facts rather than averaging display rows")
+	require.Equal(t, 3.0, m.RPM)
+}
+
+func TestChannelMonitorV2RealReadsKeepConfiguredViewerIntersection(t *testing.T) {
+	cfg := service.ChannelMonitorV2Config{GroupScopeMode: "selected", GroupIDs: []int64{3, 7},
+		Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "typesafe", Enabled: true}}}
+	filter := service.ChannelMonitorV2Filter{GroupIDs: []int64{7, 9}, AllowedGroupIDs: []int64{7, 11}, RestrictGroups: true}
+	groups, empty := channelMonitorV2ScopedGroupIDs(filter, cfg)
+	require.False(t, empty)
+	require.Equal(t, []int64{7}, groups)
+	where, args := channelMonitorV2Where(filter, cfg, "m")
+	require.Contains(t, where, "m.group_id = ANY($4)")
+	require.Len(t, args, 4)
+	groupArray, ok := args[3].(*pq.Int64Array)
+	require.True(t, ok, "group arg must be *pq.Int64Array, got %T", args[3])
+	groupArg, err := groupArray.Value()
+	require.NoError(t, err)
+	require.Equal(t, "{7}", groupArg)
+	filter.AllowedGroupIDs = []int64{3}
+	_, empty = channelMonitorV2ScopedGroupIDs(filter, cfg)
+	require.True(t, empty)
+	where, _ = channelMonitorV2Where(filter, cfg, "m")
+	require.Contains(t, where, "FALSE", "disjoint user scope must not become all groups")
+	require.Equal(t, []int64{3, 7}, cfg.GroupIDs)
+	require.Equal(t, []int64{7, 9}, filter.GroupIDs)
+}
 
 func TestChannelMonitorV2DateBinOriginIsUTC(t *testing.T) {
 	require.Equal(t, "TIMESTAMPTZ '1970-01-01 00:00:00+00'", channelMonitorV2DateBinOrigin)
@@ -144,6 +186,9 @@ func TestChannelMonitorV2SelectedEmptyScopeReturnsEmptyAcrossReadEndpoints(t *te
 	snapshot, err := repo.GetSnapshot(context.Background(), filter, cfg, false)
 	require.NoError(t, err)
 	require.Empty(t, snapshot.Trend)
+	require.Zero(t, snapshot.Metrics.RequestCount)
+	require.Zero(t, snapshot.Metrics.TokenCount)
+	require.Equal(t, "unknown", service.ChannelMonitorV2HealthFor(snapshot.Metrics).Overall)
 	models, err := repo.GetModels(context.Background(), filter, cfg, false)
 	require.NoError(t, err)
 	require.Empty(t, models.Items)
@@ -181,43 +226,50 @@ func TestChannelMonitorV2WhereUsesSupportedPlatformCatalogAndDeletedGroupFilter(
 	require.Len(t, args, 3)
 }
 
-func TestChannelMonitorV2ConfigRepositoryReadsAndWritesScopeAndDisplayFields(t *testing.T) {
-	db, mock, err := sqlmock.New()
+func TestChannelMonitorV2ConfigRepositoryRetiresSyntheticColumnPreservingScope(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+		if strings.Contains(strings.ToLower(actual), "synthetic_empty_buckets_enabled") {
+			return fmt.Errorf("retired column must not be read or written: %s", actual)
+		}
+		return sqlmock.QueryMatcherRegexp.Match(expected, actual)
+	})))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	repo := &channelMonitorV2Repository{db: db}
 	updatedAt := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	platformsJSON := `[ {"platform":"openai","enabled":true,"models":[]} ]`
+	platformsJSON := `[{"platform":"typesafe","enabled":false,"models":["ts"]},{"platform":"composite","enabled":true,"models":["mix"]},{"platform":"openai","enabled":true,"models":[]}]`
 	thresholdsJSON := `{}`
 	mock.ExpectQuery(`SELECT version, enabled, refresh_interval_seconds, platforms, group_ids`).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"version", "enabled", "refresh_interval_seconds", "platforms", "group_ids", "group_scope_mode",
-			"synthetic_empty_buckets_enabled", "ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
-		}).AddRow(4, true, 60, platformsJSON, "{3}", "selected", true, "{timeout}", thresholdsJSON, updatedAt, int64(7)))
+			"ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
+		}).AddRow(4, true, 60, platformsJSON, "{3}", "selected", "{timeout}", thresholdsJSON, updatedAt, int64(7)))
 	got, err := repo.GetConfig(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "selected", got.GroupScopeMode)
-	require.True(t, got.SyntheticEmptyBucketsEnabled)
 	require.Equal(t, []int64{3}, got.GroupIDs)
 	require.Equal(t, int64(7), *got.UpdatedBy)
 
 	actorID := int64(8)
 	mock.ExpectQuery(`UPDATE channel_monitor_v2_config`).
-		WithArgs(true, 300, sqlmock.AnyArg(), sqlmock.AnyArg(), "selected", true, sqlmock.AnyArg(), sqlmock.AnyArg(), &actorID, 4).
+		WithArgs(true, 300, []byte(platformsJSON), sqlmock.AnyArg(), "selected", sqlmock.AnyArg(), sqlmock.AnyArg(), &actorID, 4).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"version", "enabled", "refresh_interval_seconds", "platforms", "group_ids", "group_scope_mode",
-			"synthetic_empty_buckets_enabled", "ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
-		}).AddRow(5, true, 300, platformsJSON, "{}", "selected", true, "{}", thresholdsJSON, updatedAt, actorID))
+			"ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
+		}).AddRow(5, true, 300, platformsJSON, "{}", "selected", "{}", thresholdsJSON, updatedAt, actorID))
 	updated, err := repo.UpdateConfig(context.Background(), service.ChannelMonitorV2Config{
 		Enabled: true, RefreshIntervalSeconds: 300,
-		Platforms:      []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true, Models: []string{}}},
-		GroupScopeMode: "selected", GroupIDs: []int64{}, SyntheticEmptyBucketsEnabled: true, UpdatedBy: &actorID,
+		Platforms:      got.Platforms,
+		GroupScopeMode: "selected", GroupIDs: []int64{}, UpdatedBy: &actorID,
 	}, 4)
 	require.NoError(t, err)
 	require.Equal(t, 5, updated.Version)
+	require.Equal(t, got.Platforms, updated.Platforms, "TypeSafe/Composite objects and order must survive saves")
+	require.Equal(t, "typesafe", updated.Platforms[0].Platform)
+	require.False(t, updated.Platforms[0].Enabled)
+	require.Equal(t, []string{"ts"}, updated.Platforms[0].Models)
 	require.Equal(t, "selected", updated.GroupScopeMode)
 	require.Empty(t, updated.GroupIDs)
-	require.True(t, updated.SyntheticEmptyBucketsEnabled)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -228,7 +280,7 @@ func TestChannelMonitorV2ConfigRepositoryPreservesVersionConflict(t *testing.T) 
 	repo := &channelMonitorV2Repository{db: db}
 	mock.ExpectQuery(`UPDATE channel_monitor_v2_config`).WillReturnRows(sqlmock.NewRows([]string{
 		"version", "enabled", "refresh_interval_seconds", "platforms", "group_ids", "group_scope_mode",
-		"synthetic_empty_buckets_enabled", "ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
+		"ignored_error_categories", "health_thresholds", "updated_at", "updated_by",
 	}))
 	_, err = repo.UpdateConfig(context.Background(), service.ChannelMonitorV2Config{
 		GroupScopeMode: "selected", GroupIDs: []int64{},
@@ -477,6 +529,9 @@ func TestChannelMonitorV2EmptyRestrictedScopeReturnsEmptySnapshotWithoutQueries(
 			require.Equal(t, service.ChannelMonitorV2Metric{}, snapshot.Metrics)
 			require.Equal(t, service.ChannelMonitorV2Health{}, snapshot.Health)
 			require.Empty(t, snapshot.Trend)
+			require.Zero(t, snapshot.Metrics.RequestCount)
+			require.Zero(t, snapshot.Metrics.TokenCount)
+			require.Equal(t, "unknown", service.ChannelMonitorV2HealthFor(snapshot.Metrics).Overall)
 			require.NotNil(t, snapshot.Trend)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
