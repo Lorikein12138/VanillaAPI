@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -15,36 +16,87 @@ type modelPlazaMembersRepoStub struct {
 	AccountRepository
 	accountsByGroup map[int64][]Account
 	err             error
+	calls           map[int64]int
 }
 
 func (s *modelPlazaMembersRepoStub) ListAllByGroup(_ context.Context, groupID int64) ([]Account, error) {
+	if s.calls != nil {
+		s.calls[groupID]++
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.accountsByGroup[groupID], nil
 }
 
-func plazaMembersFromGroups(groups []Group) AccountRepository {
+// plazaMembersFromGroups 为每个非复合活跃组构造成员快照：启用白名单的组由白名单模型声明，
+// 其余组由挂载在该组上的渠道为本组平台提供的模型声明。复合组需要显式成员，不由此推导。
+func plazaMembersFromGroups(groups []Group, channels []Channel) *modelPlazaMembersRepoStub {
 	accountsByGroup := make(map[int64][]Account)
 	for _, group := range groups {
-		if !group.ModelAllowlist.Enabled || len(group.ModelAllowlist.Models) == 0 {
+		if group.Platform == PlatformComposite {
 			continue
 		}
-		mappings := make(map[string]any, len(group.ModelAllowlist.Models))
-		for _, model := range group.ModelAllowlist.Models {
-			mappings[model] = model
+		models := plazaChannelModels(channels, group.ID, group.Platform)
+		if group.ModelAllowlist.Enabled {
+			models = group.ModelAllowlist.Models
 		}
-		accountsByGroup[group.ID] = []Account{{Credentials: map[string]any{"model_mapping": mappings}}}
+		if len(models) == 0 {
+			continue
+		}
+		accountsByGroup[group.ID] = []Account{plazaMemberAccount(group.Platform, models...)}
 	}
-	return &modelPlazaMembersRepoStub{accountsByGroup: accountsByGroup}
+	return &modelPlazaMembersRepoStub{accountsByGroup: accountsByGroup, calls: make(map[int64]int)}
+}
+
+// plazaMemberAccount 构造声明 models 的成员账号：model_mapping 的 key 即来源声明，value 与声明无关。
+func plazaMemberAccount(platform string, models ...string) Account {
+	mapping := make(map[string]any, len(models))
+	for _, model := range models {
+		mapping[model] = model
+	}
+	return Account{Platform: platform, Credentials: map[string]any{"model_mapping": mapping}}
+}
+
+// plazaChannelModels 汇总挂在该组上的活跃渠道为 platform 提供的模型名（定价模型与 mapping 左侧 key）。
+func plazaChannelModels(channels []Channel, groupID int64, platform string) []string {
+	var models []string
+	for i := range channels {
+		ch := &channels[i]
+		if ch.Status != StatusActive || !slices.Contains(ch.GroupIDs, groupID) {
+			continue
+		}
+		for _, pricing := range ch.ModelPricing {
+			if pricing.Platform == platform {
+				models = append(models, pricing.Models...)
+			}
+		}
+		for name := range ch.ModelMapping[platform] {
+			models = append(models, name)
+		}
+	}
+	return models
+}
+
+func plazaModelNames(models []PlazaModel) []string {
+	names := make([]string, 0, len(models))
+	for _, m := range models {
+		names = append(names, m.Name)
+	}
+	return names
 }
 
 // newPlazaService 构造 ListGroups 测试用的 ModelPlazaService（不接计费服务：展示定价原样透传）。
 func newPlazaService(channels []Channel, groups []Group, pricing *PricingService) *ModelPlazaService {
+	return newPlazaServiceWithMembers(channels, groups, plazaMembersFromGroups(groups, channels), pricing)
+}
+
+// newPlazaServiceWithMembers 构造使用给定成员快照的广场服务，供需要显式声明来源的用例使用。
+func newPlazaServiceWithMembers(channels []Channel, groups []Group, members AccountRepository, pricing *PricingService) *ModelPlazaService {
 	repo := &mockChannelRepository{
 		listAllFn: func(ctx context.Context) ([]Channel, error) { return channels, nil },
 	}
-	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaMembersFromGroups(groups), pricing, nil, nil)
+	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, members, pricing, nil, nil)
 }
 
 func plazaPricedChannel(id int64, name string, groupIDs []int64, platform string, models ...string) Channel {
@@ -153,10 +205,10 @@ func TestListPlazaGroups_AutomaticAccountUnionFiltersExistingChannelCandidates(t
 	}}
 	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{
 		10: {
-			{Status: StatusDisabled, ErrorMessage: "expired", Schedulable: false, Credentials: map[string]any{
+			{Platform: PlatformAnthropic, Status: StatusDisabled, ErrorMessage: "expired", Schedulable: false, Credentials: map[string]any{
 				"model_mapping": map[string]any{"model-a": "model-a", "model-c": "model-c", "renamed": "upstream-model"},
 			}},
-			{Status: StatusError, Schedulable: false, Credentials: map[string]any{
+			{Platform: PlatformAnthropic, Status: StatusError, Schedulable: false, Credentials: map[string]any{
 				"model_mapping": map[string]any{"model-c": "model-c", "model-x": "model-x"},
 			}},
 		},
@@ -176,7 +228,7 @@ func TestListPlazaGroups_AutomaticAccountUnionFiltersExistingChannelCandidates(t
 func TestListPlazaGroups_MappedKeyDisplayAndPricing(t *testing.T) {
 	channels := []Channel{{ID: 1, Status: StatusActive, GroupIDs: []int64{10}, ModelPricing: []ChannelModelPricing{{Platform: PlatformAnthropic, Models: []string{"client-name"}, InputPrice: testPtrFloat64(3e-6)}}, ModelMapping: map[string]map[string]string{PlatformAnthropic: {"client-name": "upstream-name"}}}}
 	groups := []Group{{ID: 10, Platform: PlatformAnthropic, RateMultiplier: 1, ModelAllowlist: GroupModelAllowlist{Enabled: true}}}
-	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {{Credentials: map[string]any{"model_mapping": map[string]any{"client-name": "upstream-name"}}}}}}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {{Platform: PlatformAnthropic, Credentials: map[string]any{"model_mapping": map[string]any{"client-name": "upstream-name"}}}}}}
 	svc := NewModelPlazaService(&mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return channels, nil }}, &stubGroupRepoForAvailable{activeGroups: groups}, members, nil, nil, nil)
 	out, err := svc.ListGroups(context.Background())
 	require.NoError(t, err)
@@ -228,7 +280,9 @@ func TestListPlazaGroups_DisabledModelAllowlistKeepsChannelPricingModels(t *test
 	})
 }
 
-func TestListPlazaGroups_ModelAllowlistWildcardUsesGatewayMatching(t *testing.T) {
+// 白名单词法匹配：`*` 锚定任意位置、大小写不敏感，不做 -thinking / models/ 归一化，
+// 基础 ID 不代表 thinking 变体（与网关 Allows 的请求等价规则不同）。
+func TestListPlazaGroups_ModelAllowlistWildcardUsesLexicalMatching(t *testing.T) {
 	channels := []Channel{
 		{
 			ID: 1, Name: "multi", Status: StatusActive, GroupIDs: []int64{10},
@@ -236,7 +290,7 @@ func TestListPlazaGroups_ModelAllowlistWildcardUsesGatewayMatching(t *testing.T)
 				{Platform: PlatformOpenAI, Models: []string{
 					"gpt-image-2", "gpt-image-2.5-flare", "gpt-5.6-sol",
 				}},
-				{Platform: PlatformAnthropic, Models: []string{"claude-sonnet-4-thinking"}},
+				{Platform: PlatformAnthropic, Models: []string{"claude-sonnet-4", "claude-sonnet-4-thinking"}},
 			},
 		},
 	}
@@ -251,21 +305,17 @@ func TestListPlazaGroups_ModelAllowlistWildcardUsesGatewayMatching(t *testing.T)
 		RateMultiplier: 1,
 		ModelAllowlist: allowlist,
 	}}
+	// 成员声明来源：OpenAI 通配 key 与 anthropic 基础 ID；生效白名单为成员 key 的并集。
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {
+		plazaMemberAccount(PlatformOpenAI, "GPT-IMAGE-*"),
+		plazaMemberAccount(PlatformAnthropic, "claude-sonnet-4"),
+	}}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
-	got := make(map[string]bool, len(out[0].Models))
-	for _, model := range out[0].Models {
-		got[model.Name] = true
-	}
-	for _, model := range []string{
-		"gpt-image-2", "gpt-image-2.5-flare", "gpt-5.6-sol", "claude-sonnet-4-thinking",
-	} {
-		require.Equal(t, allowlist.Allows(model), got[model], "广场结果必须复用网关白名单匹配语义: %s", model)
-	}
-	require.Len(t, got, 3)
+	require.ElementsMatch(t, []string{"claude-sonnet-4", "gpt-image-2", "gpt-image-2.5-flare"}, plazaModelNames(out[0].Models))
 }
 
 func TestListPlazaGroups_ModelAllowlistKeepsAllowedUnpricedModel(t *testing.T) {
@@ -432,8 +482,13 @@ func TestListPlazaGroups_CompositeIncludesConfiguredConcretePlatforms(t *testing
 		},
 	}
 	groups := []Group{{ID: 10, Name: "composite", Platform: PlatformComposite, RateMultiplier: 1}}
+	// 复合组不由渠道推导来源，显式给出两个具体平台各自声明的 shared-model。
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {
+		plazaMemberAccount(PlatformAnthropic, "shared-model"),
+		plazaMemberAccount(PlatformOpenAI, "shared-model"),
+	}}}
 
-	out, err := newPlazaService([]Channel{ch}, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -456,8 +511,14 @@ func TestListPlazaGroups_CompositeAndOrdinaryGroupsDoNotLeakPlatforms(t *testing
 		{ID: 10, Name: "anthropic-only", Platform: PlatformAnthropic, RateMultiplier: 1},
 		{ID: 20, Name: "composite", Platform: PlatformComposite, RateMultiplier: 1},
 	}
+	// 普通组由渠道推导来源；复合组显式给出两个具体平台各自的成员。
+	members := plazaMembersFromGroups(groups, []Channel{ch})
+	members.accountsByGroup[20] = []Account{
+		plazaMemberAccount(PlatformAnthropic, "claude-sonnet"),
+		plazaMemberAccount(PlatformOpenAI, "gpt-5"),
+	}
 
-	out, err := newPlazaService([]Channel{ch}, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background())
 
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -657,7 +718,7 @@ func newPlazaServiceWithBilling(channels []Channel, groups []Group, groupPlatfor
 	}
 	cs := NewChannelService(repo, nil, nil, nil, nil)
 	bs := NewBillingService(&config.Config{}, catalog)
-	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaMembersFromGroups(groups), catalog, bs, NewModelPricingResolver(cs, bs))
+	return NewModelPlazaService(repo, &stubGroupRepoForAvailable{activeGroups: groups}, plazaMembersFromGroups(groups, channels), catalog, bs, NewModelPricingResolver(cs, bs))
 }
 
 func plazaModelsByName(models []PlazaModel) map[string]PlazaModel {
@@ -810,4 +871,144 @@ func TestListGroups_TimePricingPassthrough(t *testing.T) {
 	require.InDelta(t, 0.5, m.TimePricing.Periods[0].Multiplier, 1e-12)
 	// 展示单价为标准时段价
 	require.InDelta(t, 0.28e-6, *m.Pricing.InputPrice, 1e-15)
+}
+
+// 原生 Anthropic 的基础 ID 与 Antigravity 显式声明的 thinking 变体互不借用：
+// 组内谁声明谁展示，基础 ID 不代表 thinking 变体，thinking 变体也不代表基础 ID。
+func TestListPlazaGroups_ThinkingCatalogIsolation(t *testing.T) {
+	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10, 20, 30}, PlatformAnthropic,
+		"claude-opus-4-6", "claude-opus-4-6-thinking", "claude-sonnet-4-6")}
+	groups := []Group{
+		{ID: 10, Name: "native-only", Platform: PlatformAnthropic, RateMultiplier: 1},
+		{ID: 20, Name: "antigravity-only", Platform: PlatformAnthropic, RateMultiplier: 1},
+		{ID: 30, Name: "both", Platform: PlatformAnthropic, RateMultiplier: 1},
+	}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{
+		10: {plazaMemberAccount(PlatformAnthropic, "claude-opus-4-6")},
+		20: {plazaMemberAccount(PlatformAntigravity, "claude-opus-4-6-thinking")},
+		30: {
+			plazaMemberAccount(PlatformAnthropic, "claude-opus-4-6"),
+			plazaMemberAccount(PlatformAntigravity, "claude-opus-4-6-thinking"),
+		},
+	}}
+
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	byName := map[string][]string{}
+	for _, group := range out {
+		byName[group.Name] = plazaModelNames(group.Models)
+	}
+	require.Equal(t, []string{"claude-opus-4-6"}, byName["native-only"])
+	require.Equal(t, []string{"claude-opus-4-6-thinking"}, byName["antigravity-only"])
+	require.Equal(t, []string{"claude-opus-4-6", "claude-opus-4-6-thinking"}, byName["both"])
+}
+
+// 成员账号仓储不可用时整体失败关闭，不退化为按渠道推导来源。
+func TestListPlazaGroups_MissingMemberRepositoryFailsClosed(t *testing.T) {
+	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10}, PlatformAnthropic, "claude-sonnet")}
+	groups := []Group{{ID: 10, Name: "g", Platform: PlatformAnthropic, RateMultiplier: 1}}
+
+	out, err := newPlazaServiceWithMembers(channels, groups, nil, nil).ListGroups(context.Background())
+
+	require.Nil(t, out)
+	require.ErrorContains(t, err, "account group member repository is unavailable")
+}
+
+// 未启用白名单的组同样读取成员，成员读取失败不得被忽略。
+func TestListPlazaGroups_DisabledMemberReadFailureFailsClosed(t *testing.T) {
+	sentinel := errors.New("disabled group member read failed")
+	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10}, PlatformAnthropic, "claude-sonnet")}
+	groups := []Group{{
+		ID: 10, Name: "g", Platform: PlatformAnthropic, RateMultiplier: 1,
+		ModelAllowlist: GroupModelAllowlist{Enabled: false},
+	}}
+
+	out, err := newPlazaServiceWithMembers(channels, groups, &modelPlazaMembersRepoStub{err: sentinel}, nil).ListGroups(context.Background())
+
+	require.Nil(t, out)
+	require.ErrorIs(t, err, sentinel)
+}
+
+// 无成员的组不展示任何候选，即使挂载的渠道提供了模型。
+func TestListPlazaGroups_GroupWithoutMembersOmitted(t *testing.T) {
+	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10, 20}, PlatformAnthropic, "claude-sonnet")}
+	groups := []Group{
+		{ID: 10, Name: "no-members", Platform: PlatformAnthropic, RateMultiplier: 1},
+		{ID: 20, Name: "with-member", Platform: PlatformAnthropic, RateMultiplier: 1},
+	}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{
+		20: {plazaMemberAccount(PlatformAnthropic, "claude-sonnet")},
+	}}
+
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, "with-member", out[0].Name)
+	require.Equal(t, []string{"claude-sonnet"}, plazaModelNames(out[0].Models))
+}
+
+// 账号暂停（不可调度）或异常不影响来源声明：目录只表达组已声明的模型。
+func TestListPlazaGroups_PausedMembersStillDeclare(t *testing.T) {
+	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10}, PlatformAnthropic, "claude-sonnet", "claude-opus")}
+	groups := []Group{{ID: 10, Name: "g", Platform: PlatformAnthropic, RateMultiplier: 1}}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {
+		{Platform: PlatformAnthropic, Status: StatusActive, Schedulable: false, Credentials: map[string]any{
+			"model_mapping": map[string]any{"claude-sonnet": "claude-sonnet"},
+		}},
+		{Platform: PlatformAnthropic, Status: StatusError, ErrorMessage: "expired", Schedulable: false, Credentials: map[string]any{
+			"model_mapping": map[string]any{"claude-opus": "claude-opus"},
+		}},
+	}}}
+
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.ElementsMatch(t, []string{"claude-opus", "claude-sonnet"}, plazaModelNames(out[0].Models))
+}
+
+// 复合组中同名模型只由其所属平台的成员声明：另一平台的同名候选不得借来源显示。
+func TestListPlazaGroups_CompositeSameNameDeclaredOnlyByOwningPlatform(t *testing.T) {
+	ch := Channel{
+		ID: 1, Name: "multi", Status: StatusActive, GroupIDs: []int64{10},
+		ModelPricing: []ChannelModelPricing{
+			{Platform: PlatformAnthropic, Models: []string{"shared"}, InputPrice: testPtrFloat64(3e-6)},
+			{Platform: PlatformOpenAI, Models: []string{"shared", "other"}, InputPrice: testPtrFloat64(2e-6)},
+		},
+	}
+	groups := []Group{{ID: 10, Name: "composite", Platform: PlatformComposite, RateMultiplier: 1}}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {
+		plazaMemberAccount(PlatformAnthropic, "shared"),
+		plazaMemberAccount(PlatformOpenAI, "other"),
+	}}}
+
+	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	got := make([]string, 0, len(out[0].Models))
+	for _, m := range out[0].Models {
+		got = append(got, m.Platform+"/"+m.Name)
+	}
+	require.ElementsMatch(t, []string{PlatformAnthropic + "/shared", PlatformOpenAI + "/other"}, got)
+}
+
+// 每个活跃分组恰好读取一次成员快照，启用白名单与否都读取。
+func TestListPlazaGroups_ReadsMembersOncePerActiveGroup(t *testing.T) {
+	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10, 20}, PlatformAnthropic, "claude-sonnet", "claude-opus")}
+	groups := []Group{
+		{ID: 10, Name: "enabled", Platform: PlatformAnthropic, RateMultiplier: 1,
+			ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"claude-sonnet"}}},
+		{ID: 20, Name: "disabled", Platform: PlatformAnthropic, RateMultiplier: 1},
+	}
+	members := plazaMembersFromGroups(groups, channels)
+
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	require.Equal(t, map[int64]int{10: 1, 20: 1}, members.calls)
 }

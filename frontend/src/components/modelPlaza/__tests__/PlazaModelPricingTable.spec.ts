@@ -870,3 +870,72 @@ describe('PlazaModelPricingTable 分时计价', () => {
     expect(wrapper.find('[title*="modelPlaza.table.timePricingRowHint"]').exists()).toBe(false)
   })
 })
+
+// Max 组响应只下发基础模型，AG 组响应只下发 thinking 模型；表格按收到的 models 逐行渲染，不按名字后缀增删行。
+describe('PlazaModelPricingTable Max 与 AG thinking 分组响应', () => {
+  function maxBase(overrides: Partial<PlazaModel> = {}): PlazaModel {
+    return tokenModel({ name: 'claude-opus-4-6', platform: 'anthropic', ...overrides })
+  }
+
+  function agThinking(overrides: Partial<PlazaModel> = {}): PlazaModel {
+    return tokenModel({ name: 'claude-opus-4-6-thinking', platform: 'antigravity', ...overrides })
+  }
+
+  function rowNames(wrapper: ReturnType<typeof mountTable>): string[] {
+    return wrapper.findAll('tbody tr').map(row => row.find('td').text())
+  }
+
+  it('Max 基础模型单独成组时只渲染一行，名称原样', () => {
+    expect(rowNames(mountTable([maxBase()], 1))).toEqual(['claude-opus-4-6'])
+  })
+
+  it('AG thinking 模型单独成组时只渲染一行，保留 -thinking 后缀', () => {
+    expect(rowNames(mountTable([agThinking()], 1))).toEqual(['claude-opus-4-6-thinking'])
+  })
+
+  it('同表出现基础名与 thinking 名时各自成行，不合并也不去后缀', () => {
+    expect(rowNames(mountTable([maxBase(), agThinking()], 1)).sort())
+      .toEqual(['claude-opus-4-6', 'claude-opus-4-6-thinking'])
+  })
+
+  it('Max 与 AG 各自使用本组倍率折算价格与倍率列，互不串用', () => {
+    const max = mountTable([maxBase()], 1.5)
+    const ag = mountTable([agThinking()], 0.8)
+    // 输入价 3e-6 $/token：Max × 1.5 → $4.50，AG × 0.8 → $2.40
+    expect(max.text()).toContain('$4.50')
+    expect(max.text()).toContain('1.5x')
+    expect(max.text()).not.toContain('0.8x')
+    expect(ag.text()).toContain('$2.40')
+    expect(ag.text()).toContain('0.8x')
+    expect(ag.text()).not.toContain('1.5x')
+  })
+
+  it('token 行单位保持每百万 token，thinking 行不出现按次或按秒单位', () => {
+    const text = mountTable([maxBase(), agThinking()], 1).text()
+    expect(text).toContain('modelPlaza.table.unitPerMillion')
+    expect(text).not.toContain('modelPlaza.table.perUnitRequest')
+    expect(text).not.toContain('modelPlaza.table.perUnitSecond')
+  })
+
+  it('按次计费的 thinking 模型仍按次展示，单价乘本行倍率', () => {
+    const model = agThinking({
+      pricing: {
+        billing_mode: 'per_request',
+        input_price: null,
+        output_price: null,
+        cache_write_price: null,
+        cache_read_price: null,
+        image_input_price: null,
+        image_output_price: null,
+        per_request_price: 0.04,
+        intervals: []
+      },
+      official_pricing: null
+    })
+    const text = mountTable([model], 0.5).text()
+    // 0.04 × 0.5 = 0.02；单位跟随计费模式，不跟随模型名
+    expect(text).toContain('$0.02')
+    expect(text).toContain('modelPlaza.table.perUnitRequest')
+    expect(text).not.toContain('modelPlaza.table.perUnitSecond')
+  })
+})

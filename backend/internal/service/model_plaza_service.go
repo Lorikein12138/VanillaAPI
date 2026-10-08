@@ -96,10 +96,13 @@ func NewModelPlazaService(
 // ListGroups 返回模型广场数据：每个活跃分组附带其可用模型与定价。
 //
 // 模型枚举口径与 ListAvailable 一致（Active 渠道、SupportedModels ∪ 全局定价回落、
-// 平台隔离），仅把顶层从渠道换成分组；启用分组模型白名单时，候选模型再与
-// Group.ModelAllowlist 取交集：
+// 平台隔离），仅把顶层从渠道换成分组。每个活跃分组只读取一次成员账号快照（启用与否都读取）：
+//   - 候选必须被本组成员账号声明（来源过滤，见 plazaAccountModelPatterns），
+//     账号暂停、异常或不可调度不影响声明；无成员的组不展示任何候选；
+//   - 启用分组白名单时，候选原始名字还需与 ModelAllowlist 做大小写不敏感的词法通配匹配，
+//     不使用网关 Allows 的请求等价归一化，因此 thinking 等变体不会借基础 ID 出现；
 //   - 渠道按 lower(name) 排序后遍历，保证同名模型去重结果确定；
-//   - 先执行普通/Composite 平台隔离，再执行白名单过滤，之后才写入同名索引；
+//   - 先执行普通/Composite 平台隔离、组来源与白名单过滤，之后才写入同名索引；
 //   - 同分组同名模型「先见者胜」，仅当已存条目无定价而新条目有定价时升级替换；
 //   - token 模型的单价与阶梯按实收口径合成（见 ResolveContextPricingSchedule），
 //     图片计费模型的档位价按实收口径合成（见 plazaImageDisplayPricing）；
@@ -118,18 +121,19 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		return nil, fmt.Errorf("list active groups: %w", err)
 	}
 	memberRepo, hasMemberRepo := s.accountRepo.(AccountGroupMembersRepository)
+	directories := make(map[int64]*plazaGroupDirectory, len(groups))
 	for i := range groups {
-		if !groups[i].ModelAllowlist.Enabled {
-			continue
-		}
 		if !hasMemberRepo {
-			return nil, fmt.Errorf("list members for model allowlist group %d: account group member repository is unavailable", groups[i].ID)
+			return nil, fmt.Errorf("list members for model plaza group %d: account group member repository is unavailable", groups[i].ID)
 		}
 		accounts, listErr := memberRepo.ListAllByGroup(ctx, groups[i].ID)
 		if listErr != nil {
-			return nil, fmt.Errorf("list members for model allowlist group %d: %w", groups[i].ID, listErr)
+			return nil, fmt.Errorf("list members for model plaza group %d: %w", groups[i].ID, listErr)
 		}
-		groups[i].ModelAllowlist = ResolveEffectiveGroupModelAllowlist(groups[i].ModelAllowlist, accounts)
+		directories[groups[i].ID] = newPlazaGroupDirectory(accounts)
+		if groups[i].ModelAllowlist.Enabled {
+			groups[i].ModelAllowlist = ResolveEffectiveGroupModelAllowlist(groups[i].ModelAllowlist, accounts)
+		}
 	}
 
 	sort.SliceStable(channels, func(i, j int) bool {
@@ -197,8 +201,12 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 				} else if m.Platform != pg.Platform {
 					continue
 				}
+				// 组来源过滤先于同名索引：未获声明的候选不能占据索引或借价影响合法候选。
+				if !directories[gid].declares(m.Platform, m.Name) {
+					continue
+				}
 				group := groupEnt[gid]
-				if group.ModelAllowlist.Enabled && !group.ModelAllowlist.Allows(m.Name) {
+				if group.ModelAllowlist.Enabled && !plazaDisplayPatternAllows(group.ModelAllowlist.Models, m.Name) {
 					continue
 				}
 				key := modelKey{platform: m.Platform, name: m.Name}
