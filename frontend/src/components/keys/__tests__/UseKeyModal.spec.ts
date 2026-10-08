@@ -34,6 +34,10 @@ function readBlobAsText(blob: Blob): Promise<string> {
   })
 }
 
+function countOccurrences(text: string, needle: string): number {
+  return text.split(needle).length - 1
+}
+
 describe('UseKeyModal', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -415,7 +419,7 @@ describe('UseKeyModal', () => {
     expect(configToml).not.toContain('image_generation')
     expect(configToml).not.toContain('supports_websockets')
     expect(configToml).not.toContain('responses_websockets_v2')
-    expect(configToml).toContain('[features]\ngoals = true')
+    expect(configToml).toContain('[features]\napi_key_model_discovery = true\ngoals = true')
     expect(configToml).not.toContain('model_reasoning_effort = "xhigh"')
     expect(codeBlocks).toContain('{\n  "OPENAI_API_KEY": "sk-test"\n}')
     expect(wrapper.text()).toContain('auth.json')
@@ -557,7 +561,7 @@ describe('UseKeyModal', () => {
     expect(configToml).not.toContain('env_key')
     expect(configToml).not.toContain('image_generation')
     expect(configToml).toContain('supports_websockets = true')
-    expect(configToml).toContain('[features]\nresponses_websockets_v2 = true\ngoals = true')
+    expect(configToml).toContain('[features]\napi_key_model_discovery = true\nresponses_websockets_v2 = true\ngoals = true')
     expect(codeBlocks).toContain('{\n  "OPENAI_API_KEY": "sk-test"\n}')
     expect(wrapper.text()).toContain('auth.json')
   })
@@ -605,7 +609,7 @@ describe('UseKeyModal', () => {
     expect(configToml).not.toContain('env_key')
     expect(configToml).not.toContain('image_generation')
     expect(configToml).toContain('supports_websockets = true')
-    expect(configToml).toContain('[features]\nresponses_websockets_v2 = true\ngoals = true')
+    expect(configToml).toContain('[features]\napi_key_model_discovery = true\nresponses_websockets_v2 = true\ngoals = true')
     expect(codeBlocks).not.toContain('{\n  "OPENAI_API_KEY": "sk-test"\n}')
     expect(wrapper.text()).not.toContain('auth.json')
   })
@@ -1095,6 +1099,188 @@ describe('UseKeyModal', () => {
       } else {
         expect(config).toContain('model_catalog_url = "https://example.com/v1/models"')
         expect(config).not.toContain('model_catalog_json')
+      }
+    }
+  )
+
+  it('sends the remote discovery switch only in remote catalog mode for OpenAI HTTP and WebSocket configs', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-openai-test',
+        baseUrl: 'https://example.com/v1',
+        platform: 'openai'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    for (const transport of ['keys.useKeyModal.cliTabs.codexCli', 'keys.useKeyModal.cliTabs.codexCliWs']) {
+      await wrapper.findAll('button').find((button) => button.text().trim() === transport)!.trigger('click')
+      for (const os of ['macOS / Linux', 'Windows']) {
+        await wrapper.findAll('button').find((button) => button.text().trim() === os)!.trigger('click')
+        for (const auth of ['legacy', 'api-key'] as const) {
+          await wrapper.get(`[data-testid="codex-auth-mode-${auth}"]`).trigger('click')
+          for (const catalogMode of ['remote', 'file'] as const) {
+            await wrapper.get('[data-testid="codex-model-catalog-mode"]').setValue(catalogMode)
+            const configToml = wrapper.findAll('pre code')
+              .map((code) => code.text())
+              .find((content) => content.includes('model_provider = "OpenAI"'))
+            expect(configToml).toBeDefined()
+            const text = configToml!
+
+            // The discovery switch is emitted exactly once in remote mode and never in file mode.
+            expect(countOccurrences(text, 'api_key_model_discovery = true')).toBe(catalogMode === 'remote' ? 1 : 0)
+            if (catalogMode === 'remote') {
+              expect(text).toContain('model_catalog_url = "https://example.com/v1/models"')
+              expect(text).toContain('[features]\napi_key_model_discovery = true\n')
+              expect(text).not.toContain('model_catalog_json')
+            } else {
+              expect(text).toContain('model_catalog_json = "~/.codex/codex-models.json"')
+              expect(text).not.toContain('model_catalog_url')
+              expect(text).not.toContain('api_key_model_discovery')
+            }
+
+            // Other features and the transport settings stay the same in both catalog modes.
+            expect(text).toContain('goals = true')
+            if (transport === 'keys.useKeyModal.cliTabs.codexCliWs') {
+              expect(text).toContain('supports_websockets = true')
+              expect(text).toContain('responses_websockets_v2 = true')
+            } else {
+              expect(text).not.toContain('supports_websockets')
+              expect(text).not.toContain('responses_websockets_v2')
+            }
+
+            if (auth === 'legacy') {
+              expect(text).toContain('requires_openai_auth = true')
+              expect(text).not.toContain('experimental_bearer_token')
+              expect(wrapper.text()).toContain('auth.json')
+              expect(wrapper.text()).toContain('"OPENAI_API_KEY": "sk-openai-test"')
+            } else {
+              expect(text).toContain('requires_openai_auth = false')
+              expect(text).toContain('experimental_bearer_token = "sk-openai-test"')
+              expect(wrapper.text()).not.toContain('auth.json')
+              expect(wrapper.text()).not.toContain('OPENAI_API_KEY')
+            }
+          }
+        }
+      }
+    }
+  })
+
+  it('sends the remote discovery switch only in remote catalog mode for Grok Codex configs', async () => {
+    const wrapper = mount(UseKeyModal, {
+      props: {
+        show: true,
+        apiKey: 'sk-grok-codex-test',
+        baseUrl: 'https://example.com/v1',
+        platform: 'grok'
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            template: '<div><slot /><slot name="footer" /></div>'
+          },
+          Icon: {
+            template: '<span />'
+          }
+        }
+      }
+    })
+
+    await wrapper.findAll('button').find((button) =>
+      button.text().includes('keys.useKeyModal.cliTabs.codexCli')
+    )!.trigger('click')
+    for (const os of ['macOS / Linux', 'Windows']) {
+      await wrapper.findAll('button').find((button) => button.text().trim() === os)!.trigger('click')
+      for (const catalogMode of ['remote', 'file'] as const) {
+        await wrapper.get('[data-testid="codex-model-catalog-mode"]').setValue(catalogMode)
+        const configToml = wrapper.findAll('pre code')
+          .map((code) => code.text())
+          .find((content) => content.includes('[model_providers.sub2api]'))
+        expect(configToml).toBeDefined()
+        const text = configToml!
+
+        expect(countOccurrences(text, 'api_key_model_discovery = true')).toBe(catalogMode === 'remote' ? 1 : 0)
+        if (catalogMode === 'remote') {
+          expect(text).toContain('model_catalog_url = "https://example.com/v1/models"')
+          expect(text).toContain('[features]\napi_key_model_discovery = true\n\n# Optional:')
+          expect(text).not.toContain('model_catalog_json')
+        } else {
+          expect(text).toContain('model_catalog_json = "~/.codex/codex-models.json"')
+          expect(text).not.toContain('model_catalog_url')
+          expect(text).toContain('# [features]')
+        }
+
+        // The env_key auth fields and the commented optional features are unchanged in both modes.
+        expect(text).toContain('env_key = "SUB2API_API_KEY"')
+        expect(text).toContain('requires_openai_auth = false')
+        expect(text).toContain('supports_websockets = false')
+        expect(text).toContain('# goals = true')
+      }
+    }
+  })
+
+  it.each(['composite', 'gemini'])(
+    'sends the remote discovery switch only in remote catalog mode for %s routed Codex configs',
+    async (platform) => {
+      const wrapper = mount(UseKeyModal, {
+        props: {
+          show: true,
+          apiKey: 'sk-routed-codex-test',
+          baseUrl: 'https://example.com/v1',
+          platform
+        },
+        global: {
+          stubs: {
+            BaseDialog: {
+              template: '<div><slot /><slot name="footer" /></div>'
+            },
+            Icon: {
+              template: '<span />'
+            }
+          }
+        }
+      })
+
+      await wrapper.findAll('button').find((button) =>
+        button.text().includes('keys.useKeyModal.cliTabs.codexCli')
+      )!.trigger('click')
+      for (const os of ['macOS / Linux', 'Windows']) {
+        await wrapper.findAll('button').find((button) => button.text().trim() === os)!.trigger('click')
+        for (const catalogMode of ['remote', 'file'] as const) {
+          await wrapper.get('[data-testid="codex-model-catalog-mode"]').setValue(catalogMode)
+          const configToml = wrapper.findAll('pre code')
+            .map((code) => code.text())
+            .find((content) => content.includes('[model_providers.sub2api]'))
+          expect(configToml).toBeDefined()
+          const text = configToml!
+
+          expect(countOccurrences(text, 'api_key_model_discovery = true')).toBe(catalogMode === 'remote' ? 1 : 0)
+          if (catalogMode === 'remote') {
+            expect(text).toContain('model_catalog_url = "https://example.com/v1/models"')
+            expect(text).toContain('supports_websockets = false\n\n[features]\napi_key_model_discovery = true')
+            expect(text).not.toContain('model_catalog_json')
+          } else {
+            expect(text).toContain('model_catalog_json = "~/.codex/codex-models.json"')
+            expect(text).not.toContain('model_catalog_url')
+            expect(text).not.toContain('[features]')
+          }
+
+          // The env_key auth fields and the routed transport settings are unchanged in both modes.
+          expect(text).toContain('env_key = "SUB2API_API_KEY"')
+          expect(text).toContain('wire_api = "responses"')
+          expect(text).toContain('requires_openai_auth = false')
+          expect(text).toContain('supports_websockets = false')
+        }
       }
     }
   )
