@@ -191,10 +191,17 @@ func (m *mockChannelCachePubSub) NotifyUpdate(context.Context) error {
 	return nil
 }
 
-func (m *mockChannelCachePubSub) SubscribeUpdates(_ context.Context, handler func()) {
+func (m *mockChannelCachePubSub) SubscribeUpdates(ctx context.Context, handler func()) <-chan struct{} {
 	m.mu.Lock()
 	m.handlers = append(m.handlers, handler)
 	m.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		close(done)
+	}()
+	return done
 }
 
 func (m *mockChannelAuthCacheInvalidator) InvalidateAuthCacheByKey(_ context.Context, key string) {

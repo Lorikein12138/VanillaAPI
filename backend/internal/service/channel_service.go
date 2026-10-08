@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -154,7 +155,8 @@ const (
 // ChannelCachePubSub broadcasts channel cache invalidations between instances.
 type ChannelCachePubSub interface {
 	NotifyUpdate(ctx context.Context) error
-	SubscribeUpdates(ctx context.Context, handler func())
+	// SubscribeUpdates 返回的 channel 在订阅 loop 完全退出后关闭，供 Stop 等待。
+	SubscribeUpdates(ctx context.Context, handler func()) <-chan struct{}
 }
 
 // ChannelService 渠道管理服务
@@ -167,6 +169,11 @@ type ChannelService struct {
 
 	cache   atomic.Value // *channelCache
 	cacheSF singleflight.Group
+
+	// 缓存订阅生命周期：Stop 取消 subscriptionCancel，并等待 subscriptionDone 关闭
+	subscriptionCancel context.CancelFunc
+	subscriptionDone   <-chan struct{}
+	stopOnce           sync.Once
 }
 
 // NewChannelService 创建渠道服务实例。
@@ -180,7 +187,9 @@ func NewChannelService(repo ChannelRepository, groupRepo GroupRepository, authCa
 		pricingService:       pricingService,
 		cachePubSub:          cachePubSub,
 	}
-	s.subscribeCacheUpdates(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	s.subscriptionCancel = cancel
+	s.subscribeCacheUpdates(ctx)
 	return s
 }
 
@@ -424,11 +433,53 @@ func (s *ChannelService) notifyCacheUpdate() {
 	}
 }
 
+// subscribeCacheUpdates 订阅其他实例的渠道缓存失效通知；没有订阅源时 subscriptionDone 视为已结束。
 func (s *ChannelService) subscribeCacheUpdates(ctx context.Context) {
 	if s.cachePubSub == nil {
+		s.subscriptionDone = closedSubscriptionDone()
 		return
 	}
-	s.cachePubSub.SubscribeUpdates(ctx, s.clearCache)
+	s.subscriptionDone = s.cachePubSub.SubscribeUpdates(ctx, s.clearCache)
+}
+
+// Stop 取消渠道缓存订阅并等待订阅 loop 退出。ctx 先结束时返回 ctx.Err()，之后可再次调用继续等待。
+// 对 nil 接收者安全；重复调用只取消一次。
+func (s *ChannelService) Stop(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.stopOnce.Do(func() {
+		if s.subscriptionCancel != nil {
+			s.subscriptionCancel()
+		}
+	})
+	return waitSubscriptionDone(ctx, s.subscriptionDone)
+}
+
+// waitSubscriptionDone 等待订阅 done 关闭。done 已关闭时优先返回 nil，
+// 避免 ctx 与 done 同时就绪时被误判为超时。
+func waitSubscriptionDone(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// closedSubscriptionDone 返回已关闭的 done，用于没有订阅 loop 的场景。
+func closedSubscriptionDone() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
 }
 
 // matchWildcard 在通配符定价中查找匹配项（最先匹配到优先）

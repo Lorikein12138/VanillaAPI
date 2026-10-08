@@ -44,7 +44,12 @@ func (c *tlsFingerprintProfileCache) Get(ctx context.Context) ([]*model.TLSFinge
 	data, err := c.rdb.Get(ctx, tlsFPProfileCacheKey).Bytes()
 	if err != nil {
 		if err != redis.Nil {
-			slog.Warn("tls_fp_profile_cache_get_failed", "error", err)
+			// 订阅被 Stop 取消时的读取中断属于正常停止，不作为告警
+			if isStoppedByCancel(ctx, err) {
+				slog.Debug("tls_fp_profile_cache_get_failed", "reason", "context_done", "error", err)
+			} else {
+				slog.Warn("tls_fp_profile_cache_get_failed", "error", err)
+			}
 		}
 		return nil, false
 	}
@@ -95,28 +100,23 @@ func (c *tlsFingerprintProfileCache) NotifyUpdate(ctx context.Context) error {
 }
 
 // SubscribeUpdates 订阅缓存更新通知
-func (c *tlsFingerprintProfileCache) SubscribeUpdates(ctx context.Context, handler func()) {
+// 返回的 channel 只在 PubSub 已关闭且 handler 已返回后关闭，供 Stop 等待订阅 loop 完全退出
+func (c *tlsFingerprintProfileCache) SubscribeUpdates(ctx context.Context, handler func()) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		sub := c.rdb.Subscribe(ctx, tlsFPProfilePubSubKey)
-		defer func() { _ = sub.Close() }()
+		defer closePubSubSubscription(ctx, sub, "tls fingerprint profile cache subscriber")
 
-		ch := sub.Channel()
-		for {
-			select {
-			case <-ctx.Done():
-				slog.Debug("tls_fp_profile_cache_subscriber_stopped", "reason", "context_done")
-				return
-			case msg := <-ch:
-				if msg == nil {
-					slog.Warn("tls_fp_profile_cache_subscriber_stopped", "reason", "channel_closed")
-					return
-				}
-				c.localMu.Lock()
-				c.localCache = nil
-				c.localMu.Unlock()
+		reason := consumePubSubMessages(ctx, sub.Channel(), func() {
+			// 先清空本地缓存再通知上层，保证 handler 触发的刷新不会读到旧数据
+			c.localMu.Lock()
+			c.localCache = nil
+			c.localMu.Unlock()
 
-				handler()
-			}
-		}
+			handler()
+		})
+		logPubSubStopped("tls_fp_profile_cache_subscriber_stopped", reason)
 	}()
+	return done
 }
