@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -26,7 +28,8 @@ type TLSFingerprintProfileCache interface {
 	Set(ctx context.Context, profiles []*model.TLSFingerprintProfile) error
 	Invalidate(ctx context.Context) error
 	NotifyUpdate(ctx context.Context) error
-	SubscribeUpdates(ctx context.Context, handler func())
+	// SubscribeUpdates 返回的 channel 在订阅 loop 完全退出后关闭，供 Stop 等待
+	SubscribeUpdates(ctx context.Context, handler func()) <-chan struct{}
 }
 
 // TLSFingerprintProfileService TLS 指纹模板管理服务
@@ -37,6 +40,11 @@ type TLSFingerprintProfileService struct {
 	// 本地 ID→Profile 映射缓存，用于 DoWithTLS 热路径快速查找
 	localCache map[int64]*model.TLSFingerprintProfile
 	localMu    sync.RWMutex
+
+	// 缓存订阅生命周期：Stop 取消 subscriptionCancel，并等待 subscriptionDone 关闭
+	subscriptionCancel context.CancelFunc
+	subscriptionDone   <-chan struct{}
+	stopOnce           sync.Once
 }
 
 // NewTLSFingerprintProfileService 创建 TLS 指纹模板服务
@@ -50,7 +58,8 @@ func NewTLSFingerprintProfileService(
 		localCache: make(map[int64]*model.TLSFingerprintProfile),
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.subscriptionCancel = cancel
 	if err := svc.reloadFromDB(ctx); err != nil {
 		logger.LegacyPrintf("service.tls_fp_profile", "[TLSFPProfileService] Failed to load profiles from DB on startup: %v", err)
 		if fallbackErr := svc.refreshLocalCache(ctx); fallbackErr != nil {
@@ -59,14 +68,34 @@ func NewTLSFingerprintProfileService(
 	}
 
 	if cache != nil {
-		cache.SubscribeUpdates(ctx, func() {
-			if err := svc.refreshLocalCache(context.Background()); err != nil {
+		svc.subscriptionDone = cache.SubscribeUpdates(ctx, func() {
+			if err := svc.refreshLocalCache(ctx); err != nil {
+				if isSubscriptionCancellation(ctx, err) {
+					slog.Debug("tls_fp_profile_refresh_stopped", "reason", "context_done", "error", err)
+					return
+				}
 				logger.LegacyPrintf("service.tls_fp_profile", "[TLSFPProfileService] Failed to refresh cache on notification: %v", err)
 			}
 		})
+	} else {
+		svc.subscriptionDone = closedSubscriptionDone()
 	}
 
 	return svc
+}
+
+// Stop 取消缓存订阅并等待订阅 loop 退出。ctx 先结束时返回 ctx.Err()，之后可再次调用继续等待。
+// 对 nil 接收者安全；等待期间不持有 localMu，不阻塞热路径读取。
+func (s *TLSFingerprintProfileService) Stop(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.stopOnce.Do(func() {
+		if s.subscriptionCancel != nil {
+			s.subscriptionCancel()
+		}
+	})
+	return waitSubscriptionDone(ctx, s.subscriptionDone)
 }
 
 // --- CRUD ---
@@ -214,7 +243,11 @@ func (s *TLSFingerprintProfileService) reloadFromDB(ctx context.Context) error {
 
 	if s.cache != nil {
 		if err := s.cache.Set(ctx, profiles); err != nil {
-			logger.LegacyPrintf("service.tls_fp_profile", "[TLSFPProfileService] Failed to set cache: %v", err)
+			if isSubscriptionCancellation(ctx, err) {
+				slog.Debug("tls_fp_profile_cache_set_stopped", "reason", "context_done", "error", err)
+			} else {
+				logger.LegacyPrintf("service.tls_fp_profile", "[TLSFPProfileService] Failed to set cache: %v", err)
+			}
 		}
 	}
 
@@ -256,4 +289,10 @@ func (s *TLSFingerprintProfileService) invalidateAndNotify(ctx context.Context) 
 			logger.LegacyPrintf("service.tls_fp_profile", "[TLSFPProfileService] Failed to notify cache update: %v", err)
 		}
 	}
+}
+
+// isSubscriptionCancellation 判断 err 是否由订阅 ctx 被 Stop 取消引起。
+// 只认 context.Canceled：CRUD 刷新的 3 秒超时（DeadlineExceeded）不是订阅停止，保持原有告警。
+func isSubscriptionCancellation(ctx context.Context, err error) bool {
+	return errors.Is(ctx.Err(), context.Canceled) && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
