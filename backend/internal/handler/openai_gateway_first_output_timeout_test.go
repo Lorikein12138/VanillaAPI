@@ -123,7 +123,7 @@ func (u *smartSchedulingStallHTTPUpstream) Do(req *http.Request, _ string, accou
 	}, nil
 }
 
-func TestSmartSchedulingStall_FailoverBudget(t *testing.T) {
+func TestOpenAIFirstOutputTimeoutFailoverBudget(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const groupID int64 = 30
 	accounts := []service.Account{
@@ -151,14 +151,10 @@ func TestSmartSchedulingStall_FailoverBudget(t *testing.T) {
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 	settingsRepo := &smartSchedulingStallSettingsRepo{values: map[string]string{}}
 	settingService := service.NewSettingService(settingsRepo, &config.Config{})
-	require.NoError(t, settingService.UpdateSettings(context.Background(), &service.SystemSettings{
-		SmartSchedulingEnabled:          true,
-		OpenAIFirstOutputTimeoutSeconds: 1,
-	}))
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Default.RateMultiplier = 1
 	cfg.Security.URLAllowlist.Enabled = false
-	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 0
+	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 1
 	cfg.Gateway.MaxAccountSwitches = 3
 	rateLimitSvc := service.NewRateLimitService(accountRepo, nil, cfg, nil, nil)
 	rateLimitSvc.SetSettingService(settingService)
@@ -231,7 +227,7 @@ func TestSmartSchedulingStall_FailoverBudget(t *testing.T) {
 
 func ptrForSmartSchedulingStall(value int64) *int64 { return &value }
 
-func TestSmartSchedulingStall_TimeoutAttribution(t *testing.T) {
+func TestOpenAIFirstOutputTimeoutUsesBaselineSchedulerFailureAndBudget(t *testing.T) {
 	failoverErr := &service.UpstreamFailoverError{
 		StatusCode:               http.StatusGatewayTimeout,
 		ResponseBody:             []byte(`{"error":{"type":"first_output_timeout"}}`),

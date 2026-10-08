@@ -14,16 +14,6 @@ export default {
         payment: 'Payment',
       },
       features: {
-        smartScheduling: {
-          title: 'Smart scheduling',
-          description: 'Keep model, capability, transport, quota, and circuit gates; prefer accounts with enough recent health data.',
-          enabled: 'Enable smart scheduling',
-          enabledHint: 'Route by health when on. This switch and the OpenAI experimental scheduler are independent and can be enabled separately.',
-          firstOutputTimeoutLabel: 'First semantic output timeout (seconds)',
-          firstOutputTimeoutHint: 'Integer 0–300; default 30. 0 disables it. Applies only with smart scheduling on; otherwise use config.yaml.',
-          firstOutputTimeoutRisk: 'A timeout before semantic output may switch accounts once. Upstream may have processed and billed it; retrying may bill twice.',
-          firstOutputTimeoutInvalid: 'Enter an integer from 0 to 300 for the first semantic output timeout.',
-        },
         channelMonitor: {
           title: 'Channel Monitor',
           description: 'Choose either V1 active probes or V2 passive usage monitoring. When disabled, both background jobs stop and the user entry is hidden.',
@@ -1275,9 +1265,6 @@ export default {
       openaiExperimentalScheduler: {
         title: 'OpenAI experimental scheduler policy',
         description: "Disabled by default. When enabled, this only changes the gateway's experimental account-selection policy for OpenAI traffic; it does not indicate an upstream OpenAI capability.",
-        smartDisabledRelation: 'Smart scheduling is off, so this module is the only experimental scheduling policy in effect.',
-        smartOnlyRelation: 'Smart scheduling is on, but experimental overrides are off; health-aware routing uses config or built-in scoring defaults.',
-        smartAndExperimentalRelation: 'Both modules are on; these experimental parameters only order accounts that health-aware routing allows.',
         lowRatePriorityTitle: 'Prefer lower rates',
         lowRatePriorityDescription: 'When enabled, accounts with lower billing rates are preferred. If rates are equal, account priority, current load, and other scheduling factors are considered. This switch is ignored when the experimental scheduler is enabled.',
         oauthRateTitle: 'OAuth scheduling reference rate',

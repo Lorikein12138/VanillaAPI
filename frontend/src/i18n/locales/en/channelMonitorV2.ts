@@ -96,8 +96,6 @@ export default {
       refreshTitle: 'Aggregation interval',
       refreshHint: 'Affects matrix time granularity and refresh cadence',
       refreshAria: 'Aggregation interval',
-      syntheticEmptyBucketsTitle: 'Synthetic data',
-      syntheticEmptyBucketsHint: 'Add green display buckets only to complete, aggregated intervals with no real traffic. This does not write statistics.',
       platformsTitle: 'Platforms and models',
       platformsHint:
         'Leave empty = show all real model names; when filled, only listed models get their own rows and the rest roll into “Other”',

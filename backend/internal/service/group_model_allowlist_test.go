@@ -134,6 +134,24 @@ func TestBuildAccountModelAllowlistUnion_MappedKeysOnly(t *testing.T) {
 	}
 }
 
+func TestRetiredHealthRemovalKeepsMappingSnapshotAndAllowlist(t *testing.T) {
+	account := Account{ID: 70001, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Credentials: map[string]any{"model_mapping": map[string]any{"client-alias": "upstream-model"}}}
+	snapshot := account.GetModelMapping()
+	for i := 0; i < 3; i++ {
+		got := ResolveEffectiveGroupModelAllowlist(GroupModelAllowlist{Enabled: true}, []Account{account})
+		if !reflect.DeepEqual(got.Models, []string{"client-alias"}) {
+			t.Fatalf("allowlist=%v", got.Models)
+		}
+	}
+	if !reflect.DeepEqual(snapshot, map[string]string{"client-alias": "upstream-model"}) {
+		t.Fatalf("mapping snapshot changed: %v", snapshot)
+	}
+	if !reflect.DeepEqual(account.GetModelMapping(), snapshot) {
+		t.Fatal("cached mapping changed")
+	}
+}
+
 func TestResolveEffectiveGroupModelAllowlist(t *testing.T) {
 	accounts := []Account{{Credentials: map[string]any{"model_mapping": map[string]any{"new-model": "new-model"}}}}
 

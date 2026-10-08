@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiClient } from '../client'
 import {
-  getAdminPresentationDimensions,
-  getAdminPresentationErrors,
-  getAdminPresentationMatrix,
-  getAdminPresentationModels,
-  getAdminPresentationSnapshot,
-  getAdminPresentationUsers,
   getConfig,
   getDimensions,
   getErrors,
@@ -53,48 +47,47 @@ describe('channel monitor V2 query serialization', () => {
     }))
   })
 
-  it('passes one optional as_of anchor through all six V2 read endpoints', async () => {
+  it('omits retired as_of from all six original user reads', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { items: [] } })
     const filter = { range: '30d', platforms: ['openai'], groupIds: [7], models: ['gpt-5'] }
-    const asOf = '2026-09-29T12:34:56.000Z'
 
-    await getDimensions(filter, false, undefined, asOf)
-    await getSnapshot(filter, false, undefined, asOf)
-    await getMatrix(filter, 'platform_group_model', false, undefined, asOf)
-    await getModels(filter, false, undefined, asOf)
-    await getErrors(filter, false, undefined, asOf)
-    await getUsers(filter, false, undefined, asOf)
+    await getDimensions(filter, false, undefined)
+    await getSnapshot(filter, false, undefined)
+    await getMatrix(filter, 'platform_group_model', false, undefined)
+    await getModels(filter, false, undefined)
+    await getErrors(filter, false, undefined)
+    await getUsers(filter, false, undefined)
 
     expect(get).toHaveBeenCalledTimes(6)
     for (const [, config] of get.mock.calls) {
+      expect(config?.params).not.toHaveProperty('as_of')
       expect(config?.params).toMatchObject({
         range: '30d',
         platform: ['openai'],
         group_id: [7],
         model: ['gpt-5'],
-        as_of: asOf,
       })
     }
   })
 
-  it('uses the dedicated admin presentation route for all six status resources', async () => {
+  it('uses only original admin routes for all six status resources', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { items: [] } })
     const filter = { range: '90m' as const, platforms: [], groupIds: [], models: [] }
 
-    await getAdminPresentationDimensions(filter)
-    await getAdminPresentationSnapshot(filter)
-    await getAdminPresentationMatrix(filter, 'platform_group')
-    await getAdminPresentationModels(filter)
-    await getAdminPresentationErrors(filter)
-    await getAdminPresentationUsers(filter)
+    await getDimensions(filter, true)
+    await getSnapshot(filter, true)
+    await getMatrix(filter, 'platform_group', true)
+    await getModels(filter, true)
+    await getErrors(filter, true)
+    await getUsers(filter, true)
 
     expect(get.mock.calls.map(([path]) => path)).toEqual([
-      '/admin/channel-monitor-v2/presentation/dimensions',
-      '/admin/channel-monitor-v2/presentation/snapshot',
-      '/admin/channel-monitor-v2/presentation/matrix',
-      '/admin/channel-monitor-v2/presentation/models',
-      '/admin/channel-monitor-v2/presentation/errors',
-      '/admin/channel-monitor-v2/presentation/users',
+      '/admin/channel-monitor-v2/dimensions',
+      '/admin/channel-monitor-v2/snapshot',
+      '/admin/channel-monitor-v2/matrix',
+      '/admin/channel-monitor-v2/models',
+      '/admin/channel-monitor-v2/errors',
+      '/admin/channel-monitor-v2/users',
     ])
   })
 

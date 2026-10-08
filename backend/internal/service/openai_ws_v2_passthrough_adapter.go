@@ -362,22 +362,10 @@ type openAIWSPassthroughFirstOutputFrameConn struct {
 	resolveDeadline   func(payload []byte) openAIWSPassthroughFirstOutputDeadline
 	activeReadTimeout time.Duration
 
-	mu                   sync.Mutex
-	state                openAIWSPassthroughFirstOutputDeadlineState
-	deadlineChanged      chan struct{}
-	firstSemanticPending bool
-	pendingFrames        []openAIWSPassthroughStagedFrame
-	pendingFrameBytes    int64
+	mu              sync.Mutex
+	state           openAIWSPassthroughFirstOutputDeadlineState
+	deadlineChanged chan struct{}
 }
-
-type openAIWSPassthroughStagedFrame struct {
-	messageType coderws.MessageType
-	payload     []byte
-}
-
-var errOpenAIWSPassthroughFirstOutputStageLimit = errors.New("upstream response exceeded first-output staging limit")
-
-const openAIWSPassthroughFirstOutputStageMaxFrames = 1024
 
 func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
 	if c == nil || c.inner == nil {
@@ -386,47 +374,6 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) ReadFrame(ctx context.Context)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for {
-		if !c.isFirstSemanticPending() {
-			if msgType, payload, ok := c.popStagedFrame(); ok {
-				return msgType, payload, nil
-			}
-		}
-		msgType, payload, err := c.readUpstreamFrame(ctx)
-		if err != nil {
-			c.clearStagedFrames()
-			return msgType, payload, err
-		}
-		if msgType == coderws.MessageText && openAIWSPassthroughIsFailureTerminalOutput(payload) {
-			c.clearStagedFrames()
-			c.observeUpstreamActivity(msgType, payload)
-			return msgType, payload, nil
-		}
-		if !c.isFirstSemanticPending() {
-			c.observeUpstreamActivity(msgType, payload)
-			return msgType, payload, nil
-		}
-		if msgType == coderws.MessageText && openAIWSPassthroughStartsSemanticOutput(payload) {
-			c.finishFirstSemanticOutput()
-			c.observeUpstreamActivity(msgType, payload)
-			if c.hasStagedFrames() {
-				if err := c.appendStagedFrame(msgType, payload); err != nil {
-					c.clearStagedFrames()
-					return coderws.MessageText, nil, err
-				}
-				stagedType, stagedPayload, _ := c.popStagedFrame()
-				return stagedType, stagedPayload, nil
-			}
-			return msgType, payload, nil
-		}
-		if err := c.appendStagedFrame(msgType, payload); err != nil {
-			c.clearStagedFrames()
-			return coderws.MessageText, nil, err
-		}
-	}
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) readUpstreamFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
 
 	type readResult struct {
 		msgType coderws.MessageType
@@ -478,6 +425,9 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) readUpstreamFrame(ctx context.
 	for {
 		select {
 		case result := <-readResultCh:
+			if result.err == nil {
+				c.observeUpstreamActivity(result.msgType, result.payload)
+			}
 			return result.msgType, result.payload, result.err
 		case <-c.deadlineChanged:
 			resetTimer()
@@ -506,117 +456,19 @@ func (c *openAIWSPassthroughFirstOutputFrameConn) readUpstreamFrame(ctx context.
 	}
 }
 
-func (c *openAIWSPassthroughFirstOutputFrameConn) isFirstSemanticPending() bool {
-	if c == nil {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.firstSemanticPending
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) finishFirstSemanticOutput() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.firstSemanticPending = false
-	c.mu.Unlock()
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) appendStagedFrame(msgType coderws.MessageType, payload []byte) error {
-	if c == nil {
-		return errOpenAIFirstOutputStageLimit
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.pendingFrames) >= openAIWSPassthroughFirstOutputStageMaxFrames || int64(len(payload)) > openAIFirstOutputStageMaxBytes-c.pendingFrameBytes {
-		return errOpenAIWSPassthroughFirstOutputStageLimit
-	}
-	frame := openAIWSPassthroughStagedFrame{messageType: msgType, payload: append([]byte(nil), payload...)}
-	c.pendingFrames = append(c.pendingFrames, frame)
-	c.pendingFrameBytes += int64(len(frame.payload))
-	return nil
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) popStagedFrame() (coderws.MessageType, []byte, bool) {
-	if c == nil {
-		return coderws.MessageText, nil, false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.pendingFrames) == 0 {
-		return coderws.MessageText, nil, false
-	}
-	frame := c.pendingFrames[0]
-	c.pendingFrames[0] = openAIWSPassthroughStagedFrame{}
-	c.pendingFrames = c.pendingFrames[1:]
-	c.pendingFrameBytes -= int64(len(frame.payload))
-	if len(c.pendingFrames) == 0 {
-		c.pendingFrames = nil
-		c.pendingFrameBytes = 0
-	}
-	return frame.messageType, frame.payload, true
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) hasStagedFrames() bool {
-	if c == nil {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.pendingFrames) > 0
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) clearStagedFrames() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.pendingFrames = nil
-	c.pendingFrameBytes = 0
-	c.mu.Unlock()
-}
-
 func (c *openAIWSPassthroughFirstOutputFrameConn) WriteFrame(ctx context.Context, msgType coderws.MessageType, payload []byte) error {
 	if c == nil || c.inner == nil {
 		return errOpenAIWSConnClosed
 	}
 	generation := uint64(0)
 	if msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
-		c.beginFirstSemanticOutput()
 		generation = c.armDeadline(payload)
 	}
 	if err := c.inner.WriteFrame(ctx, msgType, payload); err != nil {
 		c.disarmDeadline(generation)
-		if generation != 0 || msgType == coderws.MessageText && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
-			c.cancelFirstSemanticOutput()
-		}
 		return err
 	}
 	return nil
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) beginFirstSemanticOutput() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.firstSemanticPending = true
-	c.pendingFrames = nil
-	c.pendingFrameBytes = 0
-	c.mu.Unlock()
-}
-
-func (c *openAIWSPassthroughFirstOutputFrameConn) cancelFirstSemanticOutput() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	c.firstSemanticPending = false
-	c.pendingFrames = nil
-	c.pendingFrameBytes = 0
-	c.mu.Unlock()
 }
 
 func (c *openAIWSPassthroughFirstOutputFrameConn) Close() error {
@@ -741,15 +593,6 @@ func openAIWSPassthroughIsTerminalOutput(payload []byte) bool {
 	}
 }
 
-func openAIWSPassthroughIsFailureTerminalOutput(payload []byte) bool {
-	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
-	case "error", "response.failed", "response.incomplete":
-		return true
-	default:
-		return false
-	}
-}
-
 var _ openaiwsv2.FrameConn = (*openAIWSClientFrameConn)(nil)
 var _ openaiwsv2.FrameConn = (*openAIWSPassthroughFirstOutputFrameConn)(nil)
 
@@ -845,7 +688,6 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
-	firstOutputSettings := s.openAIFirstOutputRuntimeSettings(ctx, c)
 	if isOpenAIResponsesLiteWebSocketPayload(firstClientMessage) {
 		liteFirstMessage, _, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(firstClientMessage, account)
 		if liteErr != nil {
@@ -1087,7 +929,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if current := usageMeta.reasoningEffort.Load(); current != nil {
 				reasoningEffort = *current
 			}
-			timeout := s.openAIFirstOutputTimeoutForSettings(reasoningEffort, firstOutputSettings)
+			timeout := s.openAIFirstOutputTimeout(reasoningEffort)
+			if timeout <= 0 {
+				timeout = s.openAIWSPassthroughIdleTimeout()
+			}
 			model := openAIWSPassthroughRequestModelForFrame(payload)
 			if model == "" {
 				model = usageMeta.requestModelForFrame(payload)
@@ -1310,7 +1155,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if (msgType == coderws.MessageText || msgType == coderws.MessageBinary) && strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
 				return msgType, payload, nil
 			}
-			if writeErr := relayUpstreamFrameConn.WriteFrame(readCtx, msgType, payload); writeErr != nil {
+			if writeErr := upstreamFrameConn.WriteFrame(readCtx, msgType, payload); writeErr != nil {
 				return msgType, payload, writeErr
 			}
 		}
@@ -1337,14 +1182,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				return *startedAt
 			},
 			// Passthrough idle is enforced only after a completed turn by
-			// clientFrameConn. Start the client reader immediately so cancel and
-			// disconnect still stop a turn while pre-semantic frames are staged.
+			// clientFrameConn. The relay-wide activity watchdog would also
+			// terminate a healthy active upstream turn.
 			IdleTimeout:                     0,
 			FirstMessageType:                coderws.MessageText,
 			FirstMessageSent:                upstreamFirstMessageSent,
-			StartClientAfterFirstDownstream: false,
+			StartClientAfterFirstDownstream: true,
 			ReadClientFrame:                 readNextClientFrame,
-			OnUsageParseFailure: func(eventType string, _ string) {
+			OnUsageParseFailure: func(eventType string, usageRaw string) {
 				logOpenAIWSV2Passthrough(
 					"usage_parse_failed event_type=%s",
 					truncateOpenAIWSLogValue(eventType, openAIWSLogValueMaxLen),
@@ -1555,23 +1400,6 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	)
 
 	relayErr := relayExit.Err
-	if errors.Is(relayErr, errOpenAIWSPassthroughFirstOutputStageLimit) {
-		if turnCount == 0 && !relayExit.WroteDownstream {
-			relayErr = &UpstreamFailoverError{
-				StatusCode:               http.StatusBadGateway,
-				ResponseBody:             []byte(`{"error":{"type":"upstream_error","message":"Upstream response exceeded first-output staging limit"}}`),
-				Stage:                    GatewayFailureStageInference,
-				Scope:                    GatewayFailureScopeAccount,
-				SafeToFailoverAfterWrite: true,
-			}
-		} else {
-			relayErr = NewOpenAIWSClientCloseError(
-				coderws.StatusGoingAway,
-				"upstream response exceeded first-output staging limit; please reconnect",
-				relayErr,
-			)
-		}
-	}
 	var firstOutputTimeoutErr *openAIWSPassthroughFirstOutputTimeoutError
 	if errors.As(relayErr, &firstOutputTimeoutErr) {
 		deadline := firstOutputTimeoutErr.deadline
@@ -1646,12 +1474,6 @@ func openAIWSPassthroughRelayClientClose(exit openaiwsv2.RelayExit, completedTur
 	if errors.As(exit.Err, &firstOutputTimeoutErr) {
 		if completedTurns > 0 || exit.WroteDownstream {
 			return coderws.StatusGoingAway, "upstream produced no semantic output; please reconnect", true
-		}
-		return 0, "", false
-	}
-	if errors.Is(exit.Err, errOpenAIWSPassthroughFirstOutputStageLimit) {
-		if completedTurns > 0 || exit.WroteDownstream {
-			return coderws.StatusGoingAway, "upstream response exceeded first-output staging limit; please reconnect", true
 		}
 		return 0, "", false
 	}

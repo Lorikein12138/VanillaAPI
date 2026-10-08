@@ -69,15 +69,6 @@ type AccountHandler struct {
 	ollamaCloudUsage        *service.OllamaCloudUsageService
 	cfg                     *config.Config
 	opencodeGoUsage         *service.OpenCodeGoUsageService
-	smartHealthProvider     smartHealthSnapshotProvider
-}
-
-type smartHealthSnapshotProvider interface {
-	SmartHealthSnapshot(context.Context, []*service.Account) map[int64]service.OpenAISmartHealthSnapshot
-}
-
-func (h *AccountHandler) SetSmartHealthSnapshotProvider(provider smartHealthSnapshotProvider) {
-	h.smartHealthProvider = provider
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -213,10 +204,9 @@ type AccountWithConcurrency struct {
 	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
 	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
 	// 以下字段仅对 Anthropic OAuth/SetupToken 账号有效，且仅在启用相应功能时返回
-	CurrentWindowCost *float64                           `json:"current_window_cost,omitempty"` // 当前窗口费用
-	ActiveSessions    *int                               `json:"active_sessions,omitempty"`     // 当前活跃会话数
-	CurrentRPM        *int                               `json:"current_rpm,omitempty"`         // 当前分钟 RPM 计数
-	SmartHealth       *service.OpenAISmartHealthSnapshot `json:"smart_health,omitempty"`
+	CurrentWindowCost *float64 `json:"current_window_cost,omitempty"` // 当前窗口费用
+	ActiveSessions    *int     `json:"active_sessions,omitempty"`     // 当前活跃会话数
+	CurrentRPM        *int     `json:"current_rpm,omitempty"`         // 当前分钟 RPM 计数
 }
 
 // AccountListItemWithConcurrency is the compact account-list envelope used
@@ -224,13 +214,12 @@ type AccountWithConcurrency struct {
 // so groups/account_groups never appear in the list payload.
 type AccountListItemWithConcurrency struct {
 	*dto.AccountListItem
-	CurrentConcurrency int                                `json:"current_concurrency"`
-	SchedulerScore     *AccountSchedulerScore             `json:"scheduler_score,omitempty"`
-	SchedulerScores    []AccountSchedulerGroupScore       `json:"scheduler_scores,omitempty"`
-	CurrentWindowCost  *float64                           `json:"current_window_cost,omitempty"`
-	ActiveSessions     *int                               `json:"active_sessions,omitempty"`
-	CurrentRPM         *int                               `json:"current_rpm,omitempty"`
-	SmartHealth        *service.OpenAISmartHealthSnapshot `json:"smart_health,omitempty"`
+	CurrentConcurrency int                          `json:"current_concurrency"`
+	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
+	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
+	CurrentWindowCost  *float64                     `json:"current_window_cost,omitempty"`
+	ActiveSessions     *int                         `json:"active_sessions,omitempty"`
+	CurrentRPM         *int                         `json:"current_rpm,omitempty"`
 }
 
 type simpleModeGroupReference struct {
@@ -808,15 +797,6 @@ func (h *AccountHandler) List(c *gin.Context) {
 		_ = g.Wait()
 	}
 
-	var smartHealthByAccount map[int64]service.OpenAISmartHealthSnapshot
-	if h.smartHealthProvider != nil && len(accounts) > 0 {
-		accountPointers := make([]*service.Account, len(accounts))
-		for index := range accounts {
-			accountPointers[index] = &accounts[index]
-		}
-		smartHealthByAccount = h.smartHealthProvider.SmartHealthSnapshot(c.Request.Context(), accountPointers)
-	}
-
 	// Build response with concurrency info
 	result := make([]AccountWithConcurrency, len(accounts))
 	for i := range accounts {
@@ -835,10 +815,6 @@ func (h *AccountHandler) List(c *gin.Context) {
 			SchedulerScore:     schedulerScores[acc.ID],
 			SchedulerScores:    schedulerGroupScores[acc.ID],
 		}
-		if snapshot, ok := smartHealthByAccount[acc.ID]; ok {
-			item.SmartHealth = &snapshot
-		}
-
 		// 添加窗口费用（仅当启用时）
 		if windowCosts != nil {
 			if cost, ok := windowCosts[acc.ID]; ok {
@@ -877,7 +853,6 @@ func (h *AccountHandler) List(c *gin.Context) {
 				CurrentWindowCost:  item.CurrentWindowCost,
 				ActiveSessions:     item.ActiveSessions,
 				CurrentRPM:         item.CurrentRPM,
-				SmartHealth:        item.SmartHealth,
 			}
 		}
 		etag := buildAccountsListETag(compact, total, page, pageSize, platform, accountType, status, search, true)

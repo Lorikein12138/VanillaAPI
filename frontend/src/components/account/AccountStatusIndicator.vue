@@ -36,25 +36,13 @@
           {{ tempUnschedRecoveryText }}
         </span>
       </div>
-      <div v-else-if="smartHealthNextProbeText && !hasHardStatus" class="flex flex-col items-center gap-1">
-        <span :class="['badge text-xs', primaryStatusClass]">
-          {{ primaryStatusText }}
-        </span>
-        <span
-          class="text-[11px] text-gray-400 dark:text-gray-500"
-          :title="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
-          :aria-label="t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText })"
-        >
-          {{ smartHealthNextProbeText }}
-        </span>
-      </div>
       <span
         v-else
-        :class="['badge text-xs', primaryStatusClass]"
+        :class="['badge text-xs', statusClass]"
         :title="hardStatusAccessibilityText || undefined"
         :aria-label="hardStatusAccessibilityText || undefined"
       >
-        {{ primaryStatusText }}
+        {{ statusText }}
       </span>
     </template>
 
@@ -185,7 +173,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { Account } from '@/types'
@@ -200,72 +188,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'show-temp-unsched', account: Account): void
 }>()
-
-const smartHealthNow = ref(Date.now())
-let smartHealthExpiryTimer: ReturnType<typeof setTimeout> | undefined
-// setTimeout 的延迟上限是 2^31-1 毫秒（约 24.8 天），超出会被当成 1 毫秒立刻触发；超长冷却分段等待，到点后重新排程
-const MAX_TIMER_DELAY_MS = 2_147_483_647
-
-const smartHealthDeadline = computed(() => {
-  const value = props.account.smart_health?.next_probe_at
-  if (!value) return null
-  const timestamp = Date.parse(value)
-  return Number.isFinite(timestamp) ? timestamp : null
-})
-
-const smartHealthDisplayState = computed(() => {
-  const snapshot = props.account.smart_health
-  if (!snapshot) return null
-  switch (snapshot.state) {
-    case 'cooldown':
-      if (smartHealthDeadline.value === null) return null
-      return smartHealthDeadline.value <= smartHealthNow.value ? 'ready' : 'cooldown'
-    case 'ready':
-    case 'probing':
-      return snapshot.state
-    default:
-      return null
-  }
-})
-
-const smartHealthLabel = computed(() => {
-  switch (smartHealthDisplayState.value) {
-    case 'cooldown': return t('admin.accounts.status.smartHealthCooldown')
-    case 'ready': return t('admin.accounts.status.smartHealthReady')
-    case 'probing': return t('admin.accounts.status.smartHealthProbing')
-    default: return ''
-  }
-})
-
-const smartHealthNextProbeText = computed(() => {
-  if (smartHealthDisplayState.value !== 'cooldown' || smartHealthDeadline.value === null || smartHealthDeadline.value <= smartHealthNow.value) {
-    return ''
-  }
-  return formatDateTime(props.account.smart_health?.next_probe_at)
-})
-
-const smartHealthAccessibilityText = computed(() => {
-  if (!smartHealthLabel.value) return ''
-  if (!smartHealthNextProbeText.value) return smartHealthLabel.value
-  return `${smartHealthLabel.value}. ${t('admin.accounts.status.smartHealthNextProbeTime', { time: smartHealthNextProbeText.value })}`
-})
-
-const scheduleSmartHealthExpiry = () => {
-  if (smartHealthExpiryTimer) clearTimeout(smartHealthExpiryTimer)
-  smartHealthExpiryTimer = undefined
-  smartHealthNow.value = Date.now()
-  const deadline = smartHealthDeadline.value
-  if (props.account.smart_health?.state !== 'cooldown' || deadline === null || deadline <= Date.now()) return
-  smartHealthExpiryTimer = setTimeout(() => {
-    smartHealthExpiryTimer = undefined
-    scheduleSmartHealthExpiry()
-  }, Math.min(deadline - Date.now(), MAX_TIMER_DELAY_MS))
-}
-
-watch(() => [props.account.smart_health?.state, props.account.smart_health?.next_probe_at], scheduleSmartHealthExpiry, { immediate: true })
-onBeforeUnmount(() => {
-  if (smartHealthExpiryTimer) clearTimeout(smartHealthExpiryTimer)
-})
 
 // Computed: is rate limited (429)
 const isRateLimited = computed(() => {
@@ -448,37 +370,11 @@ const statusText = computed(() => {
   return t(`admin.accounts.status.${props.account.status}`)
 })
 
-const hasHardStatus = computed(() => (
-  isRateLimited.value ||
-  isOverloaded.value ||
-  hasError.value ||
-  isTempUnschedulable.value ||
-  props.account.status !== 'active' ||
-  isQuotaExceeded.value ||
-  !props.account.schedulable
-))
-
-const primaryStatusText = computed(() => {
-  if (!hasHardStatus.value && smartHealthLabel.value) return smartHealthLabel.value
-  return statusText.value
-})
-
-const primaryStatusClass = computed(() => {
-  if (!hasHardStatus.value && smartHealthDisplayState.value) return 'badge-warning'
-  return statusClass.value
-})
-
 const hardStatusAccessibilityText = computed(() => {
-  if (!hasHardStatus.value || !smartHealthAccessibilityText.value) return ''
-  const statusLabel = isRateLimited.value
-    ? t('admin.accounts.status.rateLimited')
-    : isOverloaded.value
-      ? t('admin.accounts.status.overloaded')
-      : statusText.value
-  const labels = [statusLabel]
-  if (isTempUnschedulable.value) labels.push(t('admin.accounts.status.viewTempUnschedDetails'))
-  labels.push(smartHealthAccessibilityText.value)
-  return labels.join('. ')
+  if (isRateLimited.value) return t('admin.accounts.status.rateLimited')
+  if (isOverloaded.value) return t('admin.accounts.status.overloaded')
+  if (isTempUnschedulable.value) return `${statusText.value}. ${t('admin.accounts.status.viewTempUnschedDetails')}`
+  return statusText.value
 })
 
 const handleTempUnschedClick = () => {

@@ -336,7 +336,6 @@ func newOpenAIUpstreamFailoverError(
 		RetryableOnSameAccount: retryableOnSameAccount || requestScopedCapacity,
 		RequestScopedTransient: requestScopedCapacity,
 	}
-	annotateOpenAIUpstreamFailoverError(failoverErr, responseHeaders, responseBody, upstreamMsg)
 	if isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, responseBody) {
 		failoverErr.RetryableOnSameAccount = false
 		failoverErr.RequestScopedTransient = false
@@ -398,10 +397,6 @@ func (s *OpenAIGatewayService) newOpenAIAccountFailoverErrorWithClassificationHe
 		failoverErr.SameAccountRetryDeadline = s.openAIOAuth429RetryDeadline(account)
 		failoverErr.SameAccountRetryDelay = openAIOAuth429SameAccountRetryDelay(responseHeaders, failoverErr.SameAccountRetryDeadline)
 	}
-	// Classification headers can differ from the public response headers (for
-	// example a semantic 429 inside a successful stream). Resolve all evidence
-	// together so quota fallback cannot overwrite request or conflicting sources.
-	annotateOpenAIUpstreamFailoverError(failoverErr, classificationHeaders, responseBody, upstreamMsg)
 	return failoverErr
 }
 
@@ -549,9 +544,9 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		}
 		c.Data(resp.StatusCode, contentType, body)
 		if cyberMsg == "" {
-			return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("openai cyber_policy: %d", resp.StatusCode), openAIAccountFailureRequestInvalid)
+			return nil, fmt.Errorf("openai cyber_policy: %d", resp.StatusCode)
 		}
-		return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("openai cyber_policy: %s", cyberMsg), openAIAccountFailureRequestInvalid)
+		return nil, fmt.Errorf("openai cyber_policy: %s", cyberMsg)
 	}
 	if account != nil && account.Platform == PlatformGrok && isGrokContentPolicyRejection(resp.StatusCode, body) {
 		clientMsg := grokContentPolicyClientMessage(body)
@@ -564,7 +559,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 				"message": clientMsg,
 			},
 		})
-		return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("grok content policy rejection: %s", clientMsg), openAIAccountFailureRequestInvalid)
+		return nil, fmt.Errorf("grok content policy rejection: %s", clientMsg)
 	}
 
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
@@ -634,9 +629,9 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 			upstreamMsg = errMsg
 		}
 		if upstreamMsg == "" {
-			return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode), openAIAccountFailureRequestInvalid)
+			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
 		}
-		return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg), openAIAccountFailureRequestInvalid)
+		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
 	// Check custom error codes
@@ -800,16 +795,16 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		}
 		writeError(c, resp.StatusCode, "invalid_request_error", clientMsg)
 		if cyberMsg == "" {
-			return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("openai cyber_policy: %d", resp.StatusCode), openAIAccountFailureRequestInvalid)
+			return nil, fmt.Errorf("openai cyber_policy: %d", resp.StatusCode)
 		}
-		return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("openai cyber_policy: %s", cyberMsg), openAIAccountFailureRequestInvalid)
+		return nil, fmt.Errorf("openai cyber_policy: %s", cyberMsg)
 	}
 	if account != nil && account.Platform == PlatformGrok && isGrokContentPolicyRejection(resp.StatusCode, body) {
 		clientMsg := grokContentPolicyClientMessage(body)
 		setOpsUpstreamError(c, resp.StatusCode, clientMsg, truncateString(string(body), 2048))
 		MarkResponseCommitted(c)
 		writeError(c, http.StatusForbidden, "invalid_request_error", clientMsg)
-		return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("grok content policy rejection: %s", clientMsg), openAIAccountFailureRequestInvalid)
+		return nil, fmt.Errorf("grok content policy rejection: %s", clientMsg)
 	}
 
 	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(body))
@@ -839,9 +834,9 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 			upstreamMsg = errMsg
 		}
 		if upstreamMsg == "" {
-			return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode), openAIAccountFailureRequestInvalid)
+			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
 		}
-		return nil, withOpenAIAccountFailureAttribution(fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg), openAIAccountFailureRequestInvalid)
+		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
 	// Check custom error codes — if the account does not handle this status,
