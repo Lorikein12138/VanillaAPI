@@ -1239,7 +1239,7 @@ func (s *PricingService) lookupIdentifiedModelPricingLocked(lookupCandidates []s
 		if candidate == "" {
 			continue
 		}
-		if pricing, ok := s.pricingData[candidate]; ok {
+		if pricing := s.pricingData[candidate]; pricing != nil {
 			return pricing
 		}
 	}
@@ -1248,18 +1248,29 @@ func (s *PricingService) lookupIdentifiedModelPricingLocked(lookupCandidates []s
 	// claude-opus-4-5-20251101 -> claude-opus-4.5-20251101
 	for _, candidate := range lookupCandidates {
 		normalized := strings.ReplaceAll(candidate, "-4-5-", "-4.5-")
-		if pricing, ok := s.pricingData[normalized]; ok {
+		if pricing := s.pricingData[normalized]; pricing != nil {
 			return pricing
 		}
 	}
 
-	// 3. 尝试模糊匹配（去掉版本号后缀）
-	// claude-opus-4-5-20251101 -> claude-opus-4.5
-	baseName := s.extractBaseName(lookupCandidates[0])
-	for key, pricing := range s.pricingData {
-		keyBase := s.extractBaseName(strings.ToLower(key))
-		if keyBase == baseName {
-			return pricing
+	// 3. 逐个候选尝试去掉有效日期/版本后缀后的同名条目。
+	for _, candidate := range lookupCandidates {
+		baseName := s.extractBaseName(lastSegment(strings.ToLower(candidate)))
+		if baseName == "" {
+			continue
+		}
+		matches := make([]pricingKeyCandidate, 0)
+		for key, pricing := range s.pricingData {
+			if pricing == nil {
+				continue
+			}
+			if s.extractBaseName(lastSegment(strings.ToLower(key))) == baseName {
+				matches = append(matches, pricingKeyCandidate{key: key, pricing: pricing})
+			}
+		}
+		if len(matches) > 0 {
+			sortPricingKeyCandidates(matches, baseName)
+			return matches[0].pricing
 		}
 	}
 
@@ -1292,15 +1303,29 @@ func (s *PricingService) buildModelLookupCandidates(modelLower string) []string 
 	}
 	normalized := normalizeModelNameForPricing(modelLower)
 
-	// A tier-specific entry should take precedence when the pricing catalog gains
-	// one later. Antigravity's Gemini Flash thinking tiers share the base rate,
-	// so the normalized base remains the fallback after the exact aliases.
-	candidates := rawCandidates
-	if normalizeGeminiThinkingTierAlias(lastSegment(modelLower)) != lastSegment(modelLower) {
+	// Only the two known Claude 4.6 thinking IDs have ordinary-rate aliases.
+	// Keep their raw and provider-prefixed candidates ahead of those aliases.
+	const claudeSonnetThinking = "claude-sonnet-4-6-thinking"
+	const claudeOpusThinking = "claude-opus-4-6-thinking"
+	leaf := lastSegment(modelLower)
+	var candidates []string
+	switch leaf {
+	case claudeSonnetThinking, claudeOpusThinking:
+		candidates = append(candidates, rawCandidates...)
 		candidates = append(candidates, normalized)
-	} else {
-		// Prefer canonical model names for all other aliases (including models/xxx).
-		candidates = append([]string{normalized}, candidates...)
+		prefix := strings.TrimSuffix(leaf, "-thinking")
+		candidates = append(candidates, prefix, strings.Replace(prefix, "-4-6", "-4.6", 1))
+	default:
+		// A tier-specific entry should take precedence when the pricing catalog gains
+		// one later. Antigravity's Gemini Flash thinking tiers share the base rate,
+		// so the normalized base remains the fallback after the exact aliases.
+		candidates = rawCandidates
+		if normalizeGeminiThinkingTierAlias(leaf) != leaf {
+			candidates = append(candidates, normalized)
+		} else {
+			// Prefer canonical model names for all other aliases (including models/xxx).
+			candidates = append([]string{normalized}, candidates...)
+		}
 	}
 
 	seen := make(map[string]struct{}, len(candidates))
@@ -1382,9 +1407,9 @@ func (s *PricingService) extractBaseName(model string) string {
 	// 移除日期后缀 (如 -20251101, -20241022)
 	parts := strings.Split(model, "-")
 	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		// 跳过看起来像日期的部分（8位数字）
-		if len(part) == 8 && isNumeric(part) {
+	for i, part := range parts {
+		// 仅跳过真实日历日期；其它八位数字仍是模型名的一部分。
+		if i == len(parts)-1 && isValidPricingDate(part) {
 			continue
 		}
 		// 跳过版本号（如 v1:0）
@@ -1396,16 +1421,68 @@ func (s *PricingService) extractBaseName(model string) string {
 	return strings.Join(result, "-")
 }
 
+type pricingKeyCandidate struct {
+	key     string
+	pricing *LiteLLMModelPricing
+}
+
+func sortPricingKeyCandidates(candidates []pricingKeyCandidate, canonical string) {
+	canonical = strings.ToLower(lastSegment(canonical))
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftLower, rightLower := strings.ToLower(left.key), strings.ToLower(right.key)
+		leftCanonical := !strings.Contains(left.key, "/") && leftLower == canonical
+		rightCanonical := !strings.Contains(right.key, "/") && rightLower == canonical
+		if leftCanonical != rightCanonical {
+			return leftCanonical
+		}
+
+		leftDate, leftHasDate := pricingKeyDate(left.key)
+		rightDate, rightHasDate := pricingKeyDate(right.key)
+		if leftHasDate != rightHasDate {
+			return leftHasDate
+		}
+		if leftHasDate && !leftDate.Equal(rightDate) {
+			return leftDate.After(rightDate)
+		}
+		if leftLower != rightLower {
+			return leftLower < rightLower
+		}
+		return left.key < right.key
+	})
+}
+
+func pricingKeyDate(key string) (time.Time, bool) {
+	parts := strings.Split(lastSegment(strings.ToLower(key)), "-")
+	if len(parts) == 0 {
+		return time.Time{}, false
+	}
+	datePart := parts[len(parts)-1]
+	date, err := time.Parse("20060102", datePart)
+	if err != nil || date.Format("20060102") != datePart {
+		return time.Time{}, false
+	}
+	return date, true
+}
+
+func isValidPricingDate(part string) bool {
+	if len(part) != 8 {
+		return false
+	}
+	date, err := time.Parse("20060102", part)
+	return err == nil && date.Format("20060102") == part
+}
+
 // matchByModelFamily 基于模型系列匹配
 func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 	if claude.IsOpus55(model) {
-		if pricing, ok := s.pricingData["claude-opus-5-5"]; ok {
+		if pricing := s.pricingData["claude-opus-5-5"]; pricing != nil {
 			return pricing
 		}
 		return claudeOpus55FallbackPricing
 	}
 	if claude.IsSonnet55(model) {
-		if pricing, ok := s.pricingData["claude-sonnet-5-5"]; ok {
+		if pricing := s.pricingData["claude-sonnet-5-5"]; pricing != nil {
 			return pricing
 		}
 		return claudeSonnet55FallbackPricing
@@ -1508,15 +1585,27 @@ func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 		lookups = matched.match
 	}
 	for _, pattern := range lookups {
+		if pricing := s.pricingData[pattern]; pricing != nil {
+			return pricing
+		}
+
+		matches := make([]pricingKeyCandidate, 0)
 		for key, pricing := range s.pricingData {
+			if pricing == nil {
+				continue
+			}
 			keyLower := strings.ToLower(key)
 			if matched.name == "opus-5" && claude.IsOpus55(keyLower) {
 				continue
 			}
 			if strings.Contains(keyLower, pattern) {
-				logger.LegacyPrintf("service.pricing", "[Pricing] Fuzzy matched %s -> %s", model, key)
-				return pricing
+				matches = append(matches, pricingKeyCandidate{key: key, pricing: pricing})
 			}
+		}
+		if len(matches) > 0 {
+			sortPricingKeyCandidates(matches, pattern)
+			logger.LegacyPrintf("service.pricing", "[Pricing] Fuzzy matched %s -> %s", model, matches[0].key)
+			return matches[0].pricing
 		}
 	}
 
@@ -1727,14 +1816,4 @@ func (s *PricingService) ListModelNamesByProvider(provider string) []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// isNumeric 检查字符串是否为纯数字
-func isNumeric(s string) bool {
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
 }

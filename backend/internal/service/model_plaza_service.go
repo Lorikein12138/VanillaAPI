@@ -380,7 +380,8 @@ func (s *ModelPlazaService) lookupOfficialPricing(ctx context.Context, modelName
 		return cached
 	}
 	var result *PlazaOfficialPricing
-	if mp, err := s.billingService.GetModelPricing(modelName); err == nil && mp != nil {
+	pricingAt := standardContextPricingAt()
+	if mp, err := s.billingService.getModelPricingAt(modelName, pricingAt); err == nil && mp != nil {
 		result = &PlazaOfficialPricing{
 			InputPrice:      nonZeroPtr(mp.InputPricePerToken),
 			OutputPrice:     nonZeroPtr(mp.OutputPricePerToken),
@@ -392,7 +393,14 @@ func (s *ModelPlazaService) lookupOfficialPricing(ctx context.Context, modelName
 			result.CacheWrite1hPrice = nonZeroPtr(mp.CacheCreation1hPrice)
 		}
 		if s.resolver != nil {
-			sched, schedErr := s.billingService.ResolveContextPricingSchedule(ctx, s.resolver, ContextPricingScheduleInput{Model: modelName})
+			resolved := &ResolvedPricing{
+				Mode:                   BillingModeToken,
+				BasePricing:            mp,
+				Source:                 PricingSourceLiteLLM,
+				SupportsCacheBreakdown: mp.SupportsCacheBreakdown,
+			}
+			resolved.longContextPricingEnabled = true
+			sched, schedErr := s.billingService.resolveContextPricingScheduleFromResolved(ctx, s.resolver, ContextPricingScheduleInput{Model: modelName}, resolved, pricingAt)
 			if schedErr == nil && sched != nil && len(sched.Tiers) > 1 {
 				result.Intervals = plazaIntervalsFromTiers(sched.Tiers)
 			}

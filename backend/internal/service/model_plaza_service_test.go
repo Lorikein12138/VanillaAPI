@@ -5,7 +5,9 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -847,6 +849,155 @@ func TestListGroups_CatalogMissingStillShowsChannelFlatPricing(t *testing.T) {
 	require.Empty(t, m.Pricing.Intervals)
 	require.Nil(t, m.Pricing.CacheWritePrice, "目录无价且渠道未配置 → 无价")
 	require.Nil(t, m.OfficialPricing)
+}
+
+func TestOfficialPricingStableSnapshot(t *testing.T) {
+	const catalogAJSON = `{"gpt-5.4":{"litellm_provider":"openai","mode":"chat",
+		"input_cost_per_token":2.5e-6,"output_cost_per_token":15e-6,
+		"cache_read_input_token_cost":0.25e-6,"cache_creation_input_token_cost":3.75e-6,
+		"cache_creation_input_token_cost_above_1hr":8e-6,
+		"input_cost_per_token_above_200k_tokens":5e-6,"output_cost_per_token_above_200k_tokens":30e-6,
+		"cache_read_input_token_cost_above_200k_tokens":0.5e-6,"cache_creation_input_token_cost_above_200k_tokens":6e-6,
+		"cache_creation_input_token_cost_above_1hr_above_200k_tokens":10e-6}}`
+	const catalogBJSON = `{"gpt-5.4":{"litellm_provider":"openai","mode":"chat",
+		"input_cost_per_token":7.5e-6,"output_cost_per_token":45e-6,
+		"cache_read_input_token_cost":0.75e-6,"cache_creation_input_token_cost":11.25e-6,
+		"cache_creation_input_token_cost_above_1hr":24e-6,
+		"input_cost_per_token_above_100k_tokens":15e-6,"output_cost_per_token_above_100k_tokens":90e-6,
+		"cache_read_input_token_cost_above_100k_tokens":1.5e-6,"cache_creation_input_token_cost_above_100k_tokens":18e-6,
+		"cache_creation_input_token_cost_above_1hr_above_100k_tokens":36e-6}}`
+	catalogA := newStubPricingServiceFromJSON(t, catalogAJSON)
+	catalogB := newStubPricingServiceFromJSON(t, catalogBJSON)
+	catalog := newStubPricingServiceFromJSON(t, catalogAJSON)
+	bs := NewBillingService(&config.Config{}, catalog)
+	resolver := NewModelPricingResolver(nil, bs)
+	svc := &ModelPlazaService{billingService: bs, resolver: resolver}
+
+	validateSnapshot := func(got *PlazaOfficialPricing) error {
+		if got == nil || len(got.Intervals) != 2 {
+			return errors.New("official pricing summary or context tiers missing")
+		}
+		if got.InputPrice == nil || got.OutputPrice == nil || got.CacheWritePrice == nil || got.CacheWrite1hPrice == nil || got.CacheReadPrice == nil {
+			return errors.New("one of the five official summary prices is missing")
+		}
+		for _, value := range []float64{*got.InputPrice, *got.OutputPrice, *got.CacheWritePrice, *got.CacheWrite1hPrice, *got.CacheReadPrice} {
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+				return errors.New("official summary contains an invalid price")
+			}
+		}
+		topInput := got.Intervals[1].InputPrice
+		if topInput == nil {
+			return errors.New("top context tier input price missing")
+		}
+		switch {
+		case math.Abs(*got.InputPrice-2.5e-6) < 1e-15:
+			if math.Abs(*got.OutputPrice-15e-6) > 1e-15 || math.Abs(*got.CacheWritePrice-3.75e-6) > 1e-15 ||
+				math.Abs(*got.CacheWrite1hPrice-8e-6) > 1e-15 || math.Abs(*got.CacheReadPrice-0.25e-6) > 1e-15 || math.Abs(*topInput-5e-6) > 1e-15 {
+				return errors.New("catalog A summary and tiers came from different generations")
+			}
+		case math.Abs(*got.InputPrice-7.5e-6) < 1e-15:
+			if math.Abs(*got.OutputPrice-45e-6) > 1e-15 || math.Abs(*got.CacheWritePrice-11.25e-6) > 1e-15 ||
+				math.Abs(*got.CacheWrite1hPrice-24e-6) > 1e-15 || math.Abs(*got.CacheReadPrice-0.75e-6) > 1e-15 || math.Abs(*topInput-15e-6) > 1e-15 {
+				return errors.New("catalog B summary and tiers came from different generations")
+			}
+		default:
+			return errors.New("summary does not match either controlled catalog")
+		}
+		return nil
+	}
+
+	// Check each generation explicitly before racing reloads.
+	for _, source := range []*PricingService{catalogA, catalogB} {
+		catalog.mu.Lock()
+		catalog.pricingData = source.pricingData
+		catalog.mu.Unlock()
+		if err := validateSnapshot(svc.lookupOfficialPricing(context.Background(), "gpt-5.4", make(map[string]*PlazaOfficialPricing))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stop := make(chan struct{})
+	var swapper sync.WaitGroup
+	swapper.Add(1)
+	go func() {
+		defer swapper.Done()
+		useB := false
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			source := catalogA
+			if useB {
+				source = catalogB
+			}
+			catalog.mu.Lock()
+			catalog.pricingData = source.pricingData
+			catalog.mu.Unlock()
+			useB = !useB
+		}
+	}()
+
+	const requests = 100
+	results := make([]*PlazaOfficialPricing, requests)
+	requestErrors := make([]error, requests)
+	var workers sync.WaitGroup
+	for i := range results {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			results[index] = svc.lookupOfficialPricing(context.Background(), "gpt-5.4", make(map[string]*PlazaOfficialPricing))
+			requestErrors[index] = validateSnapshot(results[index])
+		}(i)
+	}
+	workers.Wait()
+	close(stop)
+	swapper.Wait()
+	for _, err := range requestErrors {
+		require.NoError(t, err)
+	}
+
+	// Nil dependencies and missing official prices keep their existing degradation.
+	require.Nil(t, (&ModelPlazaService{}).lookupOfficialPricing(context.Background(), "gpt-5.4", nil))
+	missingBilling := NewBillingService(&config.Config{}, &PricingService{pricingData: map[string]*LiteLLMModelPricing{}})
+	missingResolver := NewModelPricingResolver(nil, missingBilling)
+	missing := (&ModelPlazaService{billingService: missingBilling, resolver: missingResolver}).lookupOfficialPricing(context.Background(), "unknown-official-model", make(map[string]*PlazaOfficialPricing))
+	require.Nil(t, missing)
+
+	invalidCatalog := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gpt-5.4": {
+			Mode: "chat", InputCostPerToken: math.NaN(), OutputCostPerToken: 1e-5,
+			LongContextInputTokenThreshold: 10, LongContextInputCostMultiplier: 2,
+		},
+	}}
+	invalidBilling := NewBillingService(&config.Config{}, invalidCatalog)
+	invalidResolver := NewModelPricingResolver(nil, invalidBilling)
+	degraded := (&ModelPlazaService{billingService: invalidBilling, resolver: invalidResolver}).lookupOfficialPricing(
+		context.Background(), "gpt-5.4", make(map[string]*PlazaOfficialPricing),
+	)
+	require.NotNil(t, degraded, "a schedule probe error retains the official summary")
+	require.Empty(t, degraded.Intervals)
+
+	channels := []Channel{plazaPricedChannel(1, "shared", []int64{10, 20}, PlatformAnthropic,
+		"claude-opus-4-6", "claude-opus-4-6-thinking")}
+	groups := []Group{
+		{ID: 10, Name: "native", Platform: PlatformAnthropic, RateMultiplier: 1},
+		{ID: 20, Name: "antigravity", Platform: PlatformAnthropic, RateMultiplier: 1},
+	}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{
+		10: {plazaMemberAccount(PlatformAnthropic, "claude-opus-4-6")},
+		20: {plazaMemberAccount(PlatformAntigravity, "claude-opus-4-6-thinking")},
+	}}
+	isolated, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, isolated, 2)
+	byName := make(map[string][]string, len(isolated))
+	for _, group := range isolated {
+		byName[group.Name] = plazaModelNames(group.Models)
+	}
+	require.Equal(t, []string{"claude-opus-4-6"}, byName["native"])
+	require.Equal(t, []string{"claude-opus-4-6-thinking"}, byName["antigravity"])
 }
 
 func TestListGroups_TimePricingPassthrough(t *testing.T) {

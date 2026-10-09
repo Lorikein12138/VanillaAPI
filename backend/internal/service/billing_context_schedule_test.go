@@ -385,6 +385,119 @@ func TestResolveContextPricingSchedule_NilResolver(t *testing.T) {
 	require.Nil(t, sched)
 }
 
+func TestContextScheduleFrozenPricing(t *testing.T) {
+	const firstCatalog = `{"gpt-5.4":{"litellm_provider":"openai","mode":"chat",
+		"input_cost_per_token":2.5e-6,"output_cost_per_token":1.5e-5,
+		"cache_read_input_token_cost":2.5e-7,"cache_creation_input_token_cost":3.75e-6,
+		"cache_creation_input_token_cost_above_1hr":8e-6,
+		"input_cost_per_token_above_200k_tokens":5e-6,"output_cost_per_token_above_200k_tokens":3e-5,
+		"cache_read_input_token_cost_above_200k_tokens":5e-7,"cache_creation_input_token_cost_above_200k_tokens":6e-6,
+		"cache_creation_input_token_cost_above_1hr_above_200k_tokens":10e-6}}`
+	const replacementCatalog = `{"gpt-5.4":{"litellm_provider":"openai","mode":"chat",
+		"input_cost_per_token":7.5e-6,"output_cost_per_token":4.5e-5,
+		"cache_read_input_token_cost":7.5e-7,"cache_creation_input_token_cost":7.5e-6,
+		"cache_creation_input_token_cost_above_1hr":12e-6,
+		"input_cost_per_token_above_100k_tokens":15e-6,"output_cost_per_token_above_100k_tokens":9e-5,
+		"cache_read_input_token_cost_above_100k_tokens":1.5e-6,"cache_creation_input_token_cost_above_100k_tokens":15e-6,
+		"cache_creation_input_token_cost_above_1hr_above_100k_tokens":24e-6}}`
+
+	catalog := newStubPricingServiceFromJSON(t, firstCatalog)
+	replacement := newStubPricingServiceFromJSON(t, replacementCatalog)
+	bs, resolver := newTokenCostTestEnv(t, PlatformOpenAI, nil, catalog)
+	ctx := context.Background()
+	input := ContextPricingScheduleInput{Model: "gpt-5.4", Platform: PlatformOpenAI}
+	resolved := resolver.Resolve(ctx, PricingInput{Model: input.Model})
+	require.NotNil(t, resolved)
+	require.Equal(t, PricingSourceLiteLLM, resolved.Source)
+
+	// Simulate a concurrent catalog reload after resolution. The helper must use
+	// the original resolved pricing for every probe instead of resolving again.
+	catalog.mu.Lock()
+	catalog.pricingData = replacement.pricingData
+	catalog.mu.Unlock()
+	pricingAt := time.Date(2026, time.June, 18, 0, 0, 0, 0, time.UTC)
+	schedule, err := bs.resolveContextPricingScheduleFromResolved(ctx, resolver, input, resolved, pricingAt)
+	require.NoError(t, err)
+	require.Len(t, schedule.Tiers, 2)
+	require.InDelta(t, 2.5e-6, *schedule.Tiers[0].Input, 1e-15)
+	require.InDelta(t, 5e-6, *schedule.Tiers[1].Input, 1e-15)
+	require.InDelta(t, 1.5e-5, *schedule.Tiers[0].Output, 1e-15)
+	require.InDelta(t, 2.5e-7, *schedule.Tiers[0].CacheRead, 1e-15)
+	require.InDelta(t, 3.75e-6, *schedule.Tiers[0].CacheWrite, 1e-15)
+	require.InDelta(t, 8e-6, *schedule.Tiers[0].CacheWrite1h, 1e-15)
+	require.InDelta(t, 7.5e-6, *schedule.Tiers[1].CacheWrite, 1e-15)
+	require.InDelta(t, 16e-6, *schedule.Tiers[1].CacheWrite1h, 1e-15)
+
+	for _, tc := range []struct {
+		tokens int
+		want   float64
+	}{{200000, 200000 * 2.5e-6}, {200001, 200001 * 5e-6}} {
+		cost, costErr := bs.CalculateCostUnified(CostInput{
+			Ctx: ctx, Model: input.Model, Tokens: UsageTokens{InputTokens: tc.tokens},
+			RateMultiplier: 1, PricingAt: pricingAt, Resolver: resolver, Resolved: resolved,
+		})
+		require.NoError(t, costErr)
+		require.InDelta(t, tc.want, cost.ActualCost, 1e-9, "context boundary %d", tc.tokens)
+	}
+
+	// A channel time multiplier remains visible and active on real requests,
+	// while the standard schedule stays at the unmultiplied rate.
+	channel := []ChannelModelPricing{{
+		Platform: PlatformOpenAI, Models: []string{"gpt-5.4"}, BillingMode: BillingModeToken,
+		InputPrice:  testPtrFloat64(2e-6),
+		TimePricing: &ChannelTimePricing{Timezone: "UTC", Periods: []ChannelTimePricingPeriod{{StartTime: "00:00", EndTime: "23:59", Multiplier: 2}}},
+	}}
+	bs, resolver = newTokenCostTestEnv(t, PlatformOpenAI, channel, catalog)
+	group := enabledGroup(PlatformOpenAI)
+	schedule, err = bs.ResolveContextPricingSchedule(ctx, resolver, ContextPricingScheduleInput{Model: "gpt-5.4", Group: group, Platform: PlatformOpenAI})
+	require.NoError(t, err)
+	require.NotNil(t, schedule.TimePricing)
+	require.InDelta(t, 2e-6, *schedule.Tiers[0].Input, 1e-15)
+	resolved = resolver.Resolve(ctx, PricingInput{Model: "gpt-5.4", GroupID: &group.ID, Group: group})
+	requestAt := time.Date(2026, time.June, 18, 10, 0, 0, 0, time.UTC)
+	cost, err := bs.CalculateCostUnified(bs.tokenCostInput(TokenCostRequest{
+		Ctx: ctx, Model: "gpt-5.4", Group: group, Tokens: UsageTokens{InputTokens: 1000},
+		RateMultiplier: 1, PricingAt: requestAt, Resolver: resolver,
+	}, resolved))
+	require.NoError(t, err)
+	require.InDelta(t, 1000*2e-6*2, cost.ActualCost, 1e-12, "real request peak multiplier remains active")
+}
+
+func TestContextScheduleInvalidProbe(t *testing.T) {
+	probeWith := func(cost *CostBreakdown) func(UsageTokens) (*CostBreakdown, error) {
+		return func(UsageTokens) (*CostBreakdown, error) { return cost, nil }
+	}
+	for name, cost := range map[string]*CostBreakdown{
+		"nil breakdown": nil,
+		"nan":           {ActualCost: math.NaN()},
+		"infinity":      {ActualCost: math.Inf(1)},
+		"negative":      {ActualCost: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := probeComponentPrice(func(n int) UsageTokens { return UsageTokens{InputTokens: n} }, 1, 1, probeWith(cost))
+			require.ErrorIs(t, err, errContextPricingInvalidProbe)
+		})
+	}
+
+	_, err := probeComponentPrice(func(n int) UsageTokens { return UsageTokens{InputTokens: n} }, 1, 1, func(tokens UsageTokens) (*CostBreakdown, error) {
+		if tokens.InputTokens == 1 {
+			return &CostBreakdown{ActualCost: 2}, nil
+		}
+		return &CostBreakdown{ActualCost: 1}, nil
+	})
+	require.ErrorIs(t, err, errContextPricingInvalidProbe, "materially negative difference is rejected")
+
+	price, err := probeComponentPrice(func(n int) UsageTokens { return UsageTokens{InputTokens: n} }, 1, 1, func(tokens UsageTokens) (*CostBreakdown, error) {
+		if tokens.InputTokens == 1 {
+			return &CostBreakdown{ActualCost: 1}, nil
+		}
+		return &CostBreakdown{ActualCost: math.Nextafter(1, 0)}, nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, price)
+	require.Zero(t, *price, "only roundoff-sized negative differences are zeroed")
+}
+
 func TestPlazaSchedulePreservesCacheWrite1h(t *testing.T) {
 	cp := sonnetChannel(PricingInterval{MinTokens: 272000, CacheWriteMultiplier: testPtrFloat64(2)})
 	cp[0].CacheWritePrice = testPtrFloat64(12.5e-6)
