@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -66,6 +67,7 @@ type ContextPricingScheduleInput struct {
 }
 
 var errContextPricingResolverRequired = errors.New("context pricing schedule: resolver is required")
+var errContextPricingInvalidProbe = errors.New("context pricing schedule: invalid pricing probe")
 
 // 探针步长：相邻两个探针点相差 contextProbeDelta 个 token，单价 = Δcost / Δtoken。
 const contextProbeDelta = 1000
@@ -73,7 +75,7 @@ const contextProbeDelta = 1000
 // ResolveContextPricingSchedule 解析分组+模型的上下文阶梯单价表。
 //
 // 解析链与扣费完全一致：Resolver.Resolve（分组卡 → 渠道 → 目录 → 策略）给出定价，
-// CalculateTokenCostForRequest 给出路径（分组/渠道定价 → 内置目录）。
+// CalculateCostUnified 使用已经解析的价格给出路径（分组/渠道定价 → 内置目录）。
 // 断点只取自计费自身的规则输入（渠道区间边界、目录阶梯阈值），
 // 每一段的单价由真实计费函数在该段内两点探针的差商得到，因此倍率、策略等
 // 规则变更无需同步到这里；相邻同价段会合并。
@@ -99,8 +101,38 @@ func (s *BillingService) ResolveContextPricingSchedule(ctx context.Context, reso
 	if resolved == nil {
 		return nil, ErrModelPricingUnavailable
 	}
+	return s.resolveContextPricingScheduleFromResolved(ctx, resolver, in, resolved, standardContextPricingAt())
+}
+
+// resolveContextPricingScheduleFromResolved builds the public context schedule
+// from one immutable pricing resolution and one pricing timestamp.
+func (s *BillingService) resolveContextPricingScheduleFromResolved(ctx context.Context, resolver *ModelPricingResolver, in ContextPricingScheduleInput, resolved *ResolvedPricing, pricingAt time.Time) (*ContextPricingSchedule, error) {
+	if s == nil || resolver == nil {
+		return nil, errContextPricingResolverRequired
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if in.Platform != "" {
+		ctx = WithResolvedTargetPlatform(ctx, in.Platform)
+	}
+	if resolved == nil {
+		return nil, ErrModelPricingUnavailable
+	}
 	if resolved.Mode != "" && resolved.Mode != BillingModeToken {
 		return nil, nil
+	}
+	if pricingAt.IsZero() {
+		pricingAt = standardContextPricingAt()
+	}
+
+	// Probe the standard schedule without channel time multipliers. The original
+	// resolved value remains untouched for the displayed time-pricing schedule.
+	probeResolved := *resolved
+	if resolved.channelPricing != nil {
+		channelPricing := resolved.channelPricing.Clone()
+		channelPricing.TimePricing = nil
+		probeResolved.channelPricing = &channelPricing
 	}
 
 	req := TokenCostRequest{
@@ -108,21 +140,22 @@ func (s *BillingService) ResolveContextPricingSchedule(ctx context.Context, reso
 		Model:          in.Model,
 		Group:          in.Group,
 		RateMultiplier: 1,
+		PricingAt:      pricingAt,
 		Resolver:       resolver,
-		Resolved:       resolved,
+		Resolved:       &probeResolved,
 	}
 	probe := func(tokens UsageTokens) (*CostBreakdown, error) {
 		r := req
 		r.Tokens = tokens
-		return s.CalculateTokenCostForRequest(r)
+		return s.CalculateCostUnified(s.tokenCostInput(r, &probeResolved))
 	}
 
-	plan := s.contextPricingBreakpoints(resolver, resolved, in.Model)
+	plan := s.contextPricingBreakpoints(resolver, &probeResolved, in.Model, pricingAt)
 	segments := buildContextSegments(plan.bounds)
 
 	tiers := make([]ContextPricingTier, 0, len(segments))
 	for _, seg := range segments {
-		tier, err := probeContextTier(seg, resolved, probe)
+		tier, err := probeContextTier(seg, &probeResolved, probe)
 		if err != nil {
 			return nil, err
 		}
@@ -132,6 +165,11 @@ func (s *BillingService) ResolveContextPricingSchedule(ctx context.Context, reso
 	applyContextTierLabels(tiers, plan)
 
 	return &ContextPricingSchedule{Basis: ContextPricingBasisWholeRequest, Tiers: tiers, TimePricing: resolvedTimePricingSchedule(resolved)}, nil
+}
+
+func standardContextPricingAt() time.Time {
+	now := timezone.Now().UTC()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // resolvedTimePricingSchedule 列出计费会生效的分时倍率时段。
@@ -197,7 +235,7 @@ type contextBreakpointPlan struct {
 }
 
 // contextPricingBreakpoints 从计费自身的规则输入收集价格断点（不读取任何倍率）。
-func (s *BillingService) contextPricingBreakpoints(resolver *ModelPricingResolver, resolved *ResolvedPricing, model string) contextBreakpointPlan {
+func (s *BillingService) contextPricingBreakpoints(resolver *ModelPricingResolver, resolved *ResolvedPricing, model string, pricingAt time.Time) contextBreakpointPlan {
 	plan := contextBreakpointPlan{}
 	if !resolved.longContextPricingEnabled {
 		return plan
@@ -224,10 +262,7 @@ func (s *BillingService) contextPricingBreakpoints(resolver *ModelPricingResolve
 	if pricing == nil {
 		return plan
 	}
-	// 该路径无既有计费时点（ContextPricingScheduleInput 无时间字段），显式传
-	// 当前时刻；此处 pricing 仅取 LongContextInputThreshold 等时间无关字段，
-	// DeepSeek pro→Flash 切换不影响断点结果。
-	pricing = s.applyModelSpecificPricingPolicyEx(model, pricing, true, timezone.Now())
+	pricing = s.applyModelSpecificPricingPolicyEx(model, pricing, true, pricingAt)
 	if pricing.LongContextInputThreshold <= 0 {
 		return plan
 	}
@@ -315,28 +350,59 @@ func probeContextTier(seg contextSegment, resolved *ResolvedPricing, probe func(
 
 // probeComponentPrice 返回 [from, from+delta] 上 ActualCost 的差商；delta 为 0（退化段）时退回平均单价。
 func probeComponentPrice(tokensAt func(int) UsageTokens, from, delta int, probe func(UsageTokens) (*CostBreakdown, error)) (*float64, error) {
+	probeCost := func(n int) (float64, error) {
+		cost, err := probe(tokensAt(n))
+		if err != nil {
+			return 0, err
+		}
+		if cost == nil || !isFiniteContextPrice(cost.ActualCost) || cost.ActualCost < 0 {
+			return 0, fmt.Errorf("%w: missing, non-finite, or negative actual cost", errContextPricingInvalidProbe)
+		}
+		return cost.ActualCost, nil
+	}
+
 	if delta <= 0 {
 		n := from
 		if n <= 0 {
 			n = 1
 		}
-		cost, err := probe(tokensAt(n))
+		actualCost, err := probeCost(n)
 		if err != nil {
 			return nil, err
 		}
-		v := roundContextPrice(cost.ActualCost / float64(n))
+		v := actualCost / float64(n)
+		if !isFiniteContextPrice(v) || v < 0 {
+			return nil, fmt.Errorf("%w: invalid average price", errContextPricingInvalidProbe)
+		}
+		v = roundContextPrice(v)
 		return &v, nil
 	}
-	lo, err := probe(tokensAt(from))
+	lo, err := probeCost(from)
 	if err != nil {
 		return nil, err
 	}
-	hi, err := probe(tokensAt(from + delta))
+	hi, err := probeCost(from + delta)
 	if err != nil {
 		return nil, err
 	}
-	v := roundContextPrice((hi.ActualCost - lo.ActualCost) / float64(delta))
+	difference := hi - lo
+	if difference < 0 {
+		tolerance := 16 * math.Ldexp(1, -52) * math.Max(math.Abs(lo), math.Abs(hi))
+		if -difference > tolerance {
+			return nil, fmt.Errorf("%w: materially negative cost difference %.17g", errContextPricingInvalidProbe, difference)
+		}
+		difference = 0
+	}
+	v := difference / float64(delta)
+	if !isFiniteContextPrice(v) || v < 0 {
+		return nil, fmt.Errorf("%w: invalid price difference", errContextPricingInvalidProbe)
+	}
+	v = roundContextPrice(v)
 	return &v, nil
+}
+
+func isFiniteContextPrice(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 // roundContextPrice 去掉差商带来的浮点噪声（保留 12 位有效数字）。
