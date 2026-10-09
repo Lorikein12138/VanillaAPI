@@ -1034,7 +1034,15 @@ func (s *PricingService) buildPricingData(body []byte) (map[string]*LiteLLMModel
 	if err != nil {
 		return nil, "", err
 	}
+	data, err = s.reserveUpstreamDomesticEntries(body, data)
+	if err != nil {
+		return nil, "", err
+	}
 	data = s.mergeFallbackPricingData(data)
+	data, err = s.mergeBundledDomesticPricing(data)
+	if err != nil {
+		return nil, "", err
+	}
 	data = s.mergeOverrideOnlyModels(data)
 	return data, fingerprint, nil
 }

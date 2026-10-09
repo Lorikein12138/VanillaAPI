@@ -1341,6 +1341,9 @@ func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*
 		// 图片计费路径（getDefaultImagePrice / getImageUnitPrice）直接读
 		// PricingService，不受影响。
 		if litellmPricing != nil && litellmPricing.TokenPricingAbsent {
+			if isDomesticSupplementModel(model) {
+				return nil, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
+			}
 			litellmPricing = nil
 		}
 		if litellmPricing != nil {
