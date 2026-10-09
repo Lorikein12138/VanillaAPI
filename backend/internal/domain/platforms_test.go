@@ -72,3 +72,46 @@ func TestPlatformsReturnsCopy(t *testing.T) {
 	platforms[0].ID = "mutated"
 	require.Equal(t, PlatformAnthropic, Platforms()[0].ID)
 }
+
+func TestSupportedGroupPlatformsUsesCatalog(t *testing.T) {
+	want := []string{
+		PlatformAnthropic,
+		PlatformOpenAI,
+		PlatformGemini,
+		PlatformAntigravity,
+		PlatformGrok,
+		PlatformKimi,
+		PlatformZhipu,
+		PlatformDeepseek,
+		PlatformMiniMax,
+		PlatformOpenCodeGo,
+		PlatformTypeSafe,
+		PlatformCommandCode,
+		PlatformCline,
+		PlatformComposite,
+	}
+
+	platforms := SupportedGroupPlatforms()
+	require.Equal(t, want, platforms)
+	require.Equal(t, PlatformComposite, platforms[len(platforms)-1])
+	require.Contains(t, platforms, PlatformTypeSafe)
+	require.Contains(t, platforms, PlatformCommandCode)
+	require.Contains(t, platforms, PlatformCline)
+	require.NotContains(t, platforms, "kiro")
+	require.NotContains(t, platforms, "unknown")
+
+	seen := make(map[string]struct{}, len(platforms))
+	compositeCount := 0
+	for _, platform := range platforms {
+		_, duplicate := seen[platform]
+		require.False(t, duplicate, "duplicate platform %q", platform)
+		seen[platform] = struct{}{}
+		if platform == PlatformComposite {
+			compositeCount++
+		}
+	}
+	require.Equal(t, 1, compositeCount)
+
+	platforms[0] = "mutated"
+	require.Equal(t, PlatformAnthropic, SupportedGroupPlatforms()[0])
+}

@@ -44,20 +44,8 @@ const (
 // SupportedGroupPlatforms is the canonical directory of group platform types.
 // Return a fresh slice so callers cannot mutate the shared catalog.
 func SupportedGroupPlatforms() []string {
-	return []string{
-		PlatformAnthropic,
-		PlatformOpenAI,
-		PlatformGemini,
-		PlatformAntigravity,
-		PlatformGrok,
-		PlatformKimi,
-		PlatformZhipu,
-		PlatformDeepseek,
-		PlatformMiniMax,
-		PlatformOpenCodeGo,
-		PlatformTypeSafe,
-		PlatformComposite,
-	}
+	platforms := ConcretePlatformIDs()
+	return append(platforms, PlatformComposite)
 }
 
 // Account mode constants 区分国产供应商的「按量付费（余额）」与「Coding Plan」两种接入方式。
