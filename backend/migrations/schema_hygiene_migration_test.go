@@ -16,9 +16,9 @@ import (
 
 const (
 	schemaHygieneTailMigration       = "243_finalize_retired_schema_hygiene.sql"
-	schemaHygienePreTailCount        = 293
-	schemaHygienePreTailLedgerSHA256 = "43aad7184396d67498e3ef6211f80dceb3d235730713f6c21412b4c9a6b2f4bc"
-	schemaHygienePreTailBlobSHA256   = "0c1f3d38144ad181d82a00007078ef8ac42d35132ab77e51fd79d725c116b934"
+	schemaHygienePreTailCount        = 294
+	schemaHygienePreTailLedgerSHA256 = "f6b58452d43ed561d423c59e0b76eb50f1460d3cf79f74454191007bf217bc1b"
+	schemaHygienePreTailBlobSHA256   = "06d50ae9b7f56b74de3dbc8460438cdbf32f4f1d8dc22cbeb215276ed22b4c89"
 )
 
 var schemaHygieneLineComment = regexp.MustCompile(`(?m)--.*$`)

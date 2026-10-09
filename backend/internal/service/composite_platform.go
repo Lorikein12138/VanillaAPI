@@ -205,10 +205,5 @@ func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, grou
 }
 
 func isConcreteRequestPlatform(platform string) bool {
-	for _, supported := range domain.SupportedGroupPlatforms() {
-		if supported != domain.PlatformComposite && platform == supported {
-			return true
-		}
-	}
-	return false
+	return domain.IsConcretePlatform(platform)
 }

@@ -411,12 +411,11 @@ async function onModelsUpdate(newModels: string[]) {
   const oldModels = props.entry.models
   emit('update', { ...props.entry, models: newModels })
 
-  // 只在空条目首次加入单个模型且当前无价格时自动填充。
-  // 价格留空表示各模型按官方价回退；向已有模型的条目追加模型、或一次加入多个模型时，
-  // 若按第一个模型的默认价填充，整条里的所有模型都会被改成同一个价格。
-  if (oldModels.length > 0 || newModels.length !== 1) return
+  // 仅在「空条目首次加入单个模型」时自动填充默认价：
+  // 条目已有模型时（即使价格留空、按各模型的官方默认价回退）追加模型不应改写整条价格，
+  // 一次加入多个模型也不应把第一个模型的价格套用到整条，否则条目内所有模型都会被静默改价。
   const addedModels = newModels.filter(m => !oldModels.includes(m))
-  if (addedModels.length === 0) return
+  if (oldModels.length !== 0 || addedModels.length !== 1) return
 
   // 检查是否所有价格字段都为空
   const e = props.entry
