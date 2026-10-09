@@ -245,6 +245,8 @@ func TestSupportedGroupPlatformDirectoryMatchesConcreteRouting(t *testing.T) {
 		domain.PlatformMiniMax,
 		domain.PlatformOpenCodeGo,
 		domain.PlatformTypeSafe,
+		domain.PlatformCommandCode,
+		domain.PlatformCline,
 		domain.PlatformComposite,
 	}, platforms)
 

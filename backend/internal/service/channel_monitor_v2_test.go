@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -298,6 +297,8 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 		Platforms: []ChannelMonitorV2PlatformConfig{
 			{Platform: " OpenAI ", Enabled: true, Models: []string{"gpt-5", "gpt-5", ""}},
 			{Platform: "anthropic", Enabled: true},
+			{Platform: domain.PlatformCommandCode, Enabled: false},
+			{Platform: domain.PlatformCline, Enabled: false},
 		},
 		GroupIDs: []int64{3, 1, 3},
 	}
@@ -305,7 +306,13 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	require.Equal(t, 300, cfg.RefreshIntervalSeconds)
 	require.Equal(t, "openai", cfg.Platforms[0].Platform)
 	require.Equal(t, "anthropic", cfg.Platforms[1].Platform)
-	require.Len(t, cfg.Platforms, 12)
+	require.Len(t, cfg.Platforms, 14)
+	commandCodeEnabled, commandCodePresent := channelMonitorPlatformEnabled(cfg.Platforms, domain.PlatformCommandCode)
+	clineEnabled, clinePresent := channelMonitorPlatformEnabled(cfg.Platforms, domain.PlatformCline)
+	require.True(t, commandCodePresent)
+	require.True(t, clinePresent)
+	require.False(t, commandCodeEnabled)
+	require.False(t, clineEnabled)
 	require.Equal(t, []int64{1, 3}, cfg.GroupIDs)
 	require.Equal(t, "selected", cfg.GroupScopeMode)
 
@@ -354,7 +361,7 @@ func TestChannelMonitorV2ConfigScopeCompatibility(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.wantMode, cfg.GroupScopeMode)
 			require.Equal(t, test.wantGroup, cfg.GroupIDs)
-			require.Len(t, cfg.Platforms, 12)
+			require.Len(t, cfg.Platforms, 14)
 		})
 	}
 }
@@ -388,28 +395,34 @@ func TestChannelMonitorV2SupportedPlatformCatalogParity(t *testing.T) {
 		apiPlatforms = append(apiPlatforms, platform.Platform)
 	}
 	require.Equal(t, domain.SupportedGroupPlatforms(), apiPlatforms)
-	require.Len(t, apiPlatforms, 12)
+	require.Len(t, apiPlatforms, 14)
 	require.NotContains(t, apiPlatforms, "kiro")
 
-	platformsFile, err := os.ReadFile(filepath.Join("..", "..", "..", "frontend", "src", "constants", "platforms.ts"))
+	platformsFile, err := os.ReadFile(filepath.Join("..", "..", "..", "frontend", "src", "constants", "platformCatalog.builtin.json"))
 	require.NoError(t, err)
-	content := string(platformsFile)
-	concreteBlock := regexp.MustCompile(`(?s)export const CONCRETE_PLATFORM_OPTIONS\s*=\s*\[(.*?)\]\s*as const`).FindStringSubmatch(content)
-	groupBlock := regexp.MustCompile(`(?s)export const GROUP_PLATFORM_OPTIONS\s*=\s*\[(.*?)\]\s*as const`).FindStringSubmatch(content)
-	require.Len(t, concreteBlock, 2, "the concrete platform option block must remain parseable")
-	require.Len(t, groupBlock, 2, "the group platform option block must remain parseable")
-	valuePattern := regexp.MustCompile(`value:\s*'([^']+)'`)
-	frontendPlatforms := make([]string, 0, 12)
-	if strings.Contains(groupBlock[1], "...CONCRETE_PLATFORM_OPTIONS") {
-		for _, match := range valuePattern.FindAllStringSubmatch(concreteBlock[1], -1) {
-			frontendPlatforms = append(frontendPlatforms, match[1])
+	var frontendCatalog struct {
+		Platforms []struct {
+			ID string `json:"id"`
+		} `json:"platforms"`
+	}
+	require.NoError(t, json.Unmarshal(platformsFile, &frontendCatalog), "frontend builtin platform catalog must decode")
+	frontendPlatforms := make([]string, 0, len(frontendCatalog.Platforms))
+	for _, platform := range frontendCatalog.Platforms {
+		frontendPlatforms = append(frontendPlatforms, platform.ID)
+	}
+	require.Equal(t, domain.ConcretePlatformIDs(), frontendPlatforms)
+	wantGroupPlatforms := append(domain.ConcretePlatformIDs(), domain.PlatformComposite)
+	require.Equal(t, wantGroupPlatforms, domain.SupportedGroupPlatforms())
+	require.Equal(t, wantGroupPlatforms, apiPlatforms)
+}
+
+func channelMonitorPlatformEnabled(platforms []ChannelMonitorV2PlatformConfig, platform string) (bool, bool) {
+	for _, config := range platforms {
+		if config.Platform == platform {
+			return config.Enabled, true
 		}
 	}
-	for _, match := range valuePattern.FindAllStringSubmatch(groupBlock[1], -1) {
-		frontendPlatforms = append(frontendPlatforms, match[1])
-	}
-	require.Len(t, frontendPlatforms, 12, "the static group option parser must find exactly 12 values")
-	require.Equal(t, domain.SupportedGroupPlatforms(), frontendPlatforms)
+	return false, false
 }
 
 func TestChannelMonitorV2ErrorTaxonomyPriority(t *testing.T) {

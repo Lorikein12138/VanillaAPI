@@ -334,7 +334,8 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 	}
 	forward := func(t *testing.T, ingress routingMatrixIngress, model string, catalog map[string][]string) observation {
 		t.Helper()
-		base := fmt.Sprintf("http://cc-%s-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), time.Now().UnixNano())
+		name := strings.NewReplacer("/", "-", " ", "-").Replace(t.Name())
+		base := fmt.Sprintf("http://cc-%s.example", strings.ToLower(name))
 		account := commandCodeTestAccount(12)
 		account.Credentials["api_base_urls"] = map[string]any{
 			APIProtocolChatCompletions: base + "/provider/v1",
@@ -343,6 +344,11 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 		}
 		url := buildOpenAIModelsURL(base + "/provider/v1")
 		key := modelProtocolCatalogKey(account, url)
+		t.Cleanup(func() {
+			upstreamModelProtocols.mu.Lock()
+			defer upstreamModelProtocols.mu.Unlock()
+			delete(upstreamModelProtocols.entries, key)
+		})
 		if catalog != nil {
 			upstreamModelProtocols.store(key, catalog, nil, time.Now())
 		} else {
@@ -366,20 +372,44 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 		"gpt-5.5":                         {APIProtocolChatCompletions, APIProtocolResponses},
 	}
 
-	obs := forward(t, ingresses["responses"], "deepseek/deepseek-v4-flash", catalog)
-	require.True(t, strings.HasSuffix(obs.url, "/provider/v1/responses"), obs.url)
-	require.True(t, gjson.GetBytes(obs.body, "input").Exists(), "Responses body passes through unconverted")
+	t.Run("responses catalog passthrough", func(t *testing.T) {
+		obs := forward(t, ingresses["responses"], "deepseek/deepseek-v4-flash", catalog)
+		require.True(t, strings.HasSuffix(obs.url, "/provider/v1/responses"), obs.url)
+		require.True(t, gjson.GetBytes(obs.body, "input").Exists(), "Responses body passes through unconverted")
+	})
+	t.Run("responses falls back when catalog is unavailable", func(t *testing.T) {
+		obs := forward(t, ingresses["responses"], "deepseek/deepseek-v4-flash", nil)
+		require.True(t, strings.HasSuffix(obs.url, "/provider/v1/chat/completions"), obs.url)
+		require.True(t, gjson.GetBytes(obs.body, "messages").Exists())
+	})
+	t.Run("responses converts unsupported model protocol", func(t *testing.T) {
+		obs := forward(t, ingresses["responses"], "deepseek/deepseek-v4-flash-fast", catalog)
+		require.True(t, strings.HasSuffix(obs.url, "/provider/v1/chat/completions"), obs.url)
+	})
+	t.Run("chat catalog passthrough", func(t *testing.T) {
+		obs := forward(t, ingresses["chat"], "gpt-5.5", catalog)
+		require.True(t, strings.HasSuffix(obs.url, "/provider/v1/chat/completions"), obs.url)
+		require.True(t, gjson.GetBytes(obs.body, "messages").Exists(), "Chat body passes through unconverted")
+	})
+}
 
-	obs = forward(t, ingresses["responses"], "deepseek/deepseek-v4-flash", nil)
-	require.True(t, strings.HasSuffix(obs.url, "/provider/v1/chat/completions"), obs.url)
-	require.True(t, gjson.GetBytes(obs.body, "messages").Exists())
+func TestModelProtocolCatalogSameKeyFailedRefreshPreservesPrevious(t *testing.T) {
+	var catalog modelProtocolCatalog
+	key := "https://catalog.example/v1/models#account=41"
+	newKey := "https://catalog.example/v1/models#account=42"
+	now := time.Date(2026, time.October, 9, 12, 0, 0, 0, time.UTC)
+	previous := map[string][]string{
+		"gpt-5.5": {APIProtocolResponses, APIProtocolChatCompletions},
+	}
 
-	obs = forward(t, ingresses["responses"], "deepseek/deepseek-v4-flash-fast", catalog)
-	require.True(t, strings.HasSuffix(obs.url, "/provider/v1/chat/completions"), obs.url)
+	catalog.store(key, previous, nil, now)
+	catalog.store(key, nil, errors.New("refresh failed"), now.Add(modelProtocolCatalogTTL))
+	require.Equal(t, previous["gpt-5.5"], catalog.lookup(
+		t.Context(), key, "gpt-5.5", now.Add(modelProtocolCatalogTTL+time.Minute), nil,
+	))
 
-	obs = forward(t, ingresses["chat"], "gpt-5.5", catalog)
-	require.True(t, strings.HasSuffix(obs.url, "/provider/v1/chat/completions"), obs.url)
-	require.True(t, gjson.GetBytes(obs.body, "messages").Exists(), "Chat body passes through unconverted")
+	catalog.store(newKey, nil, errors.New("initial load failed"), now)
+	require.Nil(t, catalog.lookup(t.Context(), newKey, "gpt-5.5", now.Add(time.Minute), nil))
 }
 
 // 目录缺失时网关拉取目录，首个请求即按目录分流；自定义上游按账号各自拉取，并带上
