@@ -2720,7 +2720,8 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 					if parts, ok := content["parts"].([]any); ok {
 						for _, part := range parts {
 							if partMap, ok := part.(map[string]any); ok {
-								if text, ok := partMap["text"].(string); ok && text != "" {
+								// Thought summaries are not answer text; keep them out of the test output.
+								if text, ok := partMap["text"].(string); ok && text != "" && !isGeminiThoughtPart(partMap) {
 									s.sendEvent(c, TestEvent{Type: "content", Text: text})
 								}
 								if inlineData, ok := partMap["inlineData"].(map[string]any); ok {
