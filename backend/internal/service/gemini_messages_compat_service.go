@@ -2155,6 +2155,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 	openBlockIndex := -1
 	openBlockType := ""
 	seenText := ""
+	seenThought := ""
 	openToolIndex := -1
 	openToolID := ""
 	openToolName := ""
@@ -2220,28 +2221,36 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 					seenToolJSON = ""
 				}
 
-				delta, newSeen := computeGeminiTextDelta(seenText, text)
-				seenText = newSeen
+				// Thought summaries stream as a thinking block with their own
+				// delta state so they never leak into the answer text.
+				blockType, deltaType, field := "text", "text_delta", "text"
+				var delta string
+				if isGeminiThoughtPart(part) {
+					blockType, deltaType, field = "thinking", "thinking_delta", "thinking"
+					delta, seenThought = computeGeminiTextDelta(seenThought, text)
+				} else {
+					delta, seenText = computeGeminiTextDelta(seenText, text)
+				}
 				if delta == "" {
 					continue
 				}
 
-				if openBlockType != "text" {
+				if openBlockType != blockType {
 					if openBlockIndex >= 0 {
 						writeSSE(c.Writer, "content_block_stop", map[string]any{
 							"type":  "content_block_stop",
 							"index": openBlockIndex,
 						})
 					}
-					openBlockType = "text"
+					openBlockType = blockType
 					openBlockIndex = nextBlockIndex
 					nextBlockIndex++
 					writeSSE(c.Writer, "content_block_start", map[string]any{
 						"type":  "content_block_start",
 						"index": openBlockIndex,
 						"content_block": map[string]any{
-							"type": "text",
-							"text": "",
+							"type": blockType,
+							field:  "",
 						},
 					})
 				}
@@ -2254,8 +2263,8 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 					"type":  "content_block_delta",
 					"index": openBlockIndex,
 					"delta": map[string]any{
-						"type": "text_delta",
-						"text": delta,
+						"type": deltaType,
+						field:  delta,
 					},
 				})
 				flusher.Flush()
@@ -2467,7 +2476,8 @@ func collectGeminiSSEObserved(body io.Reader, isOAuth bool, observe func(rawByte
 
 	var last map[string]any
 	var lastWithParts map[string]any
-	var collectedTextParts []string // Collect all text parts for aggregation
+	var collectedTextParts []string    // Collect all text parts for aggregation
+	var collectedThoughtParts []string // Thought text is aggregated separately from answer text
 	usage := &ClaudeUsage{}
 	stats := geminiSSECollectStats{fallback: &geminiSSEFallbackBody{}}
 
@@ -2484,7 +2494,7 @@ func collectGeminiSSEObserved(body io.Reader, isOAuth bool, observe func(rawByte
 				switch payload {
 				case "", "[DONE]":
 					if payload == "[DONE]" {
-						return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedTextParts), usage, stats, nil
+						return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedThoughtParts, collectedTextParts), usage, stats, nil
 					}
 				default:
 					var parsed map[string]any
@@ -2515,7 +2525,11 @@ func collectGeminiSSEObserved(body io.Reader, isOAuth bool, observe func(rawByte
 							// Collect text from each part for aggregation
 							for _, part := range parts {
 								if text, ok := part["text"].(string); ok && text != "" {
-									collectedTextParts = append(collectedTextParts, text)
+									if isGeminiThoughtPart(part) {
+										collectedThoughtParts = append(collectedThoughtParts, text)
+									} else {
+										collectedTextParts = append(collectedTextParts, text)
+									}
 								}
 							}
 						}
@@ -2532,7 +2546,7 @@ func collectGeminiSSEObserved(body io.Reader, isOAuth bool, observe func(rawByte
 		}
 	}
 
-	return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedTextParts), usage, stats, nil
+	return mergeCollectedTextParts(pickGeminiCollectResult(last, lastWithParts), collectedThoughtParts, collectedTextParts), usage, stats, nil
 }
 
 func pickGeminiCollectResult(last map[string]any, lastWithParts map[string]any) map[string]any {
@@ -2547,13 +2561,15 @@ func pickGeminiCollectResult(last map[string]any, lastWithParts map[string]any) 
 
 // mergeCollectedTextParts merges all collected text chunks into the final response.
 // This fixes the issue where non-streaming responses only returned the last chunk
-// instead of the complete aggregated text.
-func mergeCollectedTextParts(response map[string]any, textParts []string) map[string]any {
-	if len(textParts) == 0 {
+// instead of the complete aggregated text. Thought chunks are merged into their
+// own leading part that keeps "thought": true, so they never mix with answer text.
+func mergeCollectedTextParts(response map[string]any, thoughtParts []string, textParts []string) map[string]any {
+	if len(thoughtParts) == 0 && len(textParts) == 0 {
 		return response
 	}
 
 	// Join all text parts
+	mergedThought := strings.Join(thoughtParts, "")
 	mergedText := strings.Join(textParts, "")
 
 	// Deep copy response
@@ -2588,9 +2604,10 @@ func mergeCollectedTextParts(response map[string]any, textParts []string) map[st
 		existingParts = []any{}
 	}
 
-	// Find and update first text part, or create new one
-	newParts := make([]any, 0, len(existingParts)+1)
-	textUpdated := false
+	// Find and update first text part, or create new one. Thought parts from the
+	// last chunk are dropped: their content is already in mergedThought.
+	newParts := make([]any, 0, len(existingParts)+2)
+	textUpdated := len(textParts) == 0
 
 	for _, p := range existingParts {
 		pm, ok := p.(map[string]any)
@@ -2598,7 +2615,11 @@ func mergeCollectedTextParts(response map[string]any, textParts []string) map[st
 			newParts = append(newParts, p)
 			continue
 		}
-		if _, hasText := pm["text"]; hasText && !textUpdated {
+		_, hasText := pm["text"]
+		if hasText && isGeminiThoughtPart(pm) {
+			continue
+		}
+		if hasText && !textUpdated {
 			// Replace with merged text
 			newPart := make(map[string]any)
 			for k, v := range pm {
@@ -2614,6 +2635,9 @@ func mergeCollectedTextParts(response map[string]any, textParts []string) map[st
 
 	if !textUpdated {
 		newParts = append([]any{map[string]any{"text": mergedText}}, newParts...)
+	}
+	if mergedThought != "" {
+		newParts = append([]any{map[string]any{"text": mergedThought, "thought": true}}, newParts...)
 	}
 
 	content["parts"] = newParts
@@ -2954,10 +2978,17 @@ func convertGeminiToClaudeMessage(geminiResp map[string]any, originalModel strin
 							continue
 						}
 						if text, ok := pm["text"].(string); ok && text != "" {
-							contentBlocks = append(contentBlocks, map[string]any{
-								"type": "text",
-								"text": text,
-							})
+							if isGeminiThoughtPart(pm) {
+								contentBlocks = append(contentBlocks, map[string]any{
+									"type":     "thinking",
+									"thinking": text,
+								})
+							} else {
+								contentBlocks = append(contentBlocks, map[string]any{
+									"type": "text",
+									"text": text,
+								})
+							}
 						}
 						if inlineData, ok := pm["inlineData"].(map[string]any); includeInlineData && ok {
 							mimeType, _ := inlineData["mimeType"].(string)
@@ -3274,6 +3305,14 @@ func extractGeminiFinishReason(geminiResp map[string]any) string {
 	return ""
 }
 
+// isGeminiThoughtPart reports whether a Gemini response part carries thought
+// summary text ("thought": true) instead of visible answer text. Some upstreams
+// return thoughts even when includeThoughts was not requested.
+func isGeminiThoughtPart(part map[string]any) bool {
+	thought, _ := part["thought"].(bool)
+	return thought
+}
+
 func extractGeminiParts(geminiResp map[string]any) []map[string]any {
 	if candidates, ok := geminiResp["candidates"].([]any); ok && len(candidates) > 0 {
 		if cand, ok := candidates[0].(map[string]any); ok {
@@ -3456,6 +3495,10 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 							parts = append(parts, map[string]any{"text": text})
 						}
 					}
+				case "thinking", "redacted_thinking":
+					// Echoed reasoning from a previous turn is not prompt text;
+					// serializing it below would leak it into the conversation.
+					continue
 				case "tool_use":
 					id, _ := bm["id"].(string)
 					name, _ := bm["name"].(string)
