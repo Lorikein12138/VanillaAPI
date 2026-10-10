@@ -96,12 +96,7 @@ build/
 release/
 
 # 后端嵌入的前端构建产物
-# Keep a placeholder file so `//go:embed all:dist` always has a match in CI/lint,
-# while still ignoring generated frontend build outputs.
 backend/internal/web/dist/
-!backend/internal/web/dist/
-backend/internal/web/dist/*
-!backend/internal/web/dist/.keep
 
 # 后端运行时缓存数据
 backend/data/
@@ -117,8 +112,6 @@ backend/.installed
 # 其他
 # ===================
 tests
-!deploy/tests/
-!deploy/tests/**
 CLAUDE.md
 .claude
 scripts
@@ -132,23 +125,6 @@ backend/cmd/server/server
 deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
-docs/*
-!docs/PAYMENT.md
-!docs/PAYMENT_CN.md
-!docs/ADMIN_PAYMENT_INTEGRATION_API.md
-!docs/ASYNC_IMAGE_TASKS.md
-!docs/BATCH_IMAGE_MVP.md
-!docs/COMPOSITE_GROUPS.md
-!docs/PLUGIN_DEVELOPMENT.md
-!docs/channel-monitor-v2-safe-defaults.md
-!docs/codex-credits.md
-!docs/legal/
-!docs/legal/*.md
-!docs/screenshots/
-docs/screenshots/*
-!docs/screenshots/mobile-account-actions-menu.png
-!docs/screenshots/codex-referral-dialog.png
-!docs/screenshots/codex-referral-success.png
 .serena/
 .codex/
 frontend/coverage/
@@ -161,3 +137,25 @@ issues/
 .vite/
 # 本地闭源插件开发目录及构建产物不进入 Sub2API 仓库
 /plugins/
+
+# 本机协作工作流，保留在工作区但不进入源码快照
+/openspec/
+/tools/
+/deploy/
+/assets/
+/docs/
+/.github/
+/skills/
+
+# 普通 Markdown 是本机文档；产品协议正文在前端源码中例外跟踪
+*.md
+!/frontend/src/content/legal/*.md
+/README.md
+/README_CN.md
+/README_JA.md
+/DEV_GUIDE.md
+/CLA.md
+/Dockerfile.goreleaser
+/.goreleaser.yaml
+/.goreleaser.simple.yaml
+/frontend/audit.json
