@@ -9,13 +9,25 @@
 
 # Documentation
 *.md
-!deploy/DOCKER.md
-docs/
-# admin-compliance gate (LegalDocumentView.vue) build-time imports
-# docs/legal/*.md?raw into the frontend bundle; keep that subtree in the
-# Docker build context even though docs/ is otherwise excluded.
-!docs/legal/
-!docs/legal/*.md
+!/frontend/src/content/legal/*.md
+
+# Local-only workflow directories and documentation
+/openspec/
+/tools/
+/deploy/
+/assets/
+/docs/
+/.github/
+/skills/
+/README.md
+/README_CN.md
+/README_JA.md
+/DEV_GUIDE.md
+/CLA.md
+/Dockerfile.goreleaser
+/.goreleaser.yaml
+/.goreleaser.simple.yaml
+/frontend/audit.json
 
 # IDE
 .idea/
@@ -30,6 +42,7 @@ Thumbs.db
 # Build artifacts
 dist/
 build/
+/backend/internal/web/dist/
 
 # Node modules (will be installed in container)
 frontend/node_modules/
