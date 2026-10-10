@@ -1,8 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -261,7 +263,20 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 		SettingKeyContentModerationConfig: `{"all_groups":true,"model_filter":{"type":"include","models":["gpt-5"]}}`,
 	}}
 	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1, Status: StatusActive}}
-	svc := newContentModerationTestService(t, settingRepo, repo, nil, nil, userRepo, nil, nil, nil)
+	svc := &ContentModerationService{
+		settingRepo:     settingRepo,
+		repo:            repo,
+		userRepo:        userRepo,
+		runtimeCacheTTL: time.Minute,
+	}
+	svc.lifecycleMu.Lock()
+	svc.initRuntimeLocked()
+	svc.lifecycleMu.Unlock()
+
+	var logOutput bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOutput, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	_, err := svc.loadRuntimeSnapshot(context.Background())
 	require.NoError(t, err)
@@ -276,6 +291,7 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	finished := make(chan struct{})
+	observerStarted := false
 	type refreshCompletion struct {
 		snapshot *contentModerationRuntimeSnapshot
 		retryAt  int64
@@ -283,10 +299,17 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 	completion := make(chan refreshCompletion, 1)
 	t.Cleanup(func() {
 		unblock()
-		select {
-		case <-finished:
-		case <-time.After(30 * time.Second):
-			t.Error("refresh cleanup timed out")
+		if observerStarted {
+			select {
+			case <-finished:
+			case <-time.After(30 * time.Second):
+				t.Error("refresh observer cleanup timed out")
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := svc.Shutdown(ctx); err != nil {
+			t.Errorf("service cleanup failed: %v", err)
 		}
 	})
 
@@ -294,7 +317,13 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 		UserID: 1,
 		Model:  "gpt-5",
 	})
-
+	require.Len(t, repo.snapshotLogs(), 1)
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("refresh did not start")
+	}
+	observerStarted = true
 	go func() {
 		svc.runtimeRefreshMu.Lock()
 		result := refreshCompletion{svc.runtimeSnapshot.Load(), svc.runtimeRefreshRetryAt.Load()}
@@ -302,13 +331,6 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 		completion <- result
 		close(finished)
 	}()
-
-	require.Len(t, repo.snapshotLogs(), 1)
-	select {
-	case <-started:
-	case <-time.After(30 * time.Second):
-		t.Fatal("refresh did not start")
-	}
 	unblock()
 	select {
 	case <-finished:
@@ -323,6 +345,121 @@ func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureKeepsStaleScope(t *
 	getValue, getMultiple := settingRepo.calls()
 	require.Zero(t, getValue)
 	require.Equal(t, 2, getMultiple)
+	require.Contains(t, logOutput.String(), "content_moderation.runtime_snapshot_refresh_failed")
+}
+
+func TestRecordCyberPolicyEvent_RuntimeSnapshotRefreshFailureAfterContention(t *testing.T) {
+	repo := &banCountArgsTestRepo{}
+	settingRepo := &contentModerationRuntimeSettingRepo{values: map[string]string{
+		SettingKeyRiskControlEnabled:      "true",
+		SettingKeyContentModerationConfig: `{"all_groups":true,"model_filter":{"type":"include","models":["gpt-5"]}}`,
+	}}
+	userRepo := &contentModerationTestUserRepo{user: &User{ID: 1, Status: StatusActive}}
+	svc := &ContentModerationService{
+		settingRepo:     settingRepo,
+		repo:            repo,
+		userRepo:        userRepo,
+		runtimeCacheTTL: time.Minute,
+	}
+	svc.lifecycleMu.Lock()
+	svc.initRuntimeLocked()
+	svc.lifecycleMu.Unlock()
+
+	var logOutput bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOutput, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	_, err := svc.loadRuntimeSnapshot(context.Background())
+	require.NoError(t, err)
+	current := svc.runtimeSnapshot.Load()
+	require.NotNil(t, current)
+	expired := *current
+	expired.loadedAt = time.Now().Add(-2 * time.Minute)
+	svc.runtimeSnapshot.Store(&expired)
+	settingRepo.failMultiple(errors.New("database unavailable"))
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	settingRepo.blockNextMultiple(started, release)
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	finished := make(chan struct{})
+	observerStarted := false
+	type refreshCompletion struct {
+		snapshot *contentModerationRuntimeSnapshot
+		retryAt  int64
+	}
+	completion := make(chan refreshCompletion, 1)
+	svc.runtimeRefreshMu.Lock()
+	refreshLockHeld := true
+	releaseRefreshLock := func() {
+		if refreshLockHeld {
+			svc.runtimeRefreshMu.Unlock()
+			refreshLockHeld = false
+		}
+	}
+	t.Cleanup(func() {
+		unblock()
+		releaseRefreshLock()
+		if observerStarted {
+			select {
+			case <-finished:
+			case <-time.After(30 * time.Second):
+				t.Error("refresh observer cleanup timed out")
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := svc.Shutdown(ctx); err != nil {
+			t.Errorf("service cleanup failed: %v", err)
+		}
+	})
+
+	svc.RecordCyberPolicyEvent(context.Background(), CyberPolicyRecordInput{
+		UserID: 1,
+		Model:  "gpt-5",
+	})
+	require.Len(t, repo.snapshotLogs(), 1)
+	select {
+	case <-started:
+		t.Fatal("refresh started while runtimeRefreshMu was held")
+	default:
+	}
+	require.Zero(t, svc.runtimeRefreshRetryAt.Load())
+	getValue, getMultiple := settingRepo.calls()
+	require.Zero(t, getValue)
+	require.Equal(t, 1, getMultiple)
+
+	releaseRefreshLock()
+	svc.triggerRuntimeSnapshotRefresh()
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("refresh did not start after contention was released")
+	}
+	observerStarted = true
+	go func() {
+		svc.runtimeRefreshMu.Lock()
+		result := refreshCompletion{svc.runtimeSnapshot.Load(), svc.runtimeRefreshRetryAt.Load()}
+		svc.runtimeRefreshMu.Unlock()
+		completion <- result
+		close(finished)
+	}()
+	unblock()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("refresh did not finish")
+	}
+	result := <-completion
+	require.Same(t, &expired, result.snapshot)
+	require.NotZero(t, result.retryAt)
+	require.Len(t, repo.snapshotLogs(), 1)
+	require.Empty(t, userRepo.updated)
+	require.Equal(t, StatusActive, userRepo.user.Status)
+	getValue, getMultiple = settingRepo.calls()
+	require.Zero(t, getValue)
+	require.Equal(t, 2, getMultiple)
+	require.Contains(t, logOutput.String(), "content_moderation.runtime_snapshot_refresh_failed")
 }
 
 // TestRecordCyberPolicyEvent_CreateLogBeforeEmail verifies F7: the moderation
