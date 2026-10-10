@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,9 +26,25 @@ func TestChannelMonitorV2TypeSafeMigrationCatalogAndIdempotentUpdate(t *testing.
 		require.Equal(t, index+1, sortOrder)
 		gotPlatforms = append(gotPlatforms, match[1])
 	}
-	require.Equal(t, domain.SupportedGroupPlatforms(), gotPlatforms)
+	historicalPlatforms := []string{
+		"anthropic",
+		"openai",
+		"gemini",
+		"antigravity",
+		"grok",
+		"kimi",
+		"zhipu",
+		"deepseek",
+		"minimax",
+		"opencode_go",
+		"typesafe",
+		"composite",
+	}
+	require.Equal(t, historicalPlatforms, gotPlatforms)
 	require.Len(t, gotPlatforms, 12)
 	require.NotContains(t, gotPlatforms, "kiro")
+	require.NotContains(t, gotPlatforms, "command_code")
+	require.NotContains(t, gotPlatforms, "cline")
 
 	defaultPattern := regexp.MustCompile(`ALTER COLUMN platforms SET DEFAULT '([^']+)'::jsonb`)
 	defaultMatch := defaultPattern.FindStringSubmatch(sql)
