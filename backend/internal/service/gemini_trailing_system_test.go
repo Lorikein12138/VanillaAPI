@@ -117,3 +117,54 @@ func TestGeminiChatCompat_TrailingSystemAfterAssistantEndsWithUserTurn(t *testin
 	require.Contains(t, systemText, "ROLEPLAY INSTRUCTION")
 	require.NotContains(t, systemText, "post-history")
 }
+
+func geminiContentRolesForTest(t *testing.T, claudeBody string) ([]string, string) {
+	t.Helper()
+	geminiBody, err := convertClaudeMessagesToGeminiGenerateContent([]byte(claudeBody))
+	require.NoError(t, err)
+	var geminiReq struct {
+		Contents []struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(geminiBody, &geminiReq))
+	roles := make([]string, 0, len(geminiReq.Contents))
+	for _, c := range geminiReq.Contents {
+		roles = append(roles, c.Role)
+	}
+	lastText := ""
+	if n := len(geminiReq.Contents); n > 0 && len(geminiReq.Contents[n-1].Parts) > 0 {
+		lastText = geminiReq.Contents[n-1].Parts[0].Text
+	}
+	return roles, lastText
+}
+
+// Assistant prefill / "continue" requests end with an assistant message; Gemini
+// rejects a trailing model turn, so a continuation user turn is appended.
+func TestConvertClaudeMessagesToGemini_AssistantPrefillAppendsContinuationTurn(t *testing.T) {
+	roles, lastText := geminiContentRolesForTest(t, `{"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"Once upon a"}
+	]}`)
+	require.Equal(t, []string{"user", "model", "user"}, roles)
+	require.Equal(t, geminiContinuationPrompt, lastText)
+}
+
+func TestConvertClaudeMessagesToGemini_NoContinuationTurnWhenNotNeeded(t *testing.T) {
+	roles, lastText := geminiContentRolesForTest(t, `{"messages":[
+		{"role":"user","content":"hello"},
+		{"role":"assistant","content":"hi"},
+		{"role":"user","content":"again"}
+	]}`)
+	require.Equal(t, []string{"user", "model", "user"}, roles)
+	require.Equal(t, "again", lastText)
+
+	roles, _ = geminiContentRolesForTest(t, `{"messages":[
+		{"role":"user","content":"weather?"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"get_weather","input":{}}]}
+	]}`)
+	require.Equal(t, []string{"user", "model"}, roles)
+}
