@@ -3376,6 +3376,7 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	contents = appendGeminiContinuationTurn(contents)
 
 	out := make(map[string]any)
 	if systemText != "" {
@@ -3396,6 +3397,33 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 
 	stripGeminiFunctionIDs(out)
 	return json.Marshal(out)
+}
+
+// geminiContinuationPrompt asks the model to resume an assistant prefill.
+const geminiContinuationPrompt = "Continue your previous reply exactly where it stopped. Do not repeat or restate any part of it."
+
+// appendGeminiContinuationTurn handles assistant prefill (requests whose final
+// message is an assistant turn). Gemini rejects requests ending with a model
+// turn, so a user turn asking the model to continue is appended. A trailing
+// functionCall is left untouched: it needs a functionResponse, not a nudge.
+func appendGeminiContinuationTurn(contents []any) []any {
+	if len(contents) == 0 {
+		return contents
+	}
+	last, ok := contents[len(contents)-1].(map[string]any)
+	if !ok || last["role"] != "model" {
+		return contents
+	}
+	parts, _ := last["parts"].([]any)
+	for _, p := range parts {
+		if pm, ok := p.(map[string]any); ok && pm["functionCall"] != nil {
+			return contents
+		}
+	}
+	return append(contents, map[string]any{
+		"role":  "user",
+		"parts": []any{map[string]any{"text": geminiContinuationPrompt}},
+	})
 }
 
 func stripGeminiFunctionIDs(req map[string]any) {
