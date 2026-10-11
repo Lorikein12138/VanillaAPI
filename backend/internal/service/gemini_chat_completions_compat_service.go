@@ -42,6 +42,8 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	clientStream := ccReq.Stream
 	includeUsage := ccReq.StreamOptions != nil && ccReq.StreamOptions.IncludeUsage
 
+	demoteTrailingSystemMessagesAfterAssistant(ccReq.Messages)
+
 	responsesReq, err := apicompat.ChatCompletionsToResponses(&ccReq)
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -59,6 +61,29 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	}
 
 	return s.forwardClaudeBodyAsChatCompletions(ctx, c, account, claudeBody, originalModel, clientStream, includeUsage, startTime)
+}
+
+// demoteTrailingSystemMessagesAfterAssistant turns system/developer messages
+// that follow the last assistant turn into user turns. The compat chain hoists
+// every system message into systemInstruction, so a request such as
+// [..., assistant, system] would otherwise reach Gemini ending with a model
+// turn, which Gemini rejects ("Requests ending with a model turn are not
+// supported"). Clients like SillyTavern place post-history instructions there.
+func demoteTrailingSystemMessagesAfterAssistant(messages []apicompat.ChatMessage) {
+	last := len(messages) - 1
+	for last >= 0 && isChatSystemRole(messages[last].Role) {
+		last--
+	}
+	if last < 0 || last == len(messages)-1 || messages[last].Role != "assistant" {
+		return
+	}
+	for i := last + 1; i < len(messages); i++ {
+		messages[i].Role = "user"
+	}
+}
+
+func isChatSystemRole(role string) bool {
+	return role == "system" || role == "developer"
 }
 
 func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
