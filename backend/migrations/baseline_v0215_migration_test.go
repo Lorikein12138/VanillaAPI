@@ -36,7 +36,7 @@ func TestBaselineV0215MigrationIdentity(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	require.Len(t, names, baselineV0215MigrationCount)
+	require.GreaterOrEqual(t, len(names), baselineV0215MigrationCount, "v0.2.15 基线后的迁移只能追加")
 	require.Contains(t, names, baselineV0215Existing242Migration)
 	require.Contains(t, names, baselineV0215New242Migration)
 	require.Contains(t, names, baselineV0215TailMigration)
