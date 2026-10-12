@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -226,6 +227,51 @@ func TestAccountHandlerGetAvailableModels_ExplicitMappingReturnsSortedKeys(t *te
 	require.NotContains(t, rec.Body.String(), "target-alpha")
 	require.NotContains(t, rec.Body.String(), "target-zeta")
 	require.Equal(t, "target-alpha", svc.account.GetModelMapping()["alpha-alias"], "model listing preserves the account mapping cache")
+}
+
+func TestAccountHandlerGetAvailableModels_CommandCodeAndClineMappings(t *testing.T) {
+	for index, platform := range []string{service.PlatformCommandCode, service.PlatformCline} {
+		t.Run(platform, func(t *testing.T) {
+			accountID := int64(80 + index)
+			account := service.Account{
+				ID:       accountID,
+				Name:     platform + "-explicit-mapping",
+				Platform: platform,
+				Type:     service.AccountTypeAPIKey,
+				Status:   service.StatusActive,
+				Credentials: map[string]any{
+					"api_key":  "test-key",
+					"base_url": "https://provider.example/v1",
+					"model_mapping": map[string]any{
+						" zeta-client-id ": " upstream-zeta ",
+						"alpha-client-id":  "upstream-alpha",
+						"invalid-value":    false,
+					},
+				},
+			}
+			svc := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: account}
+			upstream := &syncUpstreamHTTPUpstream{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"upstream-only"}]}`)),
+			}}
+			router := setupAvailableModelsRouterWithOpenAIModelDiscovery(svc, account, upstream)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/admin/accounts/%d/models", accountID), nil)
+			router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, []availableModelOptionResponse{
+				{ID: "alpha-client-id", DisplayName: "alpha-client-id", Type: "model"},
+				{ID: "zeta-client-id", DisplayName: "zeta-client-id", Type: "model"},
+			}, decodeAvailableModelOptions(t, rec.Body.Bytes()))
+			require.NotContains(t, rec.Body.String(), "upstream-alpha")
+			require.NotContains(t, rec.Body.String(), "upstream-zeta")
+			require.NotContains(t, rec.Body.String(), "upstream-only")
+			require.Zero(t, upstream.callCount())
+		})
+	}
 }
 
 func TestAccountHandlerGetAvailableModels_ExplicitMappingFiltersInvalidMixedEntries(t *testing.T) {

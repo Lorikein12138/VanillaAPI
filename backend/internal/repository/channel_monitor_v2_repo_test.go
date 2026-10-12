@@ -492,6 +492,107 @@ func TestChannelMonitorV2EmptyRestrictedScopeReturnsEmptyInventory(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestChannelMonitorV2CommandCodeAndClineMatrixSeedsRealPlatformRows(t *testing.T) {
+	allEnabled := service.ChannelMonitorV2Config{
+		GroupScopeMode: "selected",
+		GroupIDs:       []int64{1, 2, 3, 4, 5},
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: service.PlatformCommandCode, Enabled: true},
+			{Platform: service.PlatformCline, Enabled: true},
+			{Platform: service.PlatformComposite, Enabled: true},
+			{Platform: "kiro", Enabled: true},
+		},
+	}
+	groups := map[int64]channelMonitorV2GroupInfo{
+		1: {name: "command-code", platform: service.PlatformCommandCode},
+		2: {name: "cline", platform: service.PlatformCline},
+		3: {name: "composite-with-members", platform: service.PlatformComposite, platforms: []string{
+			service.PlatformCommandCode, service.PlatformCline, service.PlatformCommandCode,
+		}},
+		4: {name: "composite-without-platform-metadata", platform: service.PlatformComposite},
+		5: {name: "composite-disabled-member", platform: service.PlatformComposite, platforms: []string{service.PlatformCommandCode}},
+	}
+	accs := seedChannelMonitorV2MatrixAccumulators(
+		service.ChannelMonitorV2Filter{}, allEnabled,
+		service.ChannelMonitorV2GroupByPlatformGroup, groups,
+	)
+	require.Len(t, accs, 6)
+	for _, key := range []channelMonitorV2MatrixKey{
+		{platform: service.PlatformCommandCode, groupID: 1},
+		{platform: service.PlatformCline, groupID: 2},
+		{platform: service.PlatformCommandCode, groupID: 3},
+		{platform: service.PlatformCline, groupID: 3},
+		{platform: service.PlatformComposite, groupID: 4},
+	} {
+		require.Contains(t, accs, key)
+	}
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformComposite, groupID: 3})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformCommandCode, groupID: 4})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: "kiro", groupID: 1})
+
+	disabledCommandCode := allEnabled
+	disabledCommandCode.Platforms = []service.ChannelMonitorV2PlatformConfig{
+		{Platform: service.PlatformCommandCode, Enabled: false},
+		{Platform: service.PlatformCline, Enabled: true},
+		{Platform: service.PlatformComposite, Enabled: true},
+	}
+	accs = seedChannelMonitorV2MatrixAccumulators(
+		service.ChannelMonitorV2Filter{}, disabledCommandCode,
+		service.ChannelMonitorV2GroupByPlatformGroup, groups,
+	)
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformCommandCode, groupID: 1})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformCommandCode, groupID: 3})
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformCline, groupID: 2})
+	require.Contains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformCline, groupID: 3})
+	require.NotContains(t, accs, channelMonitorV2MatrixKey{platform: service.PlatformCommandCode, groupID: 5})
+}
+
+func TestChannelMonitorV2CommandCodeClineScopeIsConfiguredFilterAndViewerIntersection(t *testing.T) {
+	cfg := service.ChannelMonitorV2Config{
+		GroupScopeMode: "selected",
+		GroupIDs:       []int64{1, 2, 3, 4},
+		Platforms: []service.ChannelMonitorV2PlatformConfig{
+			{Platform: service.PlatformCommandCode, Enabled: true},
+			{Platform: service.PlatformCline, Enabled: true},
+		},
+	}
+	filter := service.ChannelMonitorV2Filter{
+		Start: time.Unix(1, 0), End: time.Unix(2, 0),
+		GroupIDs: []int64{3, 4, 8}, AllowedGroupIDs: []int64{2, 3, 8}, RestrictGroups: true,
+	}
+	where, args := channelMonitorV2Where(filter, cfg, "m")
+	require.Contains(t, where, "m.platform = ANY($3)")
+	require.Contains(t, where, "m.group_id = ANY($4)")
+	require.Len(t, args, 4)
+	groupArray, ok := args[3].(*pq.Int64Array)
+	require.True(t, ok)
+	groupArgument, err := groupArray.Value()
+	require.NoError(t, err)
+	require.Equal(t, "{3}", groupArgument, "configured, requested, and viewer scopes must intersect")
+
+	emptySelected := cfg
+	emptySelected.GroupIDs = []int64{}
+	emptySelectedFilter := service.ChannelMonitorV2Filter{Start: filter.Start, End: filter.End}
+	where, args = channelMonitorV2Where(emptySelectedFilter, emptySelected, "m")
+	require.Contains(t, where, "FALSE")
+	require.Len(t, args, 3, "selected=[] stays closed without a group argument")
+	accs := seedChannelMonitorV2MatrixAccumulators(
+		service.ChannelMonitorV2Filter{}, emptySelected,
+		service.ChannelMonitorV2GroupByPlatformGroup, map[int64]channelMonitorV2GroupInfo{
+			1: {name: "command-code", platform: service.PlatformCommandCode},
+			2: {name: "cline", platform: service.PlatformCline},
+		},
+	)
+	require.Empty(t, accs)
+
+	emptyViewer := service.ChannelMonitorV2Filter{
+		Start: filter.Start, End: filter.End, RestrictGroups: true, AllowedGroupIDs: []int64{},
+	}
+	where, args = channelMonitorV2Where(emptyViewer, cfg, "m")
+	require.Contains(t, where, "FALSE")
+	require.Len(t, args, 3, "an empty viewer scope must not widen to all groups")
+}
+
 func TestChannelMonitorV2EmptyRestrictedScopeReturnsEmptySnapshotWithoutQueries(t *testing.T) {
 	tests := []struct {
 		name   string
