@@ -1,6 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MonitorConfig } from '@/api/channelMonitorV2'
+import {
+  BUILTIN_PLATFORM_CATALOG,
+  listPlatforms,
+  resetPlatformCatalog,
+  setPlatformCatalog,
+} from '@/constants/platformCatalog'
 
 const { getConfig, updateConfig, getGroups, showError, showSuccess } = vi.hoisted(() => ({
   getConfig: vi.fn(),
@@ -36,10 +42,7 @@ vi.mock('vue-i18n', async (importOriginal) => ({
 
 import MonitorSettingsPanel from '../MonitorSettingsPanel.vue'
 
-const platformNames = [
-  'anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'kimi',
-  'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'composite',
-]
+const platformNames = [...listPlatforms().map((platform) => platform.id), 'composite']
 
 const baseConfig = (overrides: Partial<MonitorConfig> = {}): MonitorConfig => ({
   version: 1,
@@ -75,6 +78,10 @@ function mountPanel() {
 }
 
 describe('MonitorSettingsPanel', () => {
+  afterEach(() => {
+    resetPlatformCatalog()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     getConfig.mockResolvedValue(baseConfig())
@@ -85,7 +92,7 @@ describe('MonitorSettingsPanel', () => {
     }))
   })
 
-  it('shows exactly the configured supported platforms without Kiro', async () => {
+  it('shows all fourteen configured platforms using catalog labels without Kiro', async () => {
     const wrapper = mountPanel()
     await flushPromises()
 
@@ -96,9 +103,55 @@ describe('MonitorSettingsPanel', () => {
     expect(wrapper.text()).toContain('MiniMax')
     expect(wrapper.text()).toContain('OpenCode')
     expect(wrapper.text()).toContain('Composite')
-    expect(wrapper.text()).toContain('typesafe')
+    expect(wrapper.text()).toContain('TypeSafe / Jev')
+    expect(wrapper.text()).toContain('Command Code')
+    expect(wrapper.text()).toContain('Cline')
     expect(wrapper.text()).not.toContain('Kiro')
-    expect(wrapper.findAll('input[type="text"]')).toHaveLength(12)
+    expect(wrapper.findAll('input[type="text"]')).toHaveLength(14)
+    wrapper.unmount()
+  })
+
+  it('preserves disabled new platform models and API order when saving', async () => {
+    const platforms = baseConfig().platforms.slice().reverse().map((platform) => ({ ...platform }))
+    const commandCode = platforms.find((platform) => platform.platform === 'command_code')!
+    commandCode.enabled = false
+    commandCode.models = ['command-custom-model']
+    const cline = platforms.find((platform) => platform.platform === 'cline')!
+    cline.enabled = false
+    cline.models = ['cline-custom-model']
+    getConfig.mockResolvedValue(baseConfig({ platforms }))
+
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.findAll('[role="switch"]')[0].trigger('click')
+    await wrapper.get('button.btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledTimes(1)
+    expect(updateConfig.mock.calls[0][0].platforms).toEqual(platforms)
+    expect(updateConfig.mock.calls[0][0].platforms.map((platform) => platform.platform)).toEqual(
+      platforms.map((platform) => platform.platform),
+    )
+    wrapper.unmount()
+  })
+
+  it('uses the platform catalog display name for a newly registered platform', async () => {
+    setPlatformCatalog({
+      ...BUILTIN_PLATFORM_CATALOG,
+      platforms: [
+        ...BUILTIN_PLATFORM_CATALOG.platforms,
+        { ...BUILTIN_PLATFORM_CATALOG.platforms[0], id: 'future_provider', display_name: 'Future Provider' },
+      ],
+    })
+    getConfig.mockResolvedValue(baseConfig({
+      platforms: [...baseConfig().platforms, { platform: 'future_provider', enabled: true, models: [] }],
+    }))
+
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Future Provider')
+    expect(wrapper.text()).not.toContain('future_provider')
     wrapper.unmount()
   })
 

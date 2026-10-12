@@ -270,6 +270,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { getChannelMonitorMode, isChannelMonitorV2Mode } from '@/utils/featureFlags'
+import { platformLabel as catalogPlatformLabel } from '@/utils/platformColors'
 import {
   getConfig,
   updateConfig,
@@ -392,21 +393,7 @@ function categoryLabel(category: string) {
 }
 
 function platformLabel(value: string) {
-  return (
-    {
-      anthropic: 'Claude',
-      openai: 'OpenAI',
-      grok: 'Grok',
-      gemini: 'Gemini',
-      antigravity: 'Antigravity',
-      kimi: 'Kimi',
-      zhipu: 'Zhipu GLM',
-      deepseek: 'DeepSeek',
-      minimax: 'MiniMax',
-      opencode_go: 'OpenCode',
-      composite: 'Composite',
-    } as Record<string, string>
-  )[value] || value
+  return value === 'anthropic' ? 'Claude' : catalogPlatformLabel(value)
 }
 
 function normalizeConfig(value: MonitorConfig, availableGroups?: AdminGroup[]): MonitorConfig {

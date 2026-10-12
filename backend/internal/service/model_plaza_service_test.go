@@ -501,6 +501,104 @@ func TestListPlazaGroups_CompositeIncludesConfiguredConcretePlatforms(t *testing
 	require.InDelta(t, openAIPrice, *out[0].Models[1].Pricing.InputPrice, 1e-12)
 }
 
+func TestListPlazaGroups_CommandCodeAndClineUseGroupModelKeysAndPlatformPricing(t *testing.T) {
+	commandPrice := 0.000011
+	clinePrice := 0.000022
+	channel := Channel{
+		ID:       1,
+		Name:     "new-platform-pricing",
+		Status:   StatusActive,
+		GroupIDs: []int64{10, 15, 20},
+		ModelPricing: []ChannelModelPricing{
+			{Platform: PlatformCommandCode, Models: []string{"command-only", "command-target", "command-shared-target", "cross-platform-only", "shared-model", "command-outsider"}, InputPrice: &commandPrice},
+			{Platform: PlatformCline, Models: []string{"cline-only", "cline-target", "cline-shared-target", "cross-platform-only", "cross-platform-target", "shared-model", "cline-outsider"}, InputPrice: &clinePrice},
+		},
+	}
+	groups := []Group{
+		{ID: 10, Name: "command-code", Platform: PlatformCommandCode, RateMultiplier: 1},
+		{ID: 15, Name: "cline", Platform: PlatformCline, RateMultiplier: 1},
+		{ID: 20, Name: "composite", Platform: PlatformComposite, RateMultiplier: 1},
+	}
+	memberWithRenamedMappings := func(platform string, mappings map[string]string) Account {
+		raw := make(map[string]any, len(mappings))
+		for key, value := range mappings {
+			raw[key] = value
+		}
+		return Account{Platform: platform, Credentials: map[string]any{"model_mapping": raw}}
+	}
+	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{
+		10: {memberWithRenamedMappings(PlatformCommandCode, map[string]string{
+			"shared-model": "command-shared-target",
+			"command-only": "command-target",
+		})},
+		15: {memberWithRenamedMappings(PlatformCline, map[string]string{
+			"shared-model": "cline-shared-target",
+			"cline-only":   "cline-target",
+		})},
+		20: {
+			memberWithRenamedMappings(PlatformCommandCode, map[string]string{
+				"shared-model": "command-shared-target",
+				"command-only": "command-target",
+			}),
+			memberWithRenamedMappings(PlatformCline, map[string]string{
+				"shared-model":        "cline-shared-target",
+				"cline-only":          "cline-target",
+				"cross-platform-only": "cross-platform-target",
+			}),
+		},
+	}}
+
+	out, err := newPlazaServiceWithMembers([]Channel{channel}, groups, members, nil).ListGroups(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, out, 3)
+	byName := map[string]PlazaGroup{}
+	for _, group := range out {
+		byName[group.Name] = group
+	}
+
+	commandModels := byName["command-code"].Models
+	require.Equal(t, []string{"command-only", "shared-model"}, plazaModelNames(commandModels))
+	for _, model := range commandModels {
+		require.Equal(t, PlatformCommandCode, model.Platform)
+		require.NotContains(t, []string{"command-target", "command-shared-target", "command-outsider", "cross-platform-only"}, model.Name)
+	}
+
+	clineModels := byName["cline"].Models
+	require.Equal(t, []string{"cline-only", "shared-model"}, plazaModelNames(clineModels))
+	for _, model := range clineModels {
+		require.Equal(t, PlatformCline, model.Platform)
+		require.NotContains(t, []string{"cline-target", "cline-shared-target", "cline-outsider"}, model.Name)
+	}
+
+	compositeModels := byName["composite"].Models
+	var sharedByPlatform = make(map[string]PlazaModel)
+	var clineCrossPlatformOnly bool
+	var compositeNames []string
+	for _, model := range compositeModels {
+		compositeNames = append(compositeNames, model.Platform+"/"+model.Name)
+		if model.Name == "shared-model" {
+			sharedByPlatform[model.Platform] = model
+		}
+		if model.Platform == PlatformCline && model.Name == "cross-platform-only" {
+			clineCrossPlatformOnly = true
+		}
+		require.NotContains(t, []string{"command-target", "command-shared-target", "cline-target", "cline-shared-target", "cross-platform-target", "command-outsider", "cline-outsider"}, model.Name)
+	}
+	require.ElementsMatch(t, []string{
+		PlatformCommandCode + "/command-only",
+		PlatformCommandCode + "/shared-model",
+		PlatformCline + "/cline-only",
+		PlatformCline + "/cross-platform-only",
+		PlatformCline + "/shared-model",
+	}, compositeNames)
+	require.True(t, clineCrossPlatformOnly, "the Cline source key must survive an earlier unsupported Command Code candidate")
+	require.Contains(t, sharedByPlatform, PlatformCommandCode)
+	require.Contains(t, sharedByPlatform, PlatformCline)
+	require.InDelta(t, commandPrice, *sharedByPlatform[PlatformCommandCode].Pricing.InputPrice, 1e-12)
+	require.InDelta(t, clinePrice, *sharedByPlatform[PlatformCline].Pricing.InputPrice, 1e-12)
+}
+
 func TestListPlazaGroups_CompositeAndOrdinaryGroupsDoNotLeakPlatforms(t *testing.T) {
 	ch := Channel{
 		ID: 1, Name: "multi", Status: StatusActive, GroupIDs: []int64{10, 20},

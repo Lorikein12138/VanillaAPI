@@ -1180,3 +1180,36 @@ func TestApplyAccountStatsCost_UsesClientKeyForBilling(t *testing.T) {
 	require.NotNil(t, log.AccountStatsCost)
 	require.InDelta(t, 1.0, *log.AccountStatsCost, 1e-12)
 }
+
+func TestApplyAccountStatsCost_CommandCodeAndClineUseRequestedKeyAndKeepUsageCosts(t *testing.T) {
+	for _, platform := range []string{PlatformCommandCode, PlatformCline} {
+		t.Run(platform, func(t *testing.T) {
+			channel := &Channel{
+				ID:     1,
+				Status: StatusActive,
+				ModelPricing: []ChannelModelPricing{
+					{Platform: platform, Models: []string{"client-key"}, InputPrice: testPtrFloat64(0.02)},
+					{Platform: platform, Models: []string{"upstream-value"}, InputPrice: testPtrFloat64(0.09)},
+				},
+			}
+			channelService := newTestChannelServiceForStats(t, channel, 10, platform)
+			upstreamModel := "upstream-value"
+			usageLog := &UsageLog{
+				UpstreamModel: &upstreamModel,
+				ActualCost:    123.45,
+			}
+
+			applyAccountStatsCost(
+				context.Background(), usageLog, channelService, nil,
+				1, 10, upstreamModel, "client-key", UsageTokens{InputTokens: 50},
+				999, time.Time{}, true,
+			)
+
+			require.NotNil(t, usageLog.AccountStatsCost)
+			require.InDelta(t, 1.0, *usageLog.AccountStatsCost, 1e-12, "account stats must price the requested client key")
+			require.NotNil(t, usageLog.UpstreamModel)
+			require.Equal(t, "upstream-value", *usageLog.UpstreamModel)
+			require.Equal(t, 123.45, usageLog.ActualCost, "customer-facing cost must remain unchanged")
+		})
+	}
+}

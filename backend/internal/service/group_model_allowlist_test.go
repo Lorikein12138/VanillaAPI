@@ -134,6 +134,54 @@ func TestBuildAccountModelAllowlistUnion_MappedKeysOnly(t *testing.T) {
 	}
 }
 
+func TestBuildAccountModelAllowlistUnion_CommandCodeAndCline(t *testing.T) {
+	for _, platform := range []string{PlatformCommandCode, PlatformCline} {
+		t.Run(platform, func(t *testing.T) {
+			accounts := []Account{
+				{
+					Platform: platform, Status: StatusDisabled, Schedulable: false, ErrorMessage: "unavailable",
+					Credentials: map[string]any{"model_mapping": map[string]any{
+						" renamed-client-key ": "upstream-target",
+						"identity-key":         "identity-key",
+						"bad-value":            7,
+						"blank-value":          "  ",
+						"":                     "ignored-empty-key",
+					}},
+				},
+				{
+					Platform: platform, Status: StatusError,
+					Credentials: map[string]any{"model_mapping": map[string]string{
+						"error-account-key": "mapped-value",
+					}},
+				},
+				{Platform: platform, Credentials: map[string]any{"model_mapping": map[string]any{}}},
+			}
+
+			got := BuildAccountModelAllowlistUnion(accounts)
+			want := []string{"error-account-key", "identity-key", "renamed-client-key"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("BuildAccountModelAllowlistUnion(%s) = %#v, want %#v", platform, got, want)
+			}
+			if count := CountAccountModelAllowlistSources(accounts); count != 2 {
+				t.Fatalf("CountAccountModelAllowlistSources(%s) = %d, want 2", platform, count)
+			}
+
+			resolved := ResolveEffectiveGroupModelAllowlist(GroupModelAllowlist{Enabled: true}, accounts)
+			if !reflect.DeepEqual(resolved.Models, want) {
+				t.Fatalf("resolved allowlist for %s = %#v, want %#v", platform, resolved.Models, want)
+			}
+		})
+	}
+
+	empty := ResolveEffectiveGroupModelAllowlist(GroupModelAllowlist{Enabled: true}, nil)
+	if got := empty.FilterForListing([]string{"otherwise-visible"}); len(got) != 0 {
+		t.Fatalf("empty enabled allowlist exposed models: %#v", got)
+	}
+	if empty.Allows("otherwise-visible") {
+		t.Fatal("empty enabled allowlist must keep model access closed")
+	}
+}
+
 func TestRetiredHealthRemovalKeepsMappingSnapshotAndAllowlist(t *testing.T) {
 	account := Account{ID: 70001, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
 		Credentials: map[string]any{"model_mapping": map[string]any{"client-alias": "upstream-model"}}}
