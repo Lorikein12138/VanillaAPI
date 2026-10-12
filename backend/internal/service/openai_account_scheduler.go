@@ -176,7 +176,6 @@ type OpenAIAccountScheduleDecision struct {
 	LoadSkew            float64
 	SelectedAccountID   int64
 	SelectedAccountType string
-	SelectedPriority    int
 }
 
 type OpenAIAccountSchedulerMetricsSnapshot struct {
@@ -463,9 +462,6 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	// 命名返回值保证 defer 写入的耗时同时返回给调用方。
 	defer func() {
 		decision.LatencyMs = time.Since(start).Milliseconds()
-		if selection != nil && selection.Account != nil {
-			decision.SelectedPriority = openAIAccountSchedulingPriority(selection.Account)
-		}
 		s.metrics.recordSelect(decision)
 	}()
 
