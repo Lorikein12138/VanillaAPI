@@ -268,6 +268,39 @@ func (s *AccountRepoSuite) TestDelete() {
 	s.Require().Error(err, "expected error after delete")
 }
 
+func (s *AccountRepoSuite) TestDelete_ClearsCredentials() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "to-delete-creds",
+		Credentials: map[string]any{"api_key": "sk-delete-me"},
+	})
+	kept := mustCreateAccount(s.T(), s.client, &service.Account{
+		Name:        "keep-creds",
+		Credentials: map[string]any{"api_key": "sk-keep-me"},
+	})
+
+	s.Require().NoError(s.repo.Delete(s.ctx, account.ID), "Delete")
+
+	readCredentials := func(id int64) (string, bool) {
+		rows, err := s.repo.sql.QueryContext(s.ctx, "SELECT credentials::text, deleted_at IS NOT NULL FROM accounts WHERE id = $1", id)
+		s.Require().NoError(err)
+		defer func() { _ = rows.Close() }()
+		s.Require().True(rows.Next(), "account row must remain after soft delete")
+		var credentials string
+		var deleted bool
+		s.Require().NoError(rows.Scan(&credentials, &deleted))
+		s.Require().NoError(rows.Err())
+		return credentials, deleted
+	}
+
+	credentials, deleted := readCredentials(account.ID)
+	s.Require().True(deleted, "account must be soft deleted")
+	s.Require().Equal("{}", credentials, "soft-deleted account must not keep credentials")
+
+	credentials, deleted = readCredentials(kept.ID)
+	s.Require().False(deleted)
+	s.Require().Contains(credentials, "sk-keep-me", "other accounts keep their credentials")
+}
+
 func (s *AccountRepoSuite) TestDelete_RemovesSchedulerAccountSnapshot() {
 	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "to-delete-cache"})
 	cacheRecorder := &schedulerCacheRecorder{

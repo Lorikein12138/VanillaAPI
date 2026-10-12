@@ -983,6 +983,10 @@ func (r *accountRepository) Delete(ctx context.Context, id int64) error {
 	if _, err := txClient.ExecContext(ctx, "DELETE FROM scheduled_test_plans WHERE account_id = $1", id); err != nil {
 		return err
 	}
+	// 软删除只保留账号行供计费统计，凭据不再有任何读取方，删除时一并清空。
+	if _, err := txClient.ExecContext(ctx, "UPDATE accounts SET credentials = '{}'::jsonb WHERE id = $1 AND deleted_at IS NULL", id); err != nil {
+		return err
+	}
 	if _, err := txClient.Account.Delete().Where(dbaccount.IDEQ(id)).Exec(ctx); err != nil {
 		return err
 	}
