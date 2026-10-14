@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -126,7 +125,6 @@ func TestUpstreamRoutingModelOnlyForModelRoutedAccounts(t *testing.T) {
 // /v1/responses 转 Anthropic 上游时，计费模型名与上游模型名都应是去除首尾空白的
 // 请求模型；按模型分流（OpenCode）与显式 anthropic 协议（Kimi）账号行为一致。
 func TestResponsesToNativeAnthropicTrimsBillingModel(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	openCode := &Account{
 		ID:          703,

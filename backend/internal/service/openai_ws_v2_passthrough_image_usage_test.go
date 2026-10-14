@@ -17,7 +17,6 @@ import (
 // The billed turn result of a WS passthrough image generation must carry the
 // image input tokens and the tool_usage.image_gen backfill, as HTTP does.
 func TestOpenAIWSPassthroughTurnResultCarriesImageUsage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{}
 	cfg.Security.URLAllowlist.Enabled = false

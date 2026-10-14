@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -31,7 +30,6 @@ func TestForward_OAuthWebSearchHistoryDeclaresTool(t *testing.T) {
 		{"passthrough lite", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 			s := newAstraOAuthSetup(t, tc.passthrough)
 			if tc.lite {
 				s.c.Request.Header.Set(responsesLiteHeader, "true")

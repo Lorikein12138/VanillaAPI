@@ -15,7 +15,6 @@ import (
 )
 
 func TestOpenCodeUnsupportedModelsRejectMappedAliasesBeforeProtocolSelection(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, ingress := range routingMatrixIngresses() {
 		for _, protocol := range []string{APIProtocolAdaptive, APIProtocolResponses, APIProtocolChatCompletions, APIProtocolAnthropic} {
 			for _, mode := range []string{AccountModeGo, AccountModeZen} {
@@ -45,7 +44,6 @@ func TestOpenCodeUnsupportedModelsRejectMappedAliasesBeforeProtocolSelection(t *
 }
 
 func TestCommandCodeGeminiModelReachesUpstream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, ingress := range routingMatrixIngresses() {
 		t.Run(ingress.name, func(t *testing.T) {
 			account := commandCodeTestAccount(106)

@@ -33,7 +33,6 @@ func TestBuildUpstreamRequestToolChangeBetas(t *testing.T) {
 		{"filter mid", mid + "," + inline, map[string]struct{}{mid: {}}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 			c.Request.Header.Set("anthropic-beta", tc.header+",unrelated-beta")

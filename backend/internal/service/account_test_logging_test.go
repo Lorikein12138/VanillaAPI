@@ -29,7 +29,6 @@ func (r *accountTestLoggingRepo) GetByID(context.Context, int64) (*Account, erro
 }
 
 func TestAccountTestFailureLogAttribution(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, background := range []bool{false, true} {
 		for _, missing := range []bool{false, true} {
 			core, logs := observer.New(zap.WarnLevel)

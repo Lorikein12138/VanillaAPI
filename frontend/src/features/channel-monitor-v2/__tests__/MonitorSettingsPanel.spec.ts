@@ -1,6 +1,8 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import Select from '@/components/common/Select.vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MonitorConfig } from '@/api/channelMonitorV2'
+import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
 import {
   BUILTIN_PLATFORM_CATALOG,
   listPlatforms,
@@ -75,6 +77,16 @@ const groups = [
 
 function mountPanel() {
   return mount(MonitorSettingsPanel)
+}
+
+function platformButton(wrapper: ReturnType<typeof mountPanel>, key: string) {
+  return wrapper.findAll('button').find((item) => item.text() === `channelMonitorV2.settings.${key}`)!
+}
+
+async function addPlatform(wrapper: ReturnType<typeof mountPanel>, platform: string) {
+  wrapper.findComponent(Select).vm.$emit('update:modelValue', platform)
+  await flushPromises()
+  await platformButton(wrapper, 'addPlatform').trigger('click')
 }
 
 describe('MonitorSettingsPanel', () => {
@@ -228,6 +240,111 @@ describe('MonitorSettingsPanel', () => {
     expect(wrapper.text()).not.toContain('channelMonitorV2.settings.groupsScopeEmpty')
     expect(wrapper.findAll('.card.divide-y > div')).toHaveLength(2)
     expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('adds a missing provider and saves its models without changing existing settings', async () => {
+    const original = baseConfig({
+      platforms: [
+        { platform: 'openai', enabled: false, models: ['gpt-4'] },
+        { platform: 'custom-provider', enabled: true, models: ['custom-model'] },
+      ],
+    })
+    getConfig.mockResolvedValue(original)
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(platformButton(wrapper, 'save').attributes('disabled')).toBeDefined()
+    expect(wrapper.findComponent(Select).props('options')).not.toContainEqual(
+      expect.objectContaining({ value: 'openai' }),
+    )
+    await wrapper.findComponent(Select).find('button').trigger('click')
+    const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((item) => item.textContent?.trim() === 'DeepSeek')!
+    option.click()
+    await flushPromises()
+    await platformButton(wrapper, 'addPlatform').trigger('click')
+
+    expect(platformButton(wrapper, 'addPlatform').attributes('disabled')).toBeDefined()
+    expect(wrapper.findComponent(Select).props('options')).not.toContainEqual(
+      expect.objectContaining({ value: 'deepseek' }),
+    )
+    await wrapper.findAll('input[type="text"]').at(-1)!.setValue(' deepseek-chat, deepseek-reasoner, deepseek-chat ')
+    await platformButton(wrapper, 'save').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith({
+      ...original,
+      platforms: [...original.platforms, {
+        platform: 'deepseek', enabled: true, models: ['deepseek-chat', 'deepseek-reasoner'],
+      }],
+    })
+    expect(platformButton(wrapper, 'save').attributes('disabled')).toBeDefined()
+    expect(original.platforms).toHaveLength(2)
+
+    const persisted = await updateConfig.mock.results[0].value
+    wrapper.unmount()
+    getConfig.mockResolvedValue(persisted)
+    const reloaded = mountPanel()
+    await flushPromises()
+    expect((reloaded.findAll('input[type="text"]').at(-1)!.element as HTMLInputElement).value)
+      .toBe('deepseek-chat, deepseek-reasoner')
+    expect(reloaded.findComponent(Select).props('options')).not.toContainEqual(
+      expect.objectContaining({ value: 'deepseek' }),
+    )
+    reloaded.unmount()
+  })
+
+  it('can start with no configured platforms and rejects duplicate additions', async () => {
+    getConfig.mockResolvedValue(baseConfig({ platforms: [] }))
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(platformButton(wrapper, 'addPlatform').attributes('disabled')).toBeDefined()
+
+    await addPlatform(wrapper, 'kimi')
+    await addPlatform(wrapper, 'kimi')
+    await platformButton(wrapper, 'save').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig.mock.calls[0][0].platforms).toEqual([
+      { platform: 'kimi', enabled: true, models: [] },
+    ])
+    wrapper.unmount()
+  })
+
+  it('restores the server config and available options when saving fails', async () => {
+    getConfig.mockResolvedValue(baseConfig({
+      platforms: [
+        { platform: 'openai', enabled: false, models: ['gpt-4'] },
+        { platform: 'custom-provider', enabled: true, models: ['custom-model'] },
+      ],
+    }))
+    const wrapper = mountPanel()
+    await flushPromises()
+    updateConfig.mockRejectedValueOnce(new Error('save failed'))
+
+    await addPlatform(wrapper, 'minimax')
+    await platformButton(wrapper, 'save').trigger('click')
+    await flushPromises()
+
+    expect(showError).toHaveBeenCalledTimes(1)
+    expect(wrapper.findComponent(Select).props('options')).toContainEqual(
+      expect.objectContaining({ value: 'minimax' }),
+    )
+    expect(wrapper.findAll('input[type="text"]')).toHaveLength(2)
+    expect(platformButton(wrapper, 'save').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('hides the add control after every supported platform is configured', async () => {
+    getConfig.mockResolvedValue(baseConfig({
+      platforms: CONCRETE_PLATFORM_OPTIONS.map(({ value }) => ({ platform: value, enabled: true, models: [] })),
+    }))
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.findComponent(Select).exists()).toBe(false)
+    expect(platformButton(wrapper, 'addPlatform')).toBeUndefined()
     wrapper.unmount()
   })
 })
