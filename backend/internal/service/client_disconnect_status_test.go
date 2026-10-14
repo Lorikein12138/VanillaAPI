@@ -66,7 +66,6 @@ func TestTransportErrorHandlers_ClientDisconnectRecordsNoOpsEvent(t *testing.T) 
 }
 
 func TestAntigravityCompatTransportError_ClientDisconnectWrites499(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -81,7 +80,6 @@ func TestAntigravityCompatTransportError_ClientDisconnectWrites499(t *testing.T)
 }
 
 func TestAntigravityWriteGoogleError_ClientClosedStatus(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-flash:generateContent", nil)

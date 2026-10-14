@@ -306,7 +306,6 @@ func TestHandleResponsesStreamingResponse_PreservesMessageStartCacheUsage(t *tes
 }
 
 func TestHandleResponsesStreamingResponse_NormalizesTerminalUsage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name              string

@@ -50,7 +50,6 @@ func TestBuildUpstreamRequestStructuredOutputsBeta(t *testing.T) {
 	const beta = "structured-outputs-2025-11-13"
 	for _, filtered := range []bool{false, true} {
 		t.Run(map[bool]string{false: "preserved", true: "policy filtered"}[filtered], func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 			c.Request.Header.Set("anthropic-beta", beta+",custom-beta")

@@ -106,6 +106,11 @@ func TestSchemaHygieneMigrationPreservesHistory(t *testing.T) {
 		switch {
 		case name == schemaHygieneTailMigration:
 			tailCount++
+		case name == "242_group_i18n.sql":
+			// This newly imported v0.2.16 migration sorts before the local 243
+			// tail, but is not part of the frozen pre-tail ledger. Its identity
+			// and DDL are checked by the baseline migration tests.
+			continue
 		case name < schemaHygieneTailMigration:
 			history = append(history, name)
 		}

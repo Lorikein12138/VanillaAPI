@@ -3197,7 +3197,6 @@ func TestOpenAIBuildUpstreamRequestOAuthMessagesBridgeUsesSessionOnly(t *testing
 }
 
 func TestOpenAIBuildUpstreamRequestOAuthResponsesPreservesCallerBeta(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	makeRequest := func(betaValues ...string) *gin.Context {
 		rec := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(rec)

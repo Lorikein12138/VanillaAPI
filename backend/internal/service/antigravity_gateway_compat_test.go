@@ -787,7 +787,6 @@ func TestAntigravityCompatKeepaliveAfterFirstEvent(t *testing.T) {
 }
 
 func TestAntigravityCompatPreContentKeepalive(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, tt := range []struct {
 		name    string
 		adapter antigravityCompatStreamAdapter
@@ -825,7 +824,6 @@ func TestAntigravityCompatPreContentKeepalive(t *testing.T) {
 }
 
 func TestAntigravityCompatHandlerPreContentKeepalive(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, tt := range []struct {
 		name    string
 		adapter func() antigravityCompatStreamAdapter
@@ -892,7 +890,6 @@ func TestAntigravityCompatHandlerRepeatsPreContentKeepalive(t *testing.T) {
 }
 
 func TestAntigravityCompatHandlerPreContentDeadlineWithCommentOnlyStream(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize, StreamDataIntervalTimeout: 1}, nil)
 	c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/responses", nil)
 	reader, pipeWriter := io.Pipe()
@@ -933,7 +930,6 @@ func TestAntigravityCompatHandlerPreContentDeadlineWithCommentOnlyStream(t *test
 }
 
 func TestAntigravityCompatExpiredPreContentDeadlineDoesNotCommit(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
 	c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/responses", nil)
 	reader, pipeWriter := io.Pipe()
@@ -951,7 +947,6 @@ func TestAntigravityCompatExpiredPreContentDeadlineDoesNotCommit(t *testing.T) {
 }
 
 func TestAntigravityCompatHandlerErrorsAfterPreContentPing(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct {
 		name string
 		wait time.Duration
@@ -985,7 +980,6 @@ func TestAntigravityCompatHandlerErrorsAfterPreContentPing(t *testing.T) {
 }
 
 func TestAntigravityCompatEmptyAfterKeepaliveReportsStreamError(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, tt := range []struct {
 		name    string
 		adapter antigravityCompatStreamAdapter

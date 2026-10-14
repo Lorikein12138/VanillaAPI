@@ -18,7 +18,6 @@ import (
 )
 
 func TestAnthropicChatStreamAuthoritativeUsage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, adapter := range []string{"anthropic", "native"} {
 		for _, options := range []string{"", `,"stream_options":{"include_usage":true}`, `,"stream_options":{"include_usage":false}`} {
 			for _, tc := range []struct {

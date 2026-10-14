@@ -626,7 +626,6 @@ func TestOpenAIGatewayService_Forward_HTTPRetryRecoveryDropsCompaction(t *testin
 }
 
 func TestOpenAIGatewayService_Forward_HTTPThinkingSignatureRecoveryAndLineage(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	response := func(status int, body string) *http.Response {
 		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
 	}
@@ -668,7 +667,6 @@ func TestOpenAIGatewayService_Forward_HTTPThinkingSignatureRecoveryAndLineage(t 
 }
 
 func TestOpenAIGatewayService_Forward_HTTPThinkingSignatureDoesNotRetryUnrelatedErrors(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	for _, tc := range []struct{ name, code, message, input string }{
 		{"no encrypted reasoning", "thinking_signature_invalid", "The encrypted content could not be verified. Reason: Encrypted content could not be decrypted or parsed.", `[{"type":"message","role":"user","content":"hello"}]`},
 		{"ordinary 400", "invalid_request_error", "bad request", `[{"type":"reasoning","encrypted_content":"stale"},{"type":"message","content":"hello"}]`},

@@ -311,7 +311,6 @@ func matchesKnownZhipuNonAPIKeyDifference(tc routingMatrixCase, want, got routin
 }
 
 func TestUpstreamProtocolRoutingMatrixMatchesMainGolden(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	data, err := os.ReadFile(routingMatrixGoldenPath)
 	require.NoError(t, err)
 	var golden routingMatrixGolden

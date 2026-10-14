@@ -14,7 +14,6 @@ import (
 )
 
 func TestBuildAntigravityClientErrorBody_ScrubsPoolIdentity(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	upstream := []byte(`{"error":{"code":403,"message":"Permission denied on resource project projects/123456789 for consumer: projects/123456789; caller pool-sa@my-gcp-proj.iam.gserviceaccount.com","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"consumer":"projects/123456789","service":"cloudcode-pa.googleapis.com"}}]}}`)
 
 	rec := httptest.NewRecorder()
