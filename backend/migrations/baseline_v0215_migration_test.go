@@ -5,6 +5,7 @@ package migrations
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -36,18 +37,23 @@ func TestBaselineV0215MigrationIdentity(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	require.GreaterOrEqual(t, len(names), baselineV0215MigrationCount, "v0.2.15 基线后的迁移只能追加")
-	require.Contains(t, names, baselineV0215Existing242Migration)
-	require.Contains(t, names, baselineV0215New242Migration)
-	require.Contains(t, names, baselineV0215TailMigration)
-	require.Contains(t, names, baselineV0215Unknown239Migration)
+	historicalNames := readMigrationNameManifest(t, "testdata/baseline_v0215_migrations.txt")
+	require.Len(t, historicalNames, baselineV0215MigrationCount)
+	require.GreaterOrEqual(t, len(names), len(historicalNames), "v0.2.15 基线后的迁移只能追加")
+	for _, name := range historicalNames {
+		require.Contains(t, names, name, "current migrations must retain historical filename %s", name)
+	}
+	require.Contains(t, historicalNames, baselineV0215Existing242Migration)
+	require.Contains(t, historicalNames, baselineV0215New242Migration)
+	require.Contains(t, historicalNames, baselineV0215TailMigration)
+	require.Contains(t, historicalNames, baselineV0215Unknown239Migration)
 
-	old242Index := sort.SearchStrings(names, baselineV0215Existing242Migration)
-	new242Index := sort.SearchStrings(names, baselineV0215New242Migration)
-	tailIndex := sort.SearchStrings(names, baselineV0215TailMigration)
+	old242Index := sort.SearchStrings(historicalNames, baselineV0215Existing242Migration)
+	new242Index := sort.SearchStrings(historicalNames, baselineV0215New242Migration)
+	tailIndex := sort.SearchStrings(historicalNames, baselineV0215TailMigration)
 	require.Less(t, old242Index, new242Index, "新 242 必须按完整 filename 排在本地 242 之后")
 	require.Less(t, new242Index, tailIndex, "新 242 必须在本地 243 之前执行")
-	require.Equal(t, 2, countMigrationPrefix(names, "242_"), "两个 242 文件必须按 filename 共存")
+	require.Equal(t, 2, countMigrationPrefix(historicalNames, "242_"), "v0.2.15 历史视图必须有两个 242 文件")
 	require.Equal(t, baselineV0215Pre243MigrationCount, tailIndex, "新装在 243 前应有 294 个迁移文件")
 
 	for _, migration := range []struct {
@@ -74,6 +80,28 @@ func TestBaselineV0215MigrationIdentity(t *testing.T) {
 		sql,
 		"新 242 只能移除额度与复合路由两处命名 CHECK",
 	)
+}
+
+func readMigrationNameManifest(t *testing.T, path string) []string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	require.Equal(t, names, sortedMigrationNames(names), "migration manifest must be sorted and unique")
+	return names
+}
+
+func sortedMigrationNames(names []string) []string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	return sorted
 }
 
 func countMigrationPrefix(names []string, prefix string) int {

@@ -41,7 +41,6 @@ func anthropicSSEWithNegativeBlockIndex() string {
 }
 
 func TestAnthropicBufferedAggregators_IgnoreNegativeBlockIndex(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
 		name string

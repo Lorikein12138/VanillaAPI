@@ -15,7 +15,6 @@ import (
 )
 
 func TestAlphaSearchFallbackRequiresSuccessfulCompletion(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	delta := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"unfinished answer\"}\n\n"
 	cases := map[string]string{
 		"empty":             "",
