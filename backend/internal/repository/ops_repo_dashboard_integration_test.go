@@ -30,12 +30,14 @@ func TestOpsOutputTPSDistribution(t *testing.T) {
 		_, _ = integrationDB.ExecContext(ctx, "DELETE FROM groups WHERE id IN ($1, $2)", group.ID, otherGroup.ID)
 		_, _ = integrationDB.ExecContext(ctx, "DELETE FROM users WHERE id = $1", user.ID)
 	})
+	sequence := 0
 	insert := func(at time.Time, groupID *int64, output int, duration *int, requestType service.RequestType, imageCount, imageTokens int, billingMode string) {
 		t.Helper()
+		sequence++
 		_, err := integrationDB.ExecContext(ctx, `INSERT INTO usage_logs
    (user_id, api_key_id, account_id, group_id, request_id, model, input_tokens, output_tokens, duration_ms, request_type, image_count, image_output_tokens, billing_mode, created_at, image_size)
    VALUES ($1,$2,$3,$4,$5,'gpt-test',100000,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $9 > 0 THEN '1K' ELSE NULL END)`,
-			user.ID, key.ID, account.ID, groupID, fmt.Sprintf("output-tps-%d-%d", user.ID, time.Now().UnixNano()), output, duration, requestType, imageCount, imageTokens, billingMode, at)
+			user.ID, key.ID, account.ID, groupID, fmt.Sprintf("output-tps-%d-%d-%d", user.ID, key.ID, sequence), output, duration, requestType, imageCount, imageTokens, billingMode, at)
 		require.NoError(t, err)
 	}
 	// Rates 1, 10, 100, 1000: unequal durations catch ratio-of-sums mistakes.
@@ -69,6 +71,12 @@ func TestOpsOutputTPSDistribution(t *testing.T) {
 	insert(end, &group.ID, 9999, &positive, service.RequestTypeSync, 0, 0, "token")
 	insert(start, &otherGroup.ID, 9999, &positive, service.RequestTypeSync, 0, 0, "token")
 	insert(start, nil, 50, &positive, service.RequestTypeSync, 0, 0, "token")
+	var rows, distinctRequests int
+	require.NoError(t, integrationDB.QueryRowContext(ctx,
+		"SELECT COUNT(*), COUNT(DISTINCT request_id) FROM usage_logs WHERE user_id = $1 AND api_key_id = $2", user.ID, key.ID).Scan(&rows, &distinctRequests))
+	require.Equal(t, 18, sequence, "all valid and invalid samples must be inserted")
+	require.Equal(t, sequence, rows)
+	require.Equal(t, sequence, distinctRequests)
 	repo := NewOpsRepository(integrationDB).(*opsRepository)
 	filter := &service.OpsDashboardFilter{StartTime: start, EndTime: end, Platform: " OpenAI ", GroupID: &group.ID}
 	assertStats := func(stats *service.OpsOutputTPS) {
