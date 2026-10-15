@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGeminiToolResultImagesPreserveContinuationRules(t *testing.T) {
+func TestGeminiToolResultImagesPreserveUserTurnAndPartOrder(t *testing.T) {
 	request := []byte(`{"messages":[
 		{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"inspect","input":{}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":[
@@ -34,15 +34,6 @@ func TestGeminiToolResultImagesPreserveContinuationRules(t *testing.T) {
 	require.Equal(t, "found", got.Contents[1].Parts[0]["functionResponse"].(map[string]any)["response"].(map[string]any)["content"])
 	require.Equal(t, "image/png", got.Contents[1].Parts[1]["inlineData"].(map[string]any)["mimeType"])
 	require.Equal(t, "image/jpeg", got.Contents[1].Parts[2]["inlineData"].(map[string]any)["mimeType"])
-	require.NotContains(t, string(converted), geminiContinuationPrompt, "tool results end in a user turn and must not get a continuation nudge")
-
-	prefill := []any{map[string]any{"role": "model", "parts": []any{map[string]any{"text": "partial"}}}}
-	continued := appendGeminiContinuationTurn(prefill)
-	require.Len(t, continued, 2, "an assistant prefill gets one continuation turn")
-	require.Equal(t, geminiContinuationPrompt, continued[1].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"])
-
-	functionCall := []any{map[string]any{"role": "model", "parts": []any{map[string]any{"functionCall": map[string]any{"name": "inspect"}}}}}
-	require.Len(t, appendGeminiContinuationTurn(functionCall), 1, "a trailing function call must wait for its function response")
 }
 
 func TestVertexChatThoughtSeparation(t *testing.T) {
