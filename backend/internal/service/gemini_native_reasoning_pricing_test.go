@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -135,7 +136,7 @@ func TestGeminiNativeReasoningPricingUsesExplicitForwardedLevel(t *testing.T) {
 	}
 }
 
-func TestGeminiChatCompatReasoningPricingIgnoresUnforwardedEffort(t *testing.T) {
+func TestGeminiChatCompatReasoningPricingUsesForwardedEffort(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		mode := "buffered"
 		if stream {
@@ -165,8 +166,9 @@ func TestGeminiChatCompatReasoningPricingIgnoresUnforwardedEffort(t *testing.T) 
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, recorder.Code)
 			require.Len(t, upstream.requestBodies, 1)
-			require.False(t, gjson.GetBytes(upstream.requestBodies[0], "generationConfig.thinkingConfig").Exists())
-			require.Nil(t, result.ReasoningEffort)
+			require.Equal(t, "high", gjson.GetBytes(upstream.requestBodies[0], "generationConfig.thinkingConfig.thinkingLevel").String())
+			require.Equal(t, stream, gjson.GetBytes(upstream.requestBodies[0], "generationConfig.thinkingConfig.includeThoughts").Bool())
+			require.Equal(t, "high", optionalStringValue(result.ReasoningEffort))
 
 			billing := NewBillingService(&config.Config{}, nil)
 			cost, err := billing.CalculateTokenCostForRequest(TokenCostRequest{
@@ -181,7 +183,40 @@ func TestGeminiChatCompatReasoningPricingIgnoresUnforwardedEffort(t *testing.T) 
 				Resolver: NewModelPricingResolver(nil, billing),
 			})
 			require.NoError(t, err)
-			require.InDelta(t, 1, cost.TotalCost, 1e-12)
+			require.InDelta(t, 2, cost.TotalCost, 1e-12)
 		})
+	}
+}
+
+func TestGeminiChatCompatUnforwardedEffortDoesNotMultiplyPrice(t *testing.T) {
+	for _, model := range []string{"gemini-2.0-flash", "gemini-2.5-flash", "gemini-3.1-pro-high"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", model, stream), func(t *testing.T) {
+				body, err := json.Marshal(map[string]any{"model": model, "stream": stream, "reasoning_effort": "high", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+				require.NoError(t, err)
+				response := `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}`
+				contentType := "application/json"
+				if stream {
+					contentType = "text/event-stream"
+					response = "data: " + response + "\n\n"
+				}
+				upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(response))}}}
+				svc := &GeminiMessagesCompatService{httpUpstream: upstream, cfg: &config.Config{}}
+				c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/chat/completions", body)
+				result, err := svc.ForwardAsChatCompletions(context.Background(), c, geminiSignalTestAccount(), body)
+				require.NoError(t, err)
+				require.Equal(t, http.StatusOK, recorder.Code)
+				require.Len(t, upstream.requestBodies, 1)
+				require.False(t, gjson.GetBytes(upstream.requestBodies[0], "generationConfig.thinkingConfig.thinkingLevel").Exists())
+				require.Nil(t, result.ReasoningEffort)
+				billing := NewBillingService(&config.Config{}, nil)
+				cost, err := billing.CalculateTokenCostForRequest(TokenCostRequest{Ctx: context.Background(), Model: model,
+					Group:  &Group{ID: 77, Platform: PlatformGemini, ModelPricing: []ChannelModelPricing{{Models: []string{model}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(0.05), OutputPrice: testPtrFloat64(0.1), ReasoningEffortMultipliers: map[string]float64{"high": 2}}}},
+					Tokens: UsageTokens{InputTokens: result.Usage.InputTokens, OutputTokens: result.Usage.OutputTokens}, ReasoningEffort: optionalStringValue(result.ReasoningEffort), RateMultiplier: 0.5, Resolver: NewModelPricingResolver(nil, billing)})
+				require.NoError(t, err)
+				require.InDelta(t, 1, cost.TotalCost, 1e-12)
+				require.InDelta(t, 0.5, cost.ActualCost, 1e-12)
+			})
+		}
 	}
 }

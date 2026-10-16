@@ -90,7 +90,7 @@ func TestGeminiChatCompat_PreservesAssistantPrefill(t *testing.T) {
 				messages := []any{
 					map[string]any{"role": "system", "content": "persona"},
 					map[string]any{"role": "user", "content": "hello"},
-					map[string]any{"role": "assistant", "content": "Once upon a"},
+					map[string]any{"role": "assistant", "content": "Once upon a", "reasoning_content": "private history"},
 				}
 				body := geminiPromptChatBody(t, stream, messages)
 				ctx, recorder := newGeminiPromptSemanticsContext(http.MethodPost, "/v1/chat/completions", body)
@@ -200,7 +200,7 @@ func TestGeminiMessagesCompat_PreservesModelEndingRequest(t *testing.T) {
 				svc, account, upstream := newGeminiPromptSemanticsHarness(accountType, upstreamStream, http.StatusOK)
 				body := geminiPromptMessagesBody(t, stream, []any{
 					map[string]any{"role": "user", "content": "hello"},
-					map[string]any{"role": "assistant", "content": "Once upon a"},
+					map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "private history", "signature": "history-signature"}, map[string]any{"type": "text", "text": "Once upon a"}}},
 				})
 				ctx, recorder := newGeminiPromptSemanticsContext(http.MethodPost, "/v1/messages", body)
 
@@ -322,7 +322,7 @@ func TestGeminiCompat_ModelEnding400UsesExistingErrorMapping(t *testing.T) {
 			if tt.chat {
 				body := geminiPromptChatBody(t, tt.stream, []any{
 					map[string]any{"role": "user", "content": "hello"},
-					map[string]any{"role": "assistant", "content": "Once upon a"},
+					map[string]any{"role": "assistant", "content": "Once upon a", "reasoning_content": "private history"},
 				})
 				ctx, recorder := newGeminiPromptSemanticsContext(http.MethodPost, "/v1/chat/completions", body)
 				result, err := svc.ForwardAsChatCompletions(context.Background(), ctx, account, body)
@@ -333,7 +333,7 @@ func TestGeminiCompat_ModelEnding400UsesExistingErrorMapping(t *testing.T) {
 			} else {
 				body := geminiPromptMessagesBody(t, tt.stream, []any{
 					map[string]any{"role": "user", "content": "hello"},
-					map[string]any{"role": "assistant", "content": "Once upon a"},
+					map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "private history", "signature": "history-signature"}, map[string]any{"type": "text", "text": "Once upon a"}}},
 				})
 				ctx, recorder := newGeminiPromptSemanticsContext(http.MethodPost, "/v1/messages", body)
 				result, err := svc.Forward(context.Background(), ctx, account, body)
@@ -349,6 +349,10 @@ func TestGeminiCompat_ModelEnding400UsesExistingErrorMapping(t *testing.T) {
 			contents := geminiPromptContents(t, request)
 			require.Equal(t, []string{"user", "model"}, geminiPromptRoles(contents))
 			require.Equal(t, "Once upon a", geminiPromptContentText(t, contents[1]))
+			serialized, err := json.Marshal(request)
+			require.NoError(t, err)
+			require.NotContains(t, string(serialized), "private history")
+			require.NotContains(t, string(serialized), "history-signature")
 			if tt.stream {
 				require.Contains(t, upstream.lastReq.URL.String(), ":streamGenerateContent")
 			} else {

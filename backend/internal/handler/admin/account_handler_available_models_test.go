@@ -192,6 +192,27 @@ func TestAccountHandlerGetAvailableModels_ExplicitMappingShortCircuitsUpstream(t
 	require.Equal(t, 0, upstream.callCount())
 }
 
+func TestAntigravityAccountTestModelsFallbackContract(t *testing.T) {
+	defaults := antigravityAccountTestModels(nil)
+	require.NotEmpty(t, defaults)
+	require.Equal(t, defaults, antigravityAccountTestModels(map[string]any{"wild*": "target", "invalid": false}))
+	got := antigravityAccountTestModels(map[string]any{"wild*": "target", "custom": "target", "invalid": false, "empty": ""})
+	require.Len(t, got, 1)
+	require.Equal(t, "custom", got[0].ID)
+	require.Equal(t, "custom", got[0].DisplayName)
+	// The endpoint's explicit-key contract is deliberately broader than fallback.
+	account := service.Account{ID: 52, Platform: service.PlatformAntigravity, Type: service.AccountTypeOAuth, Status: service.StatusActive,
+		Credentials: map[string]any{"model_mapping": map[string]any{"wild*": "target"}}}
+	svc := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: account}
+	upstream := &syncUpstreamHTTPUpstream{}
+	router := setupAvailableModelsRouterWithOpenAIModelDiscovery(svc, account, upstream)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/52/models", nil))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, []availableModelOptionResponse{{ID: "wild*", DisplayName: "wild*", Type: "model"}}, decodeAvailableModelOptions(t, recorder.Body.Bytes()))
+	require.Zero(t, upstream.callCount())
+}
+
 func TestAccountHandlerGetAvailableModels_ExplicitMappingReturnsSortedKeys(t *testing.T) {
 	svc := &availableModelsAdminService{
 		stubAdminService: newStubAdminService(),
