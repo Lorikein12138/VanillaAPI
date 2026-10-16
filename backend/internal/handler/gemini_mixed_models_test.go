@@ -167,6 +167,30 @@ func TestAppendUpstreamGeminiModelsPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestGeminiNativeModelsCombinesSourcesBeforeFinalAllowlist(t *testing.T) {
+	id := int64(51)
+	repo := &geminiAllowlistAccountRepoStub{gatewayModelsAccountRepoStub: gatewayModelsAccountRepoStub{byGroup: map[int64][]service.Account{id: {
+		{ID: 1, Platform: service.PlatformGemini, Type: service.AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test", "model_mapping": map[string]any{"gemini-local-only": "upstream-local"}}},
+		{ID: 2, Platform: service.PlatformAntigravity, Extra: map[string]any{"mixed_scheduling": true}, Credentials: map[string]any{"model_mapping": map[string]any{"gemini-synced-custom": "gemini-4-argon-high"}}},
+	}}}}
+	upstream := &geminiMixedModelsUpstream{status: http.StatusOK, body: `{"models":[{"name":"models/gemini-native","inputTokenLimit":123,"custom":{"source":"upstream"}},{"name":"models/gemini-rejected"}],"nextPageToken":"next"}`}
+	h := newGatewayModelsHandlerForTest(repo)
+	h.geminiCompatService = service.NewGeminiMessagesCompatService(repo, nil, nil, nil, nil, nil, upstream, nil, &config.Config{})
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{GroupID: &id, Group: &service.Group{ID: id, Platform: service.PlatformGemini, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gemini-native", "gemini-local-only", "gemini-synced-custom"}}}})
+	h.GeminiV1BetaListModels(c)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var got gemini.ModelsListResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &got))
+	require.ElementsMatch(t, []string{"models/gemini-native", "models/gemini-local-only", "models/gemini-synced-custom"}, modelNamesForTest(got.Models))
+	require.Contains(t, recorder.Body.String(), `"inputTokenLimit":123`)
+	require.Contains(t, recorder.Body.String(), `"custom":{"source":"upstream"}`)
+	require.Contains(t, recorder.Body.String(), `"nextPageToken":"next"`)
+	require.Equal(t, "native-id", recorder.Header().Get("X-Request-Id"))
+}
+
 // Exercise the real handler's native-upstream branch, including scope fallback.
 type geminiMixedModelsUpstream struct {
 	service.HTTPUpstream

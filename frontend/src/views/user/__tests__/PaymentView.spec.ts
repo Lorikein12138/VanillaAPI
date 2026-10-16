@@ -465,6 +465,29 @@ describe('PaymentView checkout quick amounts', () => {
     expect(legacy.getComponent(AmountInput).props('amounts')).toEqual([10, 20, 50, 100, 200, 500, 1000, 2000, 5000])
     expect(getCheckoutInfo).toHaveBeenCalledTimes(1)
   })
+
+  it('keeps Stripe secrets in recovery storage while routing only order and resume token', async () => {
+    routerResolve.mockClear()
+    const wrapper = await mountRecharge({ quick_amounts: [], methods: { stripe: { ...checkoutInfoFixture().data.methods.wxpay, currency: 'USD' } } })
+    createOrder.mockResolvedValue({ order_id: 42, amount: 37.25, pay_amount: 37.25, currency: 'USD', payment_type: 'stripe', client_secret: 'pi_secret_42', resume_token: 'resume-42', expires_at: '2099-01-01T00:30:00.000Z' })
+    // Stripe 落地页走 location.href 整页跳转，jsdom 不支持导航，替换 location 接住跳转地址
+    const originalLocation = window.location
+    const locationState = { href: 'http://localhost/purchase', origin: 'http://localhost' }
+    Object.defineProperty(window, 'location', { configurable: true, value: locationState })
+    try {
+      await wrapper.getComponent(AmountInput).vm.$emit('update:modelValue', 37.25)
+      await wrapper.get('button.btn-stripe').trigger('click')
+      await flushPromises()
+    } finally {
+      Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
+    }
+    expect(locationState.href).toBe('/payment/stripe?mock=1')
+    expect(createOrder).toHaveBeenCalledWith(expect.objectContaining({ amount: 37.25, order_type: 'balance' }))
+    const stripeRoute = routerResolve.mock.calls.find(([location]) => location.path === '/payment/stripe')?.[0]
+    expect(stripeRoute).toEqual({ path: '/payment/stripe', query: { order_id: '42', method: undefined, resume_token: 'resume-42' } })
+    expect(JSON.stringify(stripeRoute)).not.toContain('pi_secret_42')
+    expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toContain('pi_secret_42')
+  })
 })
 
 describe('PaymentView subscription confirmation amounts', () => {

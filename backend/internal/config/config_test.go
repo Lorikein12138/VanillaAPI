@@ -70,6 +70,46 @@ func TestLoadV0211AdmissionRejectsNegativeConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultMinOutputTokens(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 128, cfg.Gateway.MinOutputTokens)
+}
+
+func TestLoadMinOutputTokensFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_MIN_OUTPUT_TOKENS", "16")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 16, cfg.Gateway.MinOutputTokens)
+}
+
+func TestValidateMinOutputTokensMinimum(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	cfg.Gateway.MinOutputTokens = 16
+	require.NoError(t, cfg.Validate())
+	cfg.Gateway.MinOutputTokens = 15
+	require.EqualError(t, cfg.Validate(), "gateway.min_output_tokens must be at least 16")
+}
+
+func TestLoadMinOutputTokensFromConfigFile(t *testing.T) {
+	for _, floor := range []int{16, 256} {
+		t.Run(fmt.Sprint(floor), func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			t.Setenv("GATEWAY_MIN_OUTPUT_TOKENS", "")
+			configFile := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configFile, []byte(fmt.Sprintf("gateway:\n  min_output_tokens: %d\n", floor)), 0o600))
+			t.Setenv("CONFIG_FILE", configFile)
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.Equal(t, floor, cfg.Gateway.MinOutputTokens)
+		})
+	}
+}
+
 func TestLoadTimezonePrecedence(t *testing.T) {
 	tests := []struct {
 		name         string
