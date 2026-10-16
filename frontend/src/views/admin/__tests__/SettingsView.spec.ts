@@ -1179,6 +1179,112 @@ describe("admin SettingsView payment visible method controls", () => {
     );
   });
 
+  it("loads shared defaults for an older settings response and preserves an explicit empty list", async () => {
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse });
+    const legacy = mountView();
+    await flushPromises();
+    await openPaymentTab(legacy);
+    expect(legacy.findAll('[data-testid="payment-quick-amount-row"]')).toHaveLength(9);
+    legacy.unmount();
+
+    getSettings.mockReset().mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      payment_quick_amounts: [],
+    });
+    const empty = mountView();
+    await flushPromises();
+    await openPaymentTab(empty);
+    expect(empty.findAll('[data-testid="payment-quick-amount-row"]')).toHaveLength(0);
+    expect(empty.find('[data-testid="payment-quick-amounts-empty"]').exists()).toBe(true);
+  });
+
+  it("retains invalid and incomplete drafts and prevents the aggregate save request", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      payment_quick_amounts: [10, 20],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openPaymentTab(wrapper);
+    await wrapper.get('[data-testid="payment-quick-amount-input-1"]').setValue("10.00");
+    await wrapper.get('[data-testid="payment-quick-amounts-add"]').trigger("click");
+
+    expect(wrapper.findAll('[data-testid="payment-quick-amount-error"]')).toHaveLength(2);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-0"]').element as HTMLInputElement).value).toBe("10");
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-1"]').element as HTMLInputElement).value).toBe("10.00");
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-2"]').element as HTMLInputElement).value).toBe("");
+  });
+
+  it("validates and submits sorted amounts, then resets only the draft until the normal save is submitted", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      payment_quick_amounts: [10, 100],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openPaymentTab(wrapper);
+    await wrapper.get('[data-testid="payment-quick-amount-input-0"]').setValue("25.5");
+    await wrapper.get('[data-testid="payment-quick-amount-input-1"]').setValue("0.29");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      payment_quick_amounts: [0.29, 25.5],
+    }));
+    expect(wrapper.findAll('[data-testid="payment-quick-amount-row"]')).toHaveLength(2);
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-0"]').element as HTMLInputElement).value).toBe("0.29");
+
+    updateSettings.mockClear();
+    await wrapper.get('[data-testid="payment-quick-amounts-reset"]').trigger("click");
+    expect(wrapper.findAll('[data-testid="payment-quick-amount-row"]')).toHaveLength(9);
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps edited rows after a failed save and a cancelled step-up prompt", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      payment_quick_amounts: [10, 20],
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await openPaymentTab(wrapper);
+    await wrapper.get('[data-testid="payment-quick-amount-input-0"]').setValue("17.25");
+
+    updateSettings.mockRejectedValueOnce(new Error("save failed"));
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-0"]').element as HTMLInputElement).value).toBe("17.25");
+
+    updateSettings.mockRejectedValueOnce({ status: 403, code: "STEP_UP_REQUIRED" });
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    const cancel = wrapper.findAll("button").find((button) => button.text().includes("common.cancel"));
+    expect(cancel).toBeDefined();
+    await cancel?.trigger("click");
+    await flushPromises();
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-0"]').element as HTMLInputElement).value).toBe("17.25");
+  });
+
+  it("preserves unsaved rows while the payment section is hidden and shown", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await openPaymentTab(wrapper);
+    await wrapper.get('[data-testid="payment-quick-amount-input-0"]').setValue("17.25");
+
+    const paymentToggle = wrapper.findAll(".toggle-stub").find((toggle) =>
+      toggle.element.closest(".flex.items-center.justify-between")?.textContent?.includes("admin.settings.payment.enabled"),
+    );
+    expect(paymentToggle).toBeDefined();
+    await paymentToggle!.setValue(false);
+    expect(wrapper.find('[data-testid="payment-quick-amounts-editor"]').exists()).toBe(false);
+    await paymentToggle!.setValue(true);
+    expect((wrapper.get('[data-testid="payment-quick-amount-input-0"]').element as HTMLInputElement).value).toBe("17.25");
+  });
+
   it("links payment guidance to README sections instead of removed payment docs", async () => {
     const wrapper = mountView();
 

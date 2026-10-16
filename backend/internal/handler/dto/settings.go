@@ -281,6 +281,7 @@ type SystemSettings struct {
 	PaymentRechargeFeeRate           float64  `json:"payment_recharge_fee_rate"`
 	// 充值赠送阶梯与活动文案
 	PaymentRechargeBonusTiers  []RechargeBonusTier `json:"payment_recharge_bonus_tiers"`
+	PaymentQuickAmounts        []float64           `json:"payment_quick_amounts"`
 	PaymentRechargeBonusMode   string              `json:"payment_recharge_bonus_mode"`
 	PaymentRechargeBonusNotice string              `json:"payment_recharge_bonus_notice"`
 	PaymentLoadBalanceStrat    string              `json:"payment_load_balance_strategy"`

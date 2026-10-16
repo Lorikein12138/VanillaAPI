@@ -5,6 +5,7 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -21,6 +22,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	serverroutes "github.com/Wei-Shaw/sub2api/internal/server/routes"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -978,6 +980,7 @@ func TestAPIContracts(t *testing.T) {
 					"custom_menu_items": [],
 					"custom_endpoints": [],
 					"payment_enabled": false,
+					"payment_quick_amounts": [10, 20, 50, 100, 200, 500, 1000, 2000, 5000],
 					"payment_min_amount": 0,
 					"payment_max_amount": 0,
 					"payment_daily_limit": 0,
@@ -1300,6 +1303,7 @@ func TestAPIContracts(t *testing.T) {
 						"rules": []
 					},
 					"payment_enabled": false,
+					"payment_quick_amounts": [10, 20, 50, 100, 200, 500, 1000, 2000, 5000],
 					"payment_min_amount": 0,
 					"payment_max_amount": 0,
 					"payment_daily_limit": 0,
@@ -3015,6 +3019,81 @@ func paginationResult(total int64, params pagination.PaginationParams) *paginati
 		PageSize: pageSize,
 		Pages:    pages,
 	}
+}
+
+func TestPaymentQuickAmountsRouteAccessContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newStubSettingRepo()
+	repo.SetAll(map[string]string{service.SettingPaymentQuickAmounts: "[10,20]"})
+	configService := service.NewPaymentConfigService(nil, repo, nil)
+	userPaymentHandler := handler.NewPaymentHandler(nil, configService)
+	adminPaymentHandler := adminhandler.NewPaymentHandler(nil, configService)
+
+	jwtAuth := middleware.JWTAuthMiddleware(func(c *gin.Context) {
+		if c.GetHeader("X-Contract-Role") != "user" {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 7, Concurrency: 2})
+		c.Set(string(middleware.ContextKeyUserRole), service.RoleUser)
+		c.Next()
+	})
+	adminAuth := middleware.AdminAuthMiddleware(func(c *gin.Context) {
+		switch c.GetHeader("X-Contract-Role") {
+		case "admin":
+			c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1, Concurrency: 2})
+			c.Set(string(middleware.ContextKeyUserRole), service.RoleAdmin)
+			c.Next()
+		case "user":
+			c.AbortWithStatus(http.StatusForbidden)
+		default:
+			c.AbortWithStatus(http.StatusUnauthorized)
+		}
+	})
+	auditLog := middleware.AuditLogMiddleware(func(c *gin.Context) { c.Next() })
+
+	router := gin.New()
+	serverroutes.RegisterPaymentRoutes(
+		router.Group("/api/v1"),
+		userPaymentHandler,
+		handler.NewPaymentWebhookHandler(nil, nil),
+		adminPaymentHandler,
+		jwtAuth,
+		adminAuth,
+		auditLog,
+		nil,
+		nil,
+		nil,
+	)
+
+	adminPut := func(role string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/payment/config", bytes.NewBufferString(`{"quick_amounts":[30,40]}`))
+		request.Header.Set("Content-Type", "application/json")
+		if role != "" {
+			request.Header.Set("X-Contract-Role", role)
+		}
+		router.ServeHTTP(recorder, request)
+		return recorder
+	}
+	require.Equal(t, http.StatusUnauthorized, adminPut("").Code, "unauthenticated admin write must be rejected")
+	require.Equal(t, "[10,20]", repo.all[service.SettingPaymentQuickAmounts])
+	require.Equal(t, http.StatusForbidden, adminPut("user").Code, "regular user admin write must be rejected")
+	require.Equal(t, "[10,20]", repo.all[service.SettingPaymentQuickAmounts])
+
+	read := httptest.NewRecorder()
+	readRequest := httptest.NewRequest(http.MethodGet, "/api/v1/payment/config", nil)
+	readRequest.Header.Set("X-Contract-Role", "user")
+	router.ServeHTTP(read, readRequest)
+	require.Equal(t, http.StatusOK, read.Code, "authenticated regular user must read payment config")
+	var readEnvelope struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(read.Body.Bytes(), &readEnvelope))
+	require.Equal(t, []any{float64(10), float64(20)}, readEnvelope.Data["quick_amounts"])
+
+	require.Equal(t, http.StatusOK, adminPut("admin").Code, "administrator may write payment config")
+	require.Equal(t, "[30,40]", repo.all[service.SettingPaymentQuickAmounts])
 }
 
 // Ensure compile-time interface compliance.

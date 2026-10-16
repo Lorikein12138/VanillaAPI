@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-4">
     <!-- Quick Amount Buttons -->
-    <div>
-      <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+    <div v-if="filteredAmounts.length > 0">
+      <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300" data-testid="quick-amounts-label">
         {{ t('payment.quickAmounts') }}
       </label>
       <div class="grid grid-cols-3 gap-x-4 gap-y-4 pt-2">
@@ -75,6 +75,7 @@ import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { RechargeBonusTier } from '@/types/payment'
 import { formatRechargeBonusNumber, quoteRechargeBonus, type RechargeBonusMode } from '@/utils/rechargeBonus'
+import { normalizePaymentQuickAmounts } from '@/utils/paymentQuickAmounts'
 import { formatPaymentAmount } from './currency'
 
 const props = withDefaults(defineProps<{
@@ -91,7 +92,7 @@ const props = withDefaults(defineProps<{
   /** 支付币种（折扣模式第二行实付金额的币种与精度） */
   currency?: string
 }>(), {
-  amounts: () => [10, 20, 50, 100, 200, 500, 1000, 2000, 5000],
+  amounts: () => normalizePaymentQuickAmounts(undefined),
   min: 0,
   max: 0,
   bonusTiers: () => [],

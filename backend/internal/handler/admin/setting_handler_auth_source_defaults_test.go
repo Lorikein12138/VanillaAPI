@@ -17,8 +17,11 @@ import (
 )
 
 type settingHandlerRepoStub struct {
-	values      map[string]string
-	lastUpdates map[string]string
+	values              map[string]string
+	lastUpdates         map[string]string
+	setCalls            int
+	setErr              error
+	quickAmountsReadErr error
 }
 
 func (s *settingHandlerRepoStub) Get(ctx context.Context, key string) (*service.Setting, error) {
@@ -39,6 +42,11 @@ func (s *settingHandlerRepoStub) Set(ctx context.Context, key, value string) err
 }
 
 func (s *settingHandlerRepoStub) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
+	for _, key := range keys {
+		if key == service.SettingPaymentQuickAmounts && s.quickAmountsReadErr != nil {
+			return nil, s.quickAmountsReadErr
+		}
+	}
 	out := make(map[string]string, len(keys))
 	for _, key := range keys {
 		if value, ok := s.values[key]; ok {
@@ -49,6 +57,10 @@ func (s *settingHandlerRepoStub) GetMultiple(ctx context.Context, keys []string)
 }
 
 func (s *settingHandlerRepoStub) SetMultiple(ctx context.Context, settings map[string]string) error {
+	s.setCalls++
+	if s.setErr != nil {
+		return s.setErr
+	}
 	s.lastUpdates = make(map[string]string, len(settings))
 	for key, value := range settings {
 		s.lastUpdates[key] = value

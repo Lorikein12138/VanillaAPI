@@ -411,6 +411,62 @@ describe('PaymentView recharge rate preview', () => {
   })
 })
 
+describe('PaymentView checkout quick amounts', () => {
+  beforeEach(() => {
+    routeState.path = '/purchase'
+    routeState.query = {}
+    createOrder.mockReset()
+    getCheckoutInfo.mockReset()
+    window.localStorage.clear()
+  })
+
+  async function mountRecharge(checkout: Partial<CheckoutInfoResponse> = {}) {
+    getCheckoutInfo.mockResolvedValue(checkoutInfoFixture(checkout))
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('passes configured checkout amounts to the existing input and keeps the order payload independent of the shortcut list', async () => {
+    const wrapper = await mountRecharge({ quick_amounts: [100, 25.5, 5] })
+    const amountInput = wrapper.getComponent(AmountInput)
+    expect(getCheckoutInfo).toHaveBeenCalledTimes(1)
+    expect(amountInput.props('amounts')).toEqual([5, 25.5, 100])
+
+    await amountInput.vm.$emit('update:modelValue', 17.25)
+    expect(amountInput.props('modelValue')).toBe(17.25)
+    createOrder.mockRejectedValueOnce(new Error('test order response'))
+    await wrapper.get('button.btn-wxpay').trigger('click')
+    await flushPromises()
+    expect(createOrder).toHaveBeenCalledWith(expect.objectContaining({
+      amount: 17.25,
+      payment_type: 'wxpay',
+      order_type: 'balance',
+    }))
+    expect(getCheckoutInfo).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an explicit empty list and falls back to shared defaults for an older checkout response', async () => {
+    const empty = await mountRecharge({ quick_amounts: [] })
+    expect(empty.getComponent(AmountInput).props('amounts')).toEqual([])
+    expect(getCheckoutInfo).toHaveBeenCalledTimes(1)
+    empty.unmount()
+
+    getCheckoutInfo.mockReset()
+    const legacy = await mountRecharge()
+    expect(legacy.getComponent(AmountInput).props('amounts')).toEqual([10, 20, 50, 100, 200, 500, 1000, 2000, 5000])
+    expect(getCheckoutInfo).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('PaymentView subscription confirmation amounts', () => {
   it('shows converted CNY pay amount using the subscription rate, not the balance multiplier', async () => {
     const wrapper = await mountSubscriptionConfirm({

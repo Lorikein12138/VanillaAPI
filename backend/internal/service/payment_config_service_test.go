@@ -406,8 +406,12 @@ func newPaymentConfigServiceTestClient(t *testing.T) *dbent.Client {
 }
 
 type paymentConfigSettingRepoStub struct {
-	values  map[string]string
-	updates map[string]string
+	values        map[string]string
+	updates       map[string]string
+	requestedKeys []string
+	getErr        error
+	setErr        error
+	setCalls      int
 }
 
 func (s *paymentConfigSettingRepoStub) Get(context.Context, string) (*Setting, error) {
@@ -418,6 +422,10 @@ func (s *paymentConfigSettingRepoStub) GetValue(_ context.Context, key string) (
 }
 func (s *paymentConfigSettingRepoStub) Set(context.Context, string, string) error { return nil }
 func (s *paymentConfigSettingRepoStub) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	s.requestedKeys = append([]string(nil), keys...)
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
 	out := make(map[string]string, len(keys))
 	for _, key := range keys {
 		out[key] = s.values[key]
@@ -425,6 +433,10 @@ func (s *paymentConfigSettingRepoStub) GetMultiple(_ context.Context, keys []str
 	return out, nil
 }
 func (s *paymentConfigSettingRepoStub) SetMultiple(_ context.Context, values map[string]string) error {
+	s.setCalls++
+	if s.setErr != nil {
+		return s.setErr
+	}
 	s.updates = make(map[string]string, len(values))
 	for key, value := range values {
 		s.updates[key] = value
