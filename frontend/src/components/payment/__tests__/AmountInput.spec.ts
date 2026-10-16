@@ -39,6 +39,32 @@ describe('recharge amount input', () => {
     expect(wrapper.emitted('update:modelValue')).toEqual([[null], [null], [0.5], [0.5], [null]])
     expect((input.element as HTMLInputElement).value).toBe('')
   })
+
+  it('uses the shared defaults, preserves configured order and emits clicked decimals', async () => {
+    const defaults = mountInput()
+    expect(defaults.findAll('[data-testid^="quick-amount-"]').filter((node) => /^quick-amount-\d/.test(node.attributes('data-testid') ?? ''))).toHaveLength(9)
+
+    const wrapper = mount(AmountInput, {
+      props: { modelValue: null, amounts: [100, 25.5, 5], min: 10, max: 100 },
+    })
+    expect(wrapper.findAll('button[data-testid^="quick-amount-"]').map((button) => button.attributes('data-testid')))
+      .toEqual(['quick-amount-100', 'quick-amount-25.5'])
+    await wrapper.get('[data-testid="quick-amount-25.5"]').trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toEqual([[25.5]])
+    expect((wrapper.get('input').element as HTMLInputElement).value).toBe('25.5')
+  })
+
+  it('hides the complete shortcut section for an explicit empty or fully filtered list while retaining custom input', () => {
+    for (const props of [
+      { amounts: [] },
+      { amounts: [10, 20], min: 100, max: 200 },
+    ]) {
+      const wrapper = mount(AmountInput, { props: { modelValue: null, ...props } })
+      expect(wrapper.find('[data-testid="quick-amounts-label"]').exists()).toBe(false)
+      expect(wrapper.find('.grid').exists()).toBe(false)
+      expect(wrapper.find('input').exists()).toBe(true)
+    }
+  })
 })
 
 describe('recharge bonus hints on quick amounts', () => {

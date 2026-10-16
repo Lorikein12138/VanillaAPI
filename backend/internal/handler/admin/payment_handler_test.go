@@ -1,13 +1,19 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSanitizeAdminPaymentOrderForResponseAddsCurrency(t *testing.T) {
@@ -104,4 +110,64 @@ func TestAdminSubscriptionPlansForResponseIncludesCompositeGroupInfo(t *testing.
 	if !got[0].CreatedAt.Equal(now) || !got[0].UpdatedAt.Equal(now) {
 		t.Fatalf("expected created_at/updated_at to be preserved, got %v / %v", got[0].CreatedAt, got[0].UpdatedAt)
 	}
+}
+
+func TestPaymentQuickAmountsAdminConfigSharesSettingsKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &settingHandlerRepoStub{values: map[string]string{service.SettingPaymentQuickAmounts: "[10,20]"}}
+	configService := service.NewPaymentConfigService(nil, repo, nil)
+	h := NewPaymentHandler(nil, configService)
+
+	get := httptest.NewRecorder()
+	getCtx, _ := gin.CreateTestContext(get)
+	getCtx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/payment/config", nil)
+	h.GetConfig(getCtx)
+	require.Equal(t, http.StatusOK, get.Code)
+	require.Equal(t, []any{float64(10), float64(20)}, paymentQuickAmountResponseData(t, get)["quick_amounts"])
+
+	putBody, err := json.Marshal(map[string]any{"quick_amounts": []float64{50, 25}})
+	require.NoError(t, err)
+	put := httptest.NewRecorder()
+	putCtx, _ := gin.CreateTestContext(put)
+	putCtx.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/payment/config", bytes.NewReader(putBody))
+	putCtx.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateConfig(putCtx)
+	require.Equal(t, http.StatusOK, put.Code)
+	require.Equal(t, "[25,50]", repo.values[service.SettingPaymentQuickAmounts])
+
+	settingsHandler := NewSettingHandler(
+		service.NewSettingService(repo, &config.Config{Default: config.DefaultConfig{UserConcurrency: 5}}),
+		nil, nil, nil, configService, nil, nil,
+	)
+	settingsGet := httptest.NewRecorder()
+	settingsCtx, _ := gin.CreateTestContext(settingsGet)
+	settingsCtx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings", nil)
+	settingsHandler.GetSettings(settingsCtx)
+	require.Equal(t, http.StatusOK, settingsGet.Code)
+	require.Equal(t, []any{float64(25), float64(50)}, paymentQuickAmountResponseData(t, settingsGet)["payment_quick_amounts"])
+}
+
+func TestPaymentQuickAmountsAdminConfigInvalidDoesNotWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &settingHandlerRepoStub{}
+	h := NewPaymentHandler(nil, service.NewPaymentConfigService(nil, repo, nil))
+	body, err := json.Marshal(map[string]any{"enabled": true, "quick_amounts": []float64{0}})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/payment/config", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.UpdateConfig(ctx)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "INVALID_PAYMENT_QUICK_AMOUNTS")
+	require.Zero(t, repo.setCalls)
+}
+
+func paymentQuickAmountResponseData(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &envelope))
+	return envelope.Data
 }

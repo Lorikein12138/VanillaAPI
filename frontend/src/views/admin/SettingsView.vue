@@ -8448,6 +8448,11 @@
           </div>
 
           <!-- 充值优惠阶梯（独立卡片，与服务商管理同级） -->
+          <PaymentQuickAmountsEditor
+            v-if="form.payment_enabled"
+            v-model="quickAmountRows"
+          />
+
           <RechargeBonusTierEditor
             v-if="form.payment_enabled"
             v-model="form.payment_recharge_bonus_tiers"
@@ -9032,6 +9037,7 @@ import ImageUpload from "@/components/common/ImageUpload.vue";
 import BackupSettings from "@/views/admin/BackupView.vue";
 import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue";
 import RechargeBonusTierEditor from "@/components/admin/settings/RechargeBonusTierEditor.vue";
+import PaymentQuickAmountsEditor from "@/components/admin/settings/PaymentQuickAmountsEditor.vue";
 import {
   normalizeRechargeBonusMode,
   normalizeRechargeBonusTiers,
@@ -9039,6 +9045,11 @@ import {
   type RechargeBonusMode,
   type RechargeBonusTierDraft,
 } from "@/utils/rechargeBonus";
+import {
+  MAX_PAYMENT_QUICK_AMOUNTS,
+  normalizePaymentQuickAmounts,
+  parsePaymentQuickAmountInputs,
+} from "@/utils/paymentQuickAmounts";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
 import { useClipboard } from "@/composables/useClipboard";
 import {
@@ -9175,6 +9186,7 @@ const registrationEmailSuffixWhitelistTags = ref<string[]>([]);
 const registrationEmailSuffixWhitelistDraft = ref("");
 const forwardedClientIpHeaderDraft = ref("");
 const tablePageSizeOptionsInput = ref("10, 20, 50, 100");
+const quickAmountRows = ref<string[]>(normalizePaymentQuickAmounts(undefined).map(String));
 
 // Admin API Key 状态
 const adminApiKeyLoading = ref(true);
@@ -11050,6 +11062,7 @@ async function loadSettings() {
       settings.payment_load_balance_strategy || "round-robin";
     // Only assign non-null values from backend (null means unconfigured, keep defaults)
     for (const [key, value] of Object.entries(settings)) {
+      if (key === "payment_quick_amounts") continue;
       if (value !== null && value !== undefined) {
         (form as Record<string, unknown>)[key] = value;
       }
@@ -11105,6 +11118,9 @@ async function loadSettings() {
     form.payment_recharge_bonus_tiers = normalizeRechargeBonusTiers(
       settings.payment_recharge_bonus_tiers,
     );
+    quickAmountRows.value = normalizePaymentQuickAmounts(
+      settings.payment_quick_amounts,
+    ).map(String);
     form.payment_recharge_bonus_mode = normalizeRechargeBonusMode(
       settings.payment_recharge_bonus_mode,
     );
@@ -11318,6 +11334,26 @@ const siteBillingModeHint = computed(() =>
 async function saveSettings() {
   saving.value = true;
   try {
+    const quickAmountsResult = parsePaymentQuickAmountInputs(quickAmountRows.value);
+    if (quickAmountsResult.tooMany) {
+      appStore.showError(
+        t("admin.settings.payment.quickAmounts.tooMany", {
+          count: MAX_PAYMENT_QUICK_AMOUNTS,
+        }),
+      );
+      return;
+    }
+    const quickAmountsError = quickAmountsResult.errors.find(
+      (error) => error !== null,
+    );
+    if (quickAmountsError) {
+      appStore.showError(
+        t(`admin.settings.payment.quickAmounts.${quickAmountsError}`),
+      );
+      return;
+    }
+    if (quickAmountsResult.values === null) return;
+
     const normalizedTableDefaultPageSize = Math.floor(
       Number(form.table_default_page_size),
     );
@@ -11716,6 +11752,7 @@ async function saveSettings() {
       payment_subscription_usd_to_cny_rate:
         Number(form.payment_subscription_usd_to_cny_rate) || 0,
       payment_recharge_fee_rate: Number(form.payment_recharge_fee_rate) || 0,
+      payment_quick_amounts: quickAmountsResult.values,
       payment_recharge_bonus_tiers: sanitizeRechargeBonusTiersForSubmit(
         form.payment_recharge_bonus_tiers,
       ),
@@ -11845,11 +11882,14 @@ async function saveSettings() {
       adminAPI.settings.updateSettings(payload),
     );
     for (const [key, value] of Object.entries(updated)) {
-      if (key === "openai_fast_policy_settings") continue;
+      if (key === "openai_fast_policy_settings" || key === "payment_quick_amounts") continue;
       if (value !== null && value !== undefined) {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    quickAmountRows.value = normalizePaymentQuickAmounts(
+      updated.payment_quick_amounts,
+    ).map(String);
     if (updated.openai_oauth_scheduling_rate_multiplier === null) {
       form.openai_oauth_scheduling_rate_multiplier = null;
     }

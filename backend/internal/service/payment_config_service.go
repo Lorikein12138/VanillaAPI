@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -40,6 +41,7 @@ const (
 	SettingCancelWindowMode              = "CANCEL_RATE_LIMIT_WINDOW_MODE"
 	SettingAlipayForceQRCode             = "ALIPAY_FORCE_QRCODE"
 	SettingAlipayMobilePrecreateDeepLink = "ALIPAY_MOBILE_PRECREATE_DEEP_LINK"
+	SettingPaymentQuickAmounts           = "PAYMENT_QUICK_AMOUNTS"
 )
 
 // Default values for payment configuration settings.
@@ -64,6 +66,7 @@ type PaymentConfig struct {
 	RechargeFeeRate          float64 `json:"recharge_fee_rate"`
 	// RechargeBonusTiers 余额充值优惠阶梯（按 MinAmount 升序）；空表示无优惠。
 	RechargeBonusTiers []RechargeBonusTier `json:"recharge_bonus_tiers"`
+	QuickAmounts       []float64           `json:"quick_amounts"`
 	// RechargeBonusMode 阶梯模式：bonus（赠金）/ discount（折扣），已归一化。
 	RechargeBonusMode string `json:"recharge_bonus_mode"`
 	// RechargeBonusNotice 充值页展示的 Markdown 活动文案；空表示不展示。
@@ -103,6 +106,7 @@ type UpdatePaymentConfigRequest struct {
 	RechargeFeeRate           *float64 `json:"recharge_fee_rate"`
 	// RechargeBonusTiers nil 表示不更新；空切片表示清空阶梯。
 	RechargeBonusTiers  *[]RechargeBonusTier `json:"recharge_bonus_tiers"`
+	QuickAmounts        *[]float64           `json:"quick_amounts"`
 	RechargeBonusMode   *string              `json:"recharge_bonus_mode"`
 	RechargeBonusNotice *string              `json:"recharge_bonus_notice"`
 	LoadBalanceStrategy *string              `json:"load_balance_strategy"`
@@ -236,6 +240,7 @@ func (s *PaymentConfigService) GetPaymentConfig(ctx context.Context) (*PaymentCo
 		SettingCancelRateLimitOn, SettingCancelRateLimitMax,
 		SettingCancelWindowSize, SettingCancelWindowUnit, SettingCancelWindowMode,
 		SettingAlipayForceQRCode, SettingAlipayMobilePrecreateDeepLink,
+		SettingPaymentQuickAmounts,
 		SettingPaymentVisibleMethodAlipayEnabled, SettingPaymentVisibleMethodAlipaySource,
 		SettingPaymentVisibleMethodWxpayEnabled, SettingPaymentVisibleMethodWxpaySource,
 	}
@@ -262,6 +267,7 @@ func (s *PaymentConfigService) parsePaymentConfig(vals map[string]string) *Payme
 		SubscriptionUSDToCNYRate:  normalizeSubscriptionUSDToCNYRate(pcParseFloat(vals[SettingSubscriptionUSDToCNYRate], 0)),
 		RechargeFeeRate:           pcParseFloat(vals[SettingRechargeFeeRate], 0),
 		RechargeBonusTiers:        parseRechargeBonusTiers(vals[SettingRechargeBonusTiers]),
+		QuickAmounts:              parsePaymentQuickAmounts(vals[SettingPaymentQuickAmounts]),
 		RechargeBonusNotice:       vals[SettingRechargeBonusNotice],
 		LoadBalanceStrategy:       vals[SettingLoadBalanceStrategy],
 		ProductNamePrefix:         vals[SettingProductNamePrefix],
@@ -336,6 +342,18 @@ func (s *PaymentConfigService) getStripePublishableKey(ctx context.Context) stri
 // nil-check before serialisation — this is inherent to patch-style update patterns
 // and cannot be meaningfully decomposed without introducing unnecessary abstraction.
 func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req UpdatePaymentConfigRequest) error {
+	var quickAmountsJSON string
+	if req.QuickAmounts != nil {
+		quickAmounts, err := NormalizePaymentQuickAmounts(*req.QuickAmounts)
+		if err != nil {
+			return infraerrors.BadRequest("INVALID_PAYMENT_QUICK_AMOUNTS", err.Error())
+		}
+		encoded, err := json.Marshal(quickAmounts)
+		if err != nil {
+			return infraerrors.BadRequest("INVALID_PAYMENT_QUICK_AMOUNTS", err.Error())
+		}
+		quickAmountsJSON = string(encoded)
+	}
 	if req.BalanceRechargeMultiplier != nil {
 		if math.IsNaN(*req.BalanceRechargeMultiplier) || math.IsInf(*req.BalanceRechargeMultiplier, 0) || *req.BalanceRechargeMultiplier <= 0 {
 			return infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier must be greater than 0")
@@ -402,6 +420,9 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 	}
 	if req.RechargeBonusTiers != nil {
 		m[SettingRechargeBonusTiers] = rechargeBonusTiersValue
+	}
+	if req.QuickAmounts != nil {
+		m[SettingPaymentQuickAmounts] = quickAmountsJSON
 	}
 	if req.RechargeBonusMode != nil {
 		m[SettingRechargeBonusMode] = rechargeBonusModeValue
