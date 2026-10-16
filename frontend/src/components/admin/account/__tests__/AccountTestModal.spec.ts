@@ -103,6 +103,14 @@ function mountModal(account: Record<string, unknown> = {
 }
 
 describe('AccountTestModal', () => {
+  it('supports image prompts for the mounted Antigravity OAuth modal with raw model IDs', async () => {
+    const wrapper = mountModal({ id: 42, name: 'AGY image', platform: 'antigravity', type: 'oauth' })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(wrapper.find('textarea.textarea-stub').exists()).toBe(true)
+    expect(wrapper.text()).toContain('gemini-3.1-flash-image')
+    expect(wrapper.text()).not.toContain('Gemini 3.1 Flash Image')
+  })
   beforeEach(() => {
     getAvailableModels.mockResolvedValue([
       { id: 'gemini-2.0-flash', display_name: 'Gemini 2.0 Flash' },

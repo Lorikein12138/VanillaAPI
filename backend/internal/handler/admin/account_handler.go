@@ -3065,7 +3065,7 @@ func antigravityAccountTestModels(rawMapping any) []antigravity.ClaudeModel {
 	var mappedIDs []string
 	add := func(id string, rawValue any) {
 		value, ok := rawValue.(string)
-		if strings.TrimSpace(id) != "" && ok && strings.TrimSpace(value) != "" {
+		if strings.TrimSpace(id) != "" && !strings.Contains(id, "*") && ok && strings.TrimSpace(value) != "" {
 			mappedIDs = append(mappedIDs, id)
 		}
 	}

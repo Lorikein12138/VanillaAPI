@@ -95,6 +95,85 @@ function buildAccount() {
 }
 
 describe('AccountTestModal', () => {
+  it('supports Antigravity OAuth image testing in the legacy component', async () => {
+    getAvailableModelsMock.mockResolvedValue([{ id: 'gemini-3.1-flash-image', display_name: 'Gemini image' }])
+    const account = { ...buildAccount(), platform: 'antigravity', type: 'oauth' }
+    const wrapper = mount(AccountTestModal, {
+      props: { show: false, account },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
+    })
+    try {
+      expect(getAvailableModelsMock).not.toHaveBeenCalled()
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+
+      expect(getAvailableModelsMock).toHaveBeenCalledTimes(1)
+      expect(getAvailableModelsMock).toHaveBeenCalledWith(account.id)
+      expect((wrapper.vm as any).selectedModelId).toBe('gemini-3.1-flash-image')
+      expect((wrapper.vm as any).supportsGeminiImageTest).toBe(true)
+
+      const promptInput = wrapper.find('textarea')
+      expect(promptInput.exists()).toBe(true)
+      expect(promptInput.isVisible()).toBe(true)
+      expect((promptInput.element as HTMLTextAreaElement).value).toBe('admin.accounts.imagePromptDefault')
+
+      await promptInput.setValue('Describe this image.')
+      await (wrapper.vm as any).startTest()
+      await flushPromises()
+
+      expect(global.fetch).toHaveBeenCalledTimes(1)
+      const [, options] = (global.fetch as any).mock.calls[0]
+      expect(JSON.parse(options.body)).toEqual({
+        model_id: 'gemini-3.1-flash-image',
+        prompt: 'Describe this image.',
+        mode: 'default'
+      })
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not offer image input for an Antigravity non-image model', async () => {
+    getAvailableModelsMock.mockResolvedValue([{ id: 'gemini-3.5-flash', display_name: 'Gemini Flash' }])
+    const account = { ...buildAccount(), platform: 'antigravity', type: 'oauth' }
+    const wrapper = mount(AccountTestModal, {
+      props: { show: false, account },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
+    })
+    try {
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+
+      expect(getAvailableModelsMock).toHaveBeenCalledTimes(1)
+      expect(getAvailableModelsMock).toHaveBeenCalledWith(account.id)
+      expect((wrapper.vm as any).selectedModelId).toBe('gemini-3.5-flash')
+      expect((wrapper.vm as any).supportsGeminiImageTest).toBe(false)
+      expect(wrapper.find('textarea').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not offer image input on an unsupported platform', async () => {
+    getAvailableModelsMock.mockResolvedValue([{ id: 'gemini-3.1-flash-image', display_name: 'Gemini image' }])
+    const account = { ...buildAccount(), platform: 'openai', type: 'oauth' }
+    const wrapper = mount(AccountTestModal, {
+      props: { show: false, account },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
+    })
+    try {
+      await wrapper.setProps({ show: true })
+      await flushPromises()
+
+      expect(getAvailableModelsMock).toHaveBeenCalledTimes(1)
+      expect(getAvailableModelsMock).toHaveBeenCalledWith(account.id)
+      expect((wrapper.vm as any).selectedModelId).toBe('gemini-3.1-flash-image')
+      expect((wrapper.vm as any).supportsGeminiImageTest).toBe(false)
+      expect(wrapper.find('textarea').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
   const originalFetch = global.fetch
 
   beforeEach(() => {
