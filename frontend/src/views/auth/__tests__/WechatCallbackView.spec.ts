@@ -1,3 +1,4 @@
+import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import WechatCallbackView from '@/views/auth/WechatCallbackView.vue'
@@ -55,6 +56,15 @@ const {
     publicSettingsLoaded: false,
   },
 }))
+
+const CaptchaChallengeStub = defineComponent({
+  name: 'TurnstileWidgetStub',
+  emits: ['verify', 'expire', 'error'],
+  setup(_, { expose }) {
+    expose({ reset: vi.fn(), verifyAction: vi.fn() })
+    return () => h('div', { 'data-testid': 'turnstile-stub' })
+  }
+})
 
 vi.mock('vue-router', () => ({
   useRoute: () => routeState,
@@ -1087,5 +1097,62 @@ describe('WechatCallbackView', () => {
     expect(replaceMock.mock.calls[0]?.[0]).toContain('wechat_bind_existing%3D1')
     expect(replaceMock.mock.calls[0]?.[0]).toContain('mode%3Dmp')
     expect(replaceMock.mock.calls[0]?.[0]).toContain('email=resume%40example.com')
+  })
+
+  it('requires a replacement captcha token in the real create-account form after expiry', async () => {
+    getPublicSettingsMock.mockResolvedValue({ turnstile_enabled: true, turnstile_site_key: 'site-key' })
+    exchangePendingOAuthCompletionMock.mockResolvedValue({ error: 'email_required', redirect: '/welcome' })
+    apiClientPostMock.mockResolvedValue({ data: { access_token: 'access', refresh_token: 'refresh', expires_in: 3600, token_type: 'Bearer' } })
+    const wrapper = mount(WechatCallbackView, {
+      global: { stubs: { AuthLayout: { template: '<div><slot /></div>' }, Icon: true, RouterLink: { template: '<a><slot /></a>' }, TurnstileWidget: CaptchaChallengeStub, transition: false } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="wechat-create-account-email"]').setValue('new@example.com')
+    await wrapper.get('[data-testid="wechat-create-account-password"]').setValue('secret-123')
+    await wrapper.get('[data-testid="wechat-create-account-verify-code"]').setValue('246810')
+
+    await wrapper.get('[data-testid="wechat-create-account-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiClientPostMock).not.toHaveBeenCalled()
+
+    const captcha = wrapper.getComponent(CaptchaChallengeStub)
+    captcha.vm.$emit('verify', 'expired-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="wechat-create-account-submit"]').attributes('disabled')).toBeUndefined()
+    captcha.vm.$emit('expire')
+    await nextTick()
+    expect(wrapper.get('[data-testid="wechat-create-account-submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(apiClientPostMock).not.toHaveBeenCalled()
+
+    captcha.vm.$emit('verify', 'replacement-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="wechat-create-account-submit"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="wechat-create-account-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiClientPostMock).toHaveBeenCalledWith('/auth/oauth/pending/create-account', expect.objectContaining({
+      email: 'new@example.com',
+      password: 'secret-123',
+      verify_code: '246810',
+      turnstile_token: 'replacement-proof'
+    }))
+  })
+
+  it('keeps the create-account branch free of a Turnstile placeholder when disabled', async () => {
+    getPublicSettingsMock.mockResolvedValue({ turnstile_enabled: false, turnstile_site_key: '' })
+    exchangePendingOAuthCompletionMock.mockResolvedValue({ error: 'email_required', redirect: '/welcome' })
+    apiClientPostMock.mockResolvedValue({ data: { access_token: 'access', refresh_token: 'refresh', expires_in: 3600, token_type: 'Bearer' } })
+    const wrapper = mount(WechatCallbackView, {
+      global: { stubs: { AuthLayout: { template: '<div><slot /></div>' }, Icon: true, RouterLink: { template: '<a><slot /></a>' }, TurnstileWidget: CaptchaChallengeStub, transition: false } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="wechat-create-account-email"]').setValue('new@example.com')
+    await wrapper.get('[data-testid="wechat-create-account-password"]').setValue('secret-123')
+    await wrapper.get('[data-testid="wechat-create-account-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="turnstile-stub"]').exists()).toBe(false)
+    expect(apiClientPostMock).toHaveBeenCalledWith('/auth/oauth/pending/create-account', expect.not.objectContaining({ turnstile_token: expect.anything() }))
   })
 })
