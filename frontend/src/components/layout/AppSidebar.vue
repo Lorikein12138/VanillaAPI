@@ -219,6 +219,27 @@ interface NavItem {
    * 开关切换时菜单自动更新。
    */
   featureFlag?: () => boolean | undefined
+  /** 排序权重：字数相同时越大越靠前（见 sortNavByLabel）。 */
+  weight?: number
+}
+
+// navLabelWidth 按显示宽度计字数：全角字记 1，半角字母、数字、空格、符号记 0.5。
+function navLabelWidth(label: string): number {
+  let width = 0
+  for (const ch of label) width += ch.charCodeAt(0) <= 0xff ? 0.5 : 1
+  return width
+}
+
+// sortNavByLabel 把菜单按字数从少到多排列；字数相同时 weight 高的在前，再相同保持声明顺序。
+// 子菜单递归同样排序。
+function sortNavByLabel(items: NavItem[]): NavItem[] {
+  return items
+    .map((item, index) => ({ item: item.children ? { ...item, children: sortNavByLabel(item.children) } : item, index }))
+    .sort((a, b) =>
+      navLabelWidth(a.item.label) - navLabelWidth(b.item.label)
+      || (b.item.weight ?? 0) - (a.item.weight ?? 0)
+      || a.index - b.index)
+    .map(({ item }) => item)
 }
 
 // applyFeatureFlags 递归过滤掉 featureFlag() === false 的节点（含子节点）。
@@ -715,39 +736,41 @@ const flagBatchImageAccess = () => canUseBatchImage.value
 // buildSelfNavItems 构造用户自己的导航项（用户端主菜单和管理员的"我的账户"子菜单共享这组声明）。
 // withDashboard=true 时包含仪表盘（用户端），false 时不含（管理员的个人区已经有独立仪表盘入口）。
 //
-// 条目顺序：密钥 → 用量 → 可用渠道 → 渠道状态 → 订阅/支付 → 兑换/资料。
-// 可用渠道紧挨渠道状态之上，让用户"先看自己能用什么、再看对应状态"。
+// 显示顺序由 finalizeNav 按字数与 weight 决定，自定义菜单固定排在末尾。
 function buildSelfNavItems(withDashboard: boolean): NavItem[] {
   const items: NavItem[] = []
   if (withDashboard) {
-    items.push({ path: '/dashboard', label: t('nav.dashboard'), icon: DashboardIcon })
+    items.push({ path: '/dashboard', label: t('nav.dashboard'), icon: DashboardIcon, weight: 100 })
   }
   items.push(
-    { path: '/keys', label: t('nav.apiKeys'), icon: KeyIcon },
-    { path: '/batch-image', label: t('nav.batchImage'), icon: BatchImageIcon, hideInSimpleMode: true, featureFlag: flagBatchImageAccess },
-    { path: '/usage', label: t('nav.usage'), icon: ChartIcon, hideInSimpleMode: true },
-    { path: '/available-channels', label: t('nav.availableChannels'), icon: ChannelIcon, hideInSimpleMode: true, featureFlag: flagAvailableChannels },
-    { path: '/monitor', label: t('nav.channelStatus'), icon: SignalIcon, featureFlag: flagChannelMonitor },
-    { path: '/subscriptions', label: t('nav.mySubscriptions'), icon: CreditCardIcon, hideInSimpleMode: true, featureFlag: flagSubscription },
-    { path: '/purchase', label: purchaseNavLabel.value, icon: RechargeSubscriptionIcon, hideInSimpleMode: true, featureFlag: flagPayment },
-    { path: '/orders', label: t('nav.myOrders'), icon: OrderListIcon, hideInSimpleMode: true, featureFlag: flagPayment },
-    { path: '/redeem', label: t('nav.redeem'), icon: GiftIcon, hideInSimpleMode: true },
-    { path: '/affiliate', label: t('nav.affiliate'), icon: UsersIcon, hideInSimpleMode: true, featureFlag: flagAffiliate },
-    { path: '/profile', label: t('nav.profile'), icon: UserIcon },
+    { path: '/keys', label: t('nav.apiKeys'), icon: KeyIcon, weight: 90 },
+    { path: '/batch-image', label: t('nav.batchImage'), icon: BatchImageIcon, weight: 55, hideInSimpleMode: true, featureFlag: flagBatchImageAccess },
+    { path: '/usage', label: t('nav.usage'), icon: ChartIcon, weight: 85, hideInSimpleMode: true },
+    { path: '/available-channels', label: t('nav.availableChannels'), icon: ChannelIcon, weight: 60, hideInSimpleMode: true, featureFlag: flagAvailableChannels },
+    { path: '/monitor', label: t('nav.channelStatus'), icon: SignalIcon, weight: 65, featureFlag: flagChannelMonitor },
+    { path: '/subscriptions', label: t('nav.mySubscriptions'), icon: CreditCardIcon, weight: 80, hideInSimpleMode: true, featureFlag: flagSubscription },
+    { path: '/purchase', label: purchaseNavLabel.value, icon: RechargeSubscriptionIcon, weight: 95, hideInSimpleMode: true, featureFlag: flagPayment },
+    { path: '/orders', label: t('nav.myOrders'), icon: OrderListIcon, weight: 75, hideInSimpleMode: true, featureFlag: flagPayment },
+    { path: '/redeem', label: t('nav.redeem'), icon: GiftIcon, weight: 70, hideInSimpleMode: true },
+    { path: '/affiliate', label: t('nav.affiliate'), icon: UsersIcon, weight: 50, hideInSimpleMode: true, featureFlag: flagAffiliate },
+    { path: '/profile', label: t('nav.profile'), icon: UserIcon, weight: 45 },
+  )
+  return items
+}
+
+// finalizeNav 合并过滤（featureFlag + simple 模式）后按字数排序，再追加自定义菜单。
+function finalizeNav(items: NavItem[]): NavItem[] {
+  const visible = applyFeatureFlags(items)
+  const shown = authStore.isSimpleMode ? visible.filter(item => !item.hideInSimpleMode) : visible
+  return [
+    ...sortNavByLabel(shown),
     ...customMenuItemsForUser.value.map((item): NavItem => ({
       path: `/custom/${item.id}`,
       label: item.label,
       icon: null,
       iconSvg: item.icon_svg,
     })),
-  )
-  return items
-}
-
-// finalizeNav 合并三重过滤：featureFlag 过滤 + simple 模式过滤。
-function finalizeNav(items: NavItem[]): NavItem[] {
-  const visible = applyFeatureFlags(items)
-  return authStore.isSimpleMode ? visible.filter(item => !item.hideInSimpleMode) : visible
+  ]
 }
 
 // User navigation items (for regular users)
@@ -775,88 +798,88 @@ const customMenuItemsForAdmin = computed(() => {
 // Admin navigation items
 const adminNavItems = computed((): NavItem[] => {
   const baseItems: NavItem[] = [
-    { path: '/admin/dashboard', label: t('nav.dashboard'), icon: DashboardIcon },
-    { path: '/admin/ops', label: t('nav.ops'), icon: ChartIcon, featureFlag: flagOpsMonitoring },
-    { path: '/admin/users', label: t('nav.users'), icon: UsersIcon, hideInSimpleMode: true },
-    { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon },
+    { path: '/admin/dashboard', label: t('nav.dashboard'), icon: DashboardIcon, weight: 100 },
+    { path: '/admin/ops', label: t('nav.ops'), icon: ChartIcon, weight: 84, featureFlag: flagOpsMonitoring },
+    { path: '/admin/users', label: t('nav.users'), icon: UsersIcon, weight: 86, hideInSimpleMode: true },
+    { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon, weight: 88 },
     {
       path: '/admin/channels',
+      weight: 90,
       label: t('nav.channelManagement'),
       icon: ChannelIcon,
       hideInSimpleMode: true,
       expandOnly: true,
       children: [
-        { path: '/admin/channels/pricing', label: t('nav.channelPricing'), icon: PriceTagIcon },
-        { path: '/admin/channels/monitor', label: t('nav.channelMonitor'), icon: SignalIcon, featureFlag: flagChannelMonitor },
+        { path: '/admin/channels/pricing', label: t('nav.channelPricing'), icon: PriceTagIcon, weight: 90 },
+        { path: '/admin/channels/monitor', label: t('nav.channelMonitor'), icon: SignalIcon, weight: 80, featureFlag: flagChannelMonitor },
       ],
     },
     // 「仅充值」站点连管理端的「订阅管理」入口也一并收起（路由本身不拦截）。
-    { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true, featureFlag: flagSubscription },
-    { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
-    { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
-    { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
-    { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon },
+    { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, weight: 78, hideInSimpleMode: true, featureFlag: flagSubscription },
+    { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon, weight: 95 },
+    { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, weight: 56, featureFlag: flagPluginManagement },
+    { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon, weight: 62 },
+    { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon, weight: 60 },
     {
       path: '/admin/security-audit',
+      weight: 54,
       label: t('nav.securityAudit'),
       icon: ShieldIcon,
       expandOnly: true,
       featureFlag: flagRiskControl,
       children: [
-        { path: '/admin/risk-control', label: t('nav.contentModeration'), icon: ShieldIcon },
-        { path: '/admin/prompt-audit', label: t('nav.promptAudit'), icon: ShieldIcon },
+        { path: '/admin/risk-control', label: t('nav.contentModeration'), icon: ShieldIcon, weight: 90 },
+        { path: '/admin/prompt-audit', label: t('nav.promptAudit'), icon: ShieldIcon, weight: 80 },
       ],
     },
-    { path: '/admin/redeem', label: t('nav.redeemCodes'), icon: TicketIcon, hideInSimpleMode: true },
-    { path: '/admin/promo-codes', label: t('nav.promoCodes'), icon: GiftIcon, hideInSimpleMode: true },
+    { path: '/admin/redeem', label: t('nav.redeemCodes'), icon: TicketIcon, weight: 70, hideInSimpleMode: true },
+    { path: '/admin/promo-codes', label: t('nav.promoCodes'), icon: GiftIcon, weight: 66, hideInSimpleMode: true },
     {
       path: '/admin/affiliates',
+      weight: 64,
       label: t('nav.affiliateManagement'),
       icon: UsersIcon,
       hideInSimpleMode: true,
       expandOnly: true,
       featureFlag: flagAffiliate,
       children: [
-        { path: '/admin/affiliates/invites', label: t('nav.affiliateInviteRecords'), icon: UsersIcon },
-        { path: '/admin/affiliates/rebates', label: t('nav.affiliateRebateRecords'), icon: OrderIcon },
-        { path: '/admin/affiliates/transfers', label: t('nav.affiliateTransferRecords'), icon: CreditCardIcon },
+        { path: '/admin/affiliates/invites', label: t('nav.affiliateInviteRecords'), icon: UsersIcon, weight: 90 },
+        { path: '/admin/affiliates/rebates', label: t('nav.affiliateRebateRecords'), icon: OrderIcon, weight: 80 },
+        { path: '/admin/affiliates/transfers', label: t('nav.affiliateTransferRecords'), icon: CreditCardIcon, weight: 70 },
       ],
     },
     {
       path: '/admin/orders',
+      weight: 80,
       label: t('nav.orderManagement'),
       icon: OrderIcon,
       hideInSimpleMode: true,
       expandOnly: true,
       featureFlag: flagAdminPayment,
       children: [
-        { path: '/admin/orders/dashboard', label: t('nav.paymentDashboard'), icon: ChartIcon },
-        { path: '/admin/orders', label: t('nav.orderManagement'), icon: OrderIcon },
-        { path: '/admin/orders/plans', label: t('nav.paymentPlans'), icon: CreditCardIcon },
+        { path: '/admin/orders/dashboard', label: t('nav.paymentDashboard'), icon: ChartIcon, weight: 90 },
+        { path: '/admin/orders', label: t('nav.orderManagement'), icon: OrderIcon, weight: 80 },
+        { path: '/admin/orders/plans', label: t('nav.paymentPlans'), icon: CreditCardIcon, weight: 70 },
       ],
     },
-    { path: '/admin/usage', label: t('nav.usage'), icon: ChartIcon },
-    { path: '/admin/audit-logs', label: t('nav.auditLogs'), icon: ShieldIcon, hideInSimpleMode: true }
+    { path: '/admin/usage', label: t('nav.usage'), icon: ChartIcon, weight: 82 },
+    { path: '/admin/audit-logs', label: t('nav.auditLogs'), icon: ShieldIcon, weight: 50, hideInSimpleMode: true }
   ]
 
   const visible = applyFeatureFlags(baseItems)
 
-  // 简单模式下，在系统设置前插入 API密钥
+  // 简单模式下额外加入 API 密钥
+  const shown = authStore.isSimpleMode ? visible.filter(item => !item.hideInSimpleMode) : visible
   if (authStore.isSimpleMode) {
-    const filtered = visible.filter(item => !item.hideInSimpleMode)
-    filtered.push({ path: '/keys', label: t('nav.apiKeys'), icon: KeyIcon })
-    filtered.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
-    for (const cm of customMenuItemsForAdmin.value) {
-      filtered.push({ path: `/custom/${cm.id}`, label: cm.label, icon: null, iconSvg: cm.icon_svg })
-    }
-    return filtered
+    shown.push({ path: '/keys', label: t('nav.apiKeys'), icon: KeyIcon, weight: 74 })
   }
+  shown.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon, weight: 76 })
 
-  visible.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon })
+  const sorted = sortNavByLabel(shown)
   for (const cm of customMenuItemsForAdmin.value) {
-    visible.push({ path: `/custom/${cm.id}`, label: cm.label, icon: null, iconSvg: cm.icon_svg })
+    sorted.push({ path: `/custom/${cm.id}`, label: cm.label, icon: null, iconSvg: cm.icon_svg })
   }
-  return visible
+  return sorted
 })
 
 function toggleSidebar() {

@@ -21,10 +21,13 @@
         </div>
       </div>
 
-      <!-- Right: Announcements + Docs + Language + Subscriptions + Balance + User Dropdown -->
+      <!-- Right: Announcements + Language + Docs + Model Plaza + Subscriptions + Balance + User Dropdown -->
       <div class="flex min-w-0 items-center gap-1 sm:gap-3">
         <!-- Announcement Bell -->
         <AnnouncementBell v-if="user" />
+
+        <!-- Language Switcher -->
+        <LocaleSwitcher />
 
         <!-- Docs Link -->
         <a
@@ -49,9 +52,6 @@
           <Icon name="grid" size="sm" />
           <span class="hidden sm:inline">{{ t('nav.modelPlaza') }}</span>
         </router-link>
-
-        <!-- Language Switcher -->
-        <LocaleSwitcher />
 
         <!-- Subscription Progress (for users with active subscriptions; not mounted at all when the feature is off) -->
         <SubscriptionProgressMini v-if="user && subscriptionFeatureEnabled" />
