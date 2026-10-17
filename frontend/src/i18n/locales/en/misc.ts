@@ -291,6 +291,12 @@ export default {
     amountLabel: 'Amount',
     paymentAmount: 'Payment Amount',
     creditedBalance: 'Credited Balance',
+    balanceAfterRecharge: 'Balance After Top-up',
+    recentOrders: {
+      title: 'Recent Orders',
+      viewAll: 'All orders',
+      empty: 'No orders yet. Your first top-up will show up here.',
+    },
     rechargeBonus: {
       noticeTag: 'Bonus',
       creditedShort: 'Get {amount}',

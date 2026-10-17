@@ -27,9 +27,8 @@
               data-testid="quick-amount-bonus-badge"
             >{{ badgeText(amt) }}</span>
           </span>
-          <!-- 配置了优惠阶梯时，所有按钮都显示第二行，保持高度一致：赠金显示到账 USD，折扣显示折后实付 -->
+          <!-- 第二行始终显示：默认显示到账 USD；折扣模式配置了阶梯时显示折后实付 -->
           <span
-            v-if="showSecondLine"
             :class="[
               'block truncate text-xs tabular-nums',
               quoteFor(amt).percent > 0 ? 'text-primary-600 dark:text-primary-300' : 'text-gray-500 dark:text-dark-400',
@@ -96,7 +95,7 @@ const props = withDefaults(defineProps<{
   modelValue: number | null
   min?: number
   max?: number
-  /** 充值优惠阶梯（按 min_amount 升序）；为空时不显示价签与第二行 */
+  /** 充值优惠阶梯（按 min_amount 升序）；为空时不显示价签 */
   bonusTiers?: RechargeBonusTier[]
   /** 阶梯模式：bonus 赠金 / discount 折扣 */
   bonusMode?: RechargeBonusMode
@@ -126,8 +125,6 @@ const customText = ref('')
 const filteredAmounts = computed(() =>
   props.amounts.filter((a) => (props.min <= 0 || a >= props.min) && (props.max <= 0 || a <= props.max))
 )
-
-const showSecondLine = computed(() => props.bonusTiers.length > 0)
 
 // 金额按支付币种输入，前缀跟随币种（默认人民币）
 const symbol = computed(() => currencySymbol(props.currency))
@@ -163,7 +160,7 @@ function badgeText(amt: number): string {
 
 function secondLine(amt: number): string {
   const quote = quoteFor(amt)
-  if (props.bonusMode === 'discount') {
+  if (props.bonusMode === 'discount' && props.bonusTiers.length > 0) {
     return t('payment.rechargeBonus.payShort', { amount: formatPaymentAmount(quote.payBase, props.currency) })
   }
   return t('payment.rechargeBonus.creditedShort', { amount: '$' + quote.credited.toFixed(2) })
