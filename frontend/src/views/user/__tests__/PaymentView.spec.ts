@@ -444,7 +444,7 @@ describe('PaymentView checkout quick amounts', () => {
     await amountInput.vm.$emit('update:modelValue', 17.25)
     expect(amountInput.props('modelValue')).toBe(17.25)
     createOrder.mockRejectedValueOnce(new Error('test order response'))
-    await wrapper.get('button.btn-wxpay').trigger('click')
+    await wrapper.get('[data-testid="recharge-submit"]').trigger('click')
     await flushPromises()
     expect(createOrder).toHaveBeenCalledWith(expect.objectContaining({
       amount: 17.25,
@@ -476,7 +476,7 @@ describe('PaymentView checkout quick amounts', () => {
     Object.defineProperty(window, 'location', { configurable: true, value: locationState })
     try {
       await wrapper.getComponent(AmountInput).vm.$emit('update:modelValue', 37.25)
-      await wrapper.get('button.btn-stripe').trigger('click')
+      await wrapper.get('[data-testid="recharge-submit"]').trigger('click')
       await flushPromises()
     } finally {
       Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
