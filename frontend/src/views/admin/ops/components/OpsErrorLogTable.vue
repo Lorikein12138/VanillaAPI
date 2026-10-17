@@ -56,7 +56,7 @@
         <template #cell-group="{ row }">
           <span
             v-if="row.group_id"
-            class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200"
+            class="inline-flex items-center rounded border border-gray-200 px-2 py-0.5 text-xs font-medium text-gray-700 dark:border-dark-600 dark:text-dark-200"
             :title="t('admin.ops.errorLog.id') + ' ' + row.group_id"
           >
             {{ row.group_name || '#' + row.group_id }}
@@ -263,19 +263,19 @@ function getTypeBadge(log: OpsErrorLog): { label: string; className: string } {
   const owner = String(log.error_owner || '').toLowerCase()
 
   if (isUpstreamRow(log)) {
-    return { label: t('admin.ops.errorLog.typeUpstream'), className: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' }
+    return { label: t('admin.ops.errorLog.typeUpstream'), className: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200' }
   }
   if (phase === 'request' && owner === 'client') {
-    return { label: t('admin.ops.errorLog.typeRequest'), className: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200' }
+    return { label: t('admin.ops.errorLog.typeRequest'), className: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200' }
   }
   if (phase === 'auth' && owner === 'client') {
-    return { label: t('admin.ops.errorLog.typeAuth'), className: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' }
+    return { label: t('admin.ops.errorLog.typeAuth'), className: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200' }
   }
   if (phase === 'account_auth') {
-    return { label: t('admin.ops.errorLog.typeAccountAuth'), className: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' }
+    return { label: t('admin.ops.errorLog.typeAccountAuth'), className: 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-200' }
   }
   if (phase === 'routing' && owner === 'platform') {
-    return { label: t('admin.ops.errorLog.typeRouting'), className: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200' }
+    return { label: t('admin.ops.errorLog.typeRouting'), className: 'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-200' }
   }
   if (phase === 'internal' && owner === 'platform') {
     return { label: t('admin.ops.errorLog.typeInternal'), className: 'bg-gray-100 text-gray-800 dark:bg-dark-700 dark:text-gray-200' }

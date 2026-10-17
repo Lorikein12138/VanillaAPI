@@ -951,21 +951,21 @@ onBeforeUnmount(() => {
   border-radius: 9999px;
 }
 /* Multi-stop green → yellow → red score bands */
-.health-score10 { background: #16a34a; }
-.health-score9  { background: #22c55e; }
-.health-score8  { background: #4ade80; }
-.health-score7  { background: #a3e635; }
-.health-score6  { background: #facc15; }
-.health-score5  { background: #fbbf24; }
-.health-score4  { background: #f59e0b; }
-.health-score3  { background: #f97316; }
-.health-score2  { background: #fb7185; }
-.health-score1  { background: #f87171; }
+.health-score10 { background: #729367; }
+.health-score9  { background: #8fb183; }
+.health-score8  { background: #a8c99e; }
+.health-score7  { background: #c7d59f; }
+.health-score6  { background: #eace8a; }
+.health-score5  { background: #f3bf7e; }
+.health-score4  { background: #dca968; }
+.health-score3  { background: #d9895b; }
+.health-score2  { background: #de8890; }
+.health-score1  { background: #db887c; }
 .health-score0  { background: rgb(239, 67, 67); }
-.health-healthy  { background: #22c55e; }
-.health-warning  { background: #f59e0b; }
-.health-critical { background: #ef4444; }
-.health-unknown  { background: #9ca3af; }
+.health-healthy  { background: #8fb183; }
+.health-warning  { background: #dca968; }
+.health-critical { background: #ce6a5c; }
+.health-unknown  { background: #9c9a92; }
 .matrix-select {
   min-width: 10rem;
 }

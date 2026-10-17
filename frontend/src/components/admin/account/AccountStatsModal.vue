@@ -502,8 +502,8 @@ const isDarkMode = computed(() => {
 
 // Chart colors
 const chartColors = computed(() => ({
-  text: isDarkMode.value ? '#e5e7eb' : '#374151',
-  grid: isDarkMode.value ? '#374151' : '#e5e7eb'
+  text: isDarkMode.value ? '#e3e1d8' : '#3d3d3a',
+  grid: isDarkMode.value ? '#3d3d3a' : '#e3e1d8'
 }))
 
 // Line chart data
@@ -516,8 +516,8 @@ const trendChartData = computed(() => {
       {
         label: t('usage.accountBilled') + ' (USD)',
         data: stats.value.history.map((h) => h.actual_cost),
-        borderColor: '#3b82f6',
-        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+        borderColor: '#628ab9',
+        backgroundColor: 'rgba(98, 138, 185, 0.1)',
         fill: true,
         tension: 0.3,
         yAxisID: 'y'
@@ -525,8 +525,8 @@ const trendChartData = computed(() => {
       {
         label: t('usage.userBilled') + ' (USD)',
         data: stats.value.history.map((h) => h.user_cost),
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.08)',
+        borderColor: '#7aaa8f',
+        backgroundColor: 'rgba(122, 170, 143, 0.08)',
         fill: false,
         tension: 0.3,
         borderDash: [5, 5],
@@ -535,8 +535,8 @@ const trendChartData = computed(() => {
       {
         label: t('admin.accounts.stats.requests'),
         data: stats.value.history.map((h) => h.requests),
-        borderColor: '#f97316',
-        backgroundColor: 'rgba(249, 115, 22, 0.1)',
+        borderColor: '#d9895b',
+        backgroundColor: 'rgba(217, 137, 91, 0.1)',
         fill: false,
         tension: 0.3,
         yAxisID: 'y1'
@@ -601,7 +601,7 @@ const lineChartOptions = computed(() => ({
         color: chartColors.value.grid
       },
       ticks: {
-        color: '#3b82f6',
+        color: '#628ab9',
         font: {
           size: 10
         },
@@ -610,7 +610,7 @@ const lineChartOptions = computed(() => ({
       title: {
         display: true,
         text: t('usage.accountBilled') + ' (USD)',
-        color: '#3b82f6',
+        color: '#628ab9',
         font: {
           size: 11
         }
@@ -624,7 +624,7 @@ const lineChartOptions = computed(() => ({
         drawOnChartArea: false
       },
       ticks: {
-        color: '#f97316',
+        color: '#d9895b',
         font: {
           size: 10
         },
@@ -633,7 +633,7 @@ const lineChartOptions = computed(() => ({
       title: {
         display: true,
         text: t('admin.accounts.stats.requests'),
-        color: '#f97316',
+        color: '#d9895b',
         font: {
           size: 11
         }

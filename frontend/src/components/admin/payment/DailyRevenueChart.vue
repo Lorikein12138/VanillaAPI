@@ -45,10 +45,10 @@ const props = defineProps<{
 }>()
 
 const colors = [
-  ['rgb(59, 130, 246)', 'rgba(59, 130, 246, 0.1)'],
-  ['rgb(168, 85, 247)', 'rgba(168, 85, 247, 0.1)'],
-  ['rgb(245, 158, 11)', 'rgba(245, 158, 11, 0.1)'],
-  ['rgb(239, 68, 68)', 'rgba(239, 68, 68, 0.1)'],
+  ['rgb(217, 119, 87)', 'rgba(217, 119, 87, 0.1)'],
+  ['rgb(106, 155, 204)', 'rgba(106, 155, 204, 0.1)'],
+  ['rgb(212, 162, 127)', 'rgba(212, 162, 127, 0.1)'],
+  ['rgb(196, 102, 134)', 'rgba(196, 102, 134, 0.1)'],
 ]
 
 const chartData = computed(() => {
@@ -73,8 +73,8 @@ const chartData = computed(() => {
       {
         label: t('payment.admin.orderCount'),
         data: props.data.map(d => d.count),
-        borderColor: 'rgb(16, 185, 129)',
-        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+        borderColor: 'rgb(120, 140, 93)',
+        backgroundColor: 'rgba(120, 140, 93, 0.1)',
         fill: false,
         tension: 0.3,
         pointRadius: 3,
