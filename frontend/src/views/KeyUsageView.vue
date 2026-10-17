@@ -530,9 +530,9 @@ function setDailyUsageDays(days: 7 | 30 | 90) {
 const CIRCUMFERENCE = 2 * Math.PI * 68
 const RING_GRADIENTS = [
   { from: '#C6613F', to: '#E7AC93' },
-  { from: '#6366F1', to: '#A5B4FC' },
-  { from: '#10B981', to: '#6EE7B7' },
-  { from: '#F59E0B', to: '#FCD34D' },
+  { from: '#6F78AB', to: '#AEB6E0' },
+  { from: '#7AAA8F', to: '#B2D7C1' },
+  { from: '#DCA968', to: '#FACF9B' },
 ]
 
 const ringAnimated = ref(false)
@@ -967,13 +967,13 @@ onUnmounted(() => {
   100% { background-position: 200% 0; }
 }
 .skeleton {
-  background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%);
+  background: linear-gradient(90deg, #e3e1d8 25%, #f0eee6 50%, #e3e1d8 75%);
   background-size: 200% 100%;
   animation: shimmer-kv 1.8s ease-in-out infinite;
   border-radius: 8px;
 }
 :global(.dark) .skeleton {
-  background: linear-gradient(90deg, #334155 25%, #1e293b 50%, #334155 75%);
+  background: linear-gradient(90deg, #3d3d3a 25%, #30302e 50%, #3d3d3a 75%);
   background-size: 200% 100%;
 }
 

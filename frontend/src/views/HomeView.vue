@@ -635,13 +635,13 @@ onBeforeUnmount(() => {
 }
 
 .btn-close {
-  background: #ef4444;
+  background: #ce6a5c;
 }
 .btn-minimize {
-  background: #eab308;
+  background: #d7b96e;
 }
 .btn-maximize {
-  background: #22c55e;
+  background: #8fb183;
 }
 
 .terminal-title {
@@ -695,14 +695,14 @@ onBeforeUnmount(() => {
 }
 
 .code-prompt {
-  color: #22c55e;
+  color: #8fb183;
   font-weight: bold;
 }
 .code-cmd {
-  color: #38bdf8;
+  color: #87b5d7;
 }
 .code-flag {
-  color: #a78bfa;
+  color: #a398ce;
 }
 .code-url {
   color: #E39A7F;
@@ -712,14 +712,14 @@ onBeforeUnmount(() => {
   font-style: italic;
 }
 .code-success {
-  color: #22c55e;
-  background: rgba(34, 197, 94, 0.15);
+  color: #8fb183;
+  background: rgba(143, 177, 131, 0.15);
   padding: 2px 8px;
   border-radius: 4px;
   font-weight: 600;
 }
 .code-response {
-  color: #fbbf24;
+  color: #f3bf7e;
 }
 
 /* Blinking Cursor */
@@ -727,7 +727,7 @@ onBeforeUnmount(() => {
   display: inline-block;
   width: 8px;
   height: 16px;
-  background: #22c55e;
+  background: #8fb183;
   animation: blink 1s step-end infinite;
 }
 

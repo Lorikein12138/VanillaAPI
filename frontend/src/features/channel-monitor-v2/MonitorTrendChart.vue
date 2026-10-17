@@ -131,7 +131,7 @@ const chartData = computed(() => {
       {
         label: t('channelMonitorV2.chart.errorDataset'),
         data: errorRates,
-        borderColor: '#ef4444',
+        borderColor: '#ce6a5c',
         backgroundColor: 'rgba(239, 67, 67, 0.10)',
         yAxisID: 'yPct',
         tension: 0.4,
@@ -145,8 +145,8 @@ const chartData = computed(() => {
       {
         label: t('channelMonitorV2.chart.cacheDataset'),
         data: cacheRates,
-        borderColor: '#10b981',
-        backgroundColor: 'rgba(16, 185, 129, 0.08)',
+        borderColor: '#7aaa8f',
+        backgroundColor: 'rgba(122, 170, 143, 0.08)',
         yAxisID: 'yPct',
         tension: 0.4,
         cubicInterpolationMode: 'monotone' as const,
@@ -159,8 +159,8 @@ const chartData = computed(() => {
       {
         label: t('channelMonitorV2.chart.ttftDataset'),
         data: ttftP50,
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.08)',
+        borderColor: '#6ea0c4',
+        backgroundColor: 'rgba(110, 160, 196, 0.08)',
         yAxisID: 'yTtft',
         tension: 0.4,
         cubicInterpolationMode: 'monotone' as const,
@@ -205,11 +205,11 @@ function smoothTrend(values: Array<number | null>): Array<number | null> {
 }
 
 const chartOptions = computed(() => {
-  const text = isDark.value ? '#9ca3af' : '#6b7280'
-  const grid = isDark.value ? '#374151' : '#f3f4f6'
-  const tooltipBg = isDark.value ? '#1f2937' : '#ffffff'
-  const tooltipTitle = isDark.value ? '#f3f4f6' : '#111827'
-  const tooltipBody = isDark.value ? '#d1d5db' : '#4b5563'
+  const text = isDark.value ? '#9c9a92' : '#73726c'
+  const grid = isDark.value ? '#3d3d3a' : '#f0eee6'
+  const tooltipBg = isDark.value ? '#30302e' : '#ffffff'
+  const tooltipTitle = isDark.value ? '#f0eee6' : '#1f1e1d'
+  const tooltipBody = isDark.value ? '#c2c0b6' : '#5e5d59'
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -266,12 +266,12 @@ const chartOptions = computed(() => {
         position: 'right' as const,
         min: 0,
         ticks: {
-          color: '#0ea5e9',
+          color: '#6ea0c4',
           font: { size: 10 },
           callback: (v: string | number) => formatMonitorMs(Number(v)),
         },
         grid: { display: false },
-        title: { display: true, text: t('channelMonitorV2.metrics.ttftP50'), color: '#0ea5e9', font: { size: 11 } },
+        title: { display: true, text: t('channelMonitorV2.metrics.ttftP50'), color: '#6ea0c4', font: { size: 11 } },
       },
     },
   }

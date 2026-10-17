@@ -102,20 +102,20 @@ const BORDER_STRONG_DEFAULT = 'border-gray-300 dark:border-dark-600'
 // ── Accent (single raw color per platform; consumers derive washes/tints
 //    from it via CSS color-mix, e.g. plaza paid-price zone) ──
 const ACCENT: Record<Platform, string> = {
-  anthropic: '#f97316', // orange-500
-  openai: '#22c55e', // green-500
-  antigravity: '#a855f7', // purple-500
-  gemini: '#3b82f6', // blue-500
-  grok: '#71717a', // zinc-500
-  kimi: '#ec4899', // pink-500
-  zhipu: '#6366f1', // indigo-500
-  deepseek: '#14b8a6', // teal-500
-  minimax: '#f43f5e', // rose-500
-  opencode_go: '#f59e0b', // amber-500
-  typesafe: '#0ea5e9', // sky-500
-  command_code: '#737373', // neutral-500
-  cline: '#8b5cf6', // violet-500（Cline 品牌紫 #9F58FA）
-  composite: '#06b6d4', // cyan-500
+  anthropic: '#d9895b', // orange-500
+  openai: '#8fb183', // green-500
+  antigravity: '#957bb1', // purple-500
+  gemini: '#628ab9', // blue-500
+  grok: '#73726c', // zinc-500
+  kimi: '#c47593', // pink-500
+  zhipu: '#6f78ab', // indigo-500
+  deepseek: '#77aba7', // teal-500
+  minimax: '#cc6d77', // rose-500
+  opencode_go: '#dca968', // amber-500
+  typesafe: '#6ea0c4', // sky-500
+  command_code: '#73726c', // neutral-500
+  cline: '#8478b0', // violet-500（Cline 品牌紫 #9F58FA）
+  composite: '#77adba', // cyan-500
 }
 const ACCENT_DEFAULT = '#C6613F' // primary-500 (clay)
 

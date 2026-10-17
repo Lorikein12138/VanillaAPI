@@ -36,13 +36,13 @@ const { t } = useI18n()
 
 const isDarkMode = computed(() => document.documentElement.classList.contains('dark'))
 const colors = computed(() => ({
-  red: '#ef4444',
+  red: '#ce6a5c',
   redAlpha: '#ef444420',
-  purple: '#8b5cf6',
+  purple: '#8478b0',
   purpleAlpha: '#8b5cf620',
-  gray: '#9ca3af',
-  grid: isDarkMode.value ? '#374151' : '#f3f4f6',
-  text: isDarkMode.value ? '#9ca3af' : '#6b7280'
+  gray: '#9c9a92',
+  grid: isDarkMode.value ? '#3d3d3a' : '#f0eee6',
+  text: isDarkMode.value ? '#9c9a92' : '#73726c'
 }))
 
 const totalRequestErrors = computed(() => sumNumbers(props.points.map((p) => p.error_count_sla ?? 0)))
@@ -119,9 +119,9 @@ const options = computed(() => {
         labels: { color: c.text, usePointStyle: true, boxWidth: 6, font: { size: 10 } }
       },
       tooltip: {
-        backgroundColor: isDarkMode.value ? '#1f2937' : '#ffffff',
-        titleColor: isDarkMode.value ? '#f3f4f6' : '#111827',
-        bodyColor: isDarkMode.value ? '#d1d5db' : '#4b5563',
+        backgroundColor: isDarkMode.value ? '#30302e' : '#ffffff',
+        titleColor: isDarkMode.value ? '#f0eee6' : '#1f1e1d',
+        bodyColor: isDarkMode.value ? '#c2c0b6' : '#5e5d59',
         borderColor: c.grid,
         borderWidth: 1,
         padding: 10,
