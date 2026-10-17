@@ -1,7 +1,7 @@
 <template>
   <div class="card">
     <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-      <h2 class="text-lg font-medium text-gray-900 dark:text-white">
+      <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
         {{ t('profile.balanceNotify.title') }}
       </h2>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">

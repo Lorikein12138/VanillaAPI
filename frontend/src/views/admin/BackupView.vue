@@ -295,7 +295,7 @@
               <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
             </button>
 
-            <h2 class="mb-4 text-lg font-bold text-gray-900 dark:text-white">{{ t('admin.backup.r2Guide.title') }}</h2>
+            <h2 class="mb-4 text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.backup.r2Guide.title') }}</h2>
             <p class="mb-4 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.backup.r2Guide.intro') }}</p>
 
             <!-- Step 1 -->
@@ -386,7 +386,7 @@
             >
               <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
             </button>
-            <h2 class="mb-1 text-lg font-bold text-gray-900 dark:text-white">{{ t('admin.backup.actions.downloadParts') }}</h2>
+            <h2 class="mb-1 text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.backup.actions.downloadParts') }}</h2>
             <p class="mb-4 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.backup.actions.downloadPartsHint') }}</p>
             <div class="space-y-2">
               <div
