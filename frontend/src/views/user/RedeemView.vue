@@ -3,17 +3,17 @@
     <div class="mx-auto max-w-2xl space-y-6">
       <!-- Current Balance Card -->
       <div class="card overflow-hidden">
-        <div class="bg-gradient-to-br from-primary-500 to-primary-600 px-6 py-8 text-center">
+        <div class="px-6 py-8 text-center">
           <div
-            class="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-white/20 backdrop-blur-sm"
+            class="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary-50 dark:bg-primary-400/10"
           >
-            <Icon name="creditCard" size="xl" class="text-white" />
+            <Icon name="creditCard" size="xl" class="text-primary-600 dark:text-primary-300" />
           </div>
-          <p class="text-sm font-medium text-primary-100">{{ t('redeem.currentBalance') }}</p>
-          <p class="mt-2 text-4xl font-bold text-white">
+          <p class="text-sm font-medium text-gray-600 dark:text-dark-300">{{ t('redeem.currentBalance') }}</p>
+          <p class="mt-2 font-serif text-4xl font-normal text-gray-950 dark:text-dark-50">
             ${{ user?.balance?.toFixed(2) || '0.00' }}
           </p>
-          <p class="mt-2 text-sm text-primary-100">
+          <p class="mt-2 text-sm text-gray-500 dark:text-dark-400">
             {{ t('redeem.concurrency') }}: {{ user?.concurrency || 0 }} {{ t('redeem.requests') }}
           </p>
         </div>
@@ -201,7 +201,7 @@
       <!-- Recent Activity -->
       <div class="card">
         <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+          <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
             {{ t('redeem.recentActivity') }}
           </h2>
         </div>

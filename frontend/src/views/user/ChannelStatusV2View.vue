@@ -7,7 +7,7 @@
       >
         <header class="page-header mb-0 flex flex-wrap items-start justify-between gap-4 border-b border-gray-100 px-5 py-4 dark:border-dark-700 sm:px-6">
           <div class="min-w-0">
-            <h1 class="page-title flex items-center gap-2 text-xl font-black text-gray-900 dark:text-white">
+            <h1 class="page-title flex items-center gap-2 text-xl font-serif font-normal text-gray-950 dark:text-white">
               <span class="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-blue-50 text-blue-500 dark:bg-blue-900/30 dark:text-blue-400">
                 <Icon name="chart" size="sm" />
               </span>

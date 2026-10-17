@@ -1,7 +1,7 @@
 <template>
   <AppLayout>
     <div class="mx-auto flex max-w-md flex-col items-center space-y-6 py-8">
-      <h2 class="text-xl font-semibold text-gray-900 dark:text-white">
+      <h2 class="text-xl font-serif font-normal text-gray-950 dark:text-white">
         {{ qrUrl ? scanTitle : t('payment.qr.payInNewWindow') }}
       </h2>
       <div v-if="qrUrl" class="rounded-2xl bg-white p-6 shadow-lg dark:bg-dark-800">

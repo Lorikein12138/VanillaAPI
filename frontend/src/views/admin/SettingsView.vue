@@ -51,7 +51,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.adminApiKey.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -208,7 +208,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.overloadCooldown.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -309,7 +309,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.rateLimit429Cooldown.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -416,7 +416,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.streamTimeout.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -596,7 +596,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.rectifier.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -795,7 +795,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.betaPolicy.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1074,7 +1074,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.openaiFastPolicy.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1428,7 +1428,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.registration.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1760,7 +1760,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.apiKeyAcl.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -1853,7 +1853,7 @@
                   size="md"
                   class="text-primary-500"
                 />
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+                <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                   {{ t("admin.settings.panelRateLimit.title") }}
                 </h2>
               </div>
@@ -2038,7 +2038,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.captcha.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2442,7 +2442,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.linuxdo.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2560,7 +2560,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ localText("邮箱快捷登录", "Email OAuth Sign-in") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2786,7 +2786,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.wechatConnect.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -3128,7 +3128,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.dingtalk.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -3416,7 +3416,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.oidc.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -3829,7 +3829,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.defaults.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4102,7 +4102,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.authSourceDefaults.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4445,7 +4445,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.claudeCode.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4497,7 +4497,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.gatewayForwarding.codexHardeningTitle") }}
               </h2>
             </div>
@@ -4745,7 +4745,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.upstreamBillingProbe.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4829,7 +4829,7 @@
           <!-- Ollama Cloud Usage Settings -->
           <div class="card" data-testid="ollama-cloud-usage-global-settings">
             <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.ollamaCloudUsage.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4913,7 +4913,7 @@
           <!-- OpenCode Go Usage Settings -->
           <div class="card" data-testid="opencode-go-usage-global-settings">
             <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.opencodeGoUsage.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4999,7 +4999,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.scheduling.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -5278,7 +5278,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.gatewayForwarding.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -5922,7 +5922,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.webSearchEmulation.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -6356,7 +6356,7 @@
         <!-- Usage Records Settings -->
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.usageRecords.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -6391,7 +6391,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.site.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -6758,7 +6758,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.customMenu.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -6963,7 +6963,7 @@
 	            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
 	              <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
 	                <div>
-	                  <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+	                  <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
 	                    {{ localText("登录条款确认", "Login agreement") }}
 	                  </h2>
 	                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7163,7 +7163,7 @@
 	        <div v-show="activeTab === 'features'" class="space-y-6">
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.channelMonitor.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7294,7 +7294,7 @@
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.availableChannels.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7327,7 +7327,7 @@
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.modelPlaza.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7377,7 +7377,7 @@
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.siteBillingMode.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7407,7 +7407,7 @@
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.pluginManagement.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7431,7 +7431,7 @@
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.riskControl.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7502,7 +7502,7 @@
         <!-- Affiliate (邀请返利) feature card -->
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
               {{ t('admin.settings.features.affiliate.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -7921,7 +7921,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.payment.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -8507,7 +8507,7 @@
               class="flex items-center justify-between border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
               <div>
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+                <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                   {{ t("admin.settings.smtp.title") }}
                 </h2>
                 <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -8669,7 +8669,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
                 {{ t("admin.settings.testEmail.title") }}
               </h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -13424,7 +13424,7 @@ watch(
   height: 2px;
   border-radius: 9999px;
   content: "";
-  background: linear-gradient(90deg, #14b8a6, #0ea5e9);
+  background: #c6613f;
 }
 
 .settings-tab-icon {

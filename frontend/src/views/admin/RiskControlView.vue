@@ -8,7 +8,7 @@
       <template v-else>
         <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.title') }}</h1>
+            <h1 class="text-2xl font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.riskControl.title') }}</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.description') }}</p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
@@ -68,7 +68,7 @@
           <div data-test="pre-block-sync-card" class="card">
             <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.preBlockSyncStatus') }}</h2>
+                <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.riskControl.preBlockSyncStatus') }}</h2>
                 <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.preBlockSyncHint') }}</p>
               </div>
               <span class="inline-flex w-fit items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300">
@@ -95,7 +95,7 @@
           <div data-test="pre-block-api-key-load-card" class="card">
             <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.preBlockAPIKeyLoad') }}</h2>
+                <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.riskControl.preBlockAPIKeyLoad') }}</h2>
                 <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                   {{ t('admin.riskControl.preBlockAPIKeyLoadHint') }}
                 </p>
@@ -161,7 +161,7 @@
         <div v-if="showWorkerRuntimeCard" class="card">
           <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.workerStatus') }}</h2>
+              <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.riskControl.workerStatus') }}</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.workerStatusHint') }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
@@ -241,7 +241,7 @@
           <div class="flex flex-col gap-4 border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.records') }}</h2>
+                <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('admin.riskControl.records') }}</h2>
                 <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.recordsHint') }}</p>
               </div>
               <button type="button" class="btn btn-secondary inline-flex items-center gap-2" :disabled="logsLoading" @click="loadLogs">

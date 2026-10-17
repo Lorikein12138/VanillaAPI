@@ -34,7 +34,7 @@
         v-else-if="loadError"
         class="rounded-lg border border-red-200 bg-red-50 p-6 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200"
       >
-        <h1 class="text-lg font-semibold">{{ t('legal.loadFailed') }}</h1>
+        <h1 class="text-lg font-serif font-normal">{{ t('legal.loadFailed') }}</h1>
         <p class="mt-2 text-sm">{{ t('legal.retryLater') }}</p>
       </section>
 
@@ -47,7 +47,7 @@
             <Icon name="document" size="sm" />
           </span>
           <div>
-            <h1 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('legal.notFound') }}</h1>
+            <h1 class="text-lg font-serif font-normal text-gray-950 dark:text-white">{{ t('legal.notFound') }}</h1>
             <p class="mt-2 text-sm leading-6 text-gray-600 dark:text-dark-300">
               {{ t('legal.notFoundDescription') }}
             </p>
@@ -63,7 +63,7 @@
             </span>
             <div class="min-w-0">
               <p class="text-sm font-medium text-primary-700 dark:text-primary-300">{{ documentTypeLabel }}</p>
-              <h1 class="mt-2 break-words text-2xl font-bold tracking-normal text-gray-950 dark:text-white sm:text-3xl">
+              <h1 class="mt-2 break-words text-2xl font-serif font-normal tracking-normal text-gray-950 dark:text-white sm:text-3xl">
                 {{ currentDocument.title }}
               </h1>
               <p v-if="updatedAt" class="mt-3 text-sm text-gray-500 dark:text-dark-400">

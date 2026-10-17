@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount, RouterLinkStub } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount, RouterLinkStub } from '@vue/test-utils'
 
 import HomeView from '../HomeView.vue'
 
@@ -67,6 +67,8 @@ function modelPlazaDestination(wrapper: ReturnType<typeof mountHome>) {
 }
 
 describe('HomeView compact mode', () => {
+  enableAutoUnmount(afterEach)
+
   beforeEach(() => {
     authStore.isAuthenticated = false
     authStore.isAdmin = false
@@ -74,6 +76,7 @@ describe('HomeView compact mode', () => {
     authStore.checkAuth.mockClear()
     appStore.fetchPublicSettings.mockClear()
     localStorage.clear()
+    document.documentElement.classList.remove('dark')
     vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList)
   })
 
@@ -93,8 +96,35 @@ describe('HomeView compact mode', () => {
       home_content: ' https://example.com/home ',
     })
 
-    expect(wrapper.get('iframe').attributes('src')).toBe('https://example.com/home')
+    expect(wrapper.get('iframe').attributes('src')).toBe('https://example.com/home?theme=light')
     expect(wrapper.find('[data-testid="compact-home"]').exists()).toBe(false)
+  })
+
+  it('passes the current dark theme to the custom URL', () => {
+    document.documentElement.classList.add('dark')
+    const wrapper = mountHome({ home_content: 'https://example.com/home?lang=zh' })
+
+    expect(wrapper.get('iframe').attributes('src')).toBe('https://example.com/home?lang=zh&theme=dark')
+  })
+
+  it('applies theme messages only from the custom URL origin', () => {
+    const wrapper = mountHome({ home_content: 'https://example.com/home' })
+    const post = (origin: string, data: unknown) =>
+      window.dispatchEvent(new MessageEvent('message', { origin, data }))
+
+    post('https://evil.example', { type: 'vanilla-theme', theme: 'dark' })
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+
+    post('https://example.com', { type: 'vanilla-theme', theme: 'dark' })
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    expect(localStorage.getItem('theme')).toBe('dark')
+
+    post('https://example.com', { type: 'vanilla-theme', theme: 'light' })
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+
+    wrapper.unmount()
+    post('https://example.com', { type: 'vanilla-theme', theme: 'dark' })
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
   })
 
   it('treats whitespace-only custom content as empty and selects compact mode', () => {

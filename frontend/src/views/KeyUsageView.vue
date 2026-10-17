@@ -37,7 +37,7 @@
     <main class="flex-1 w-full max-w-5xl mx-auto px-6 py-12">
       <!-- Hero -->
       <div class="text-center mb-12">
-        <h1 class="text-3xl sm:text-4xl font-bold tracking-tight mb-3 text-gray-900 dark:text-white">
+        <h1 class="text-3xl sm:text-4xl font-serif font-normal tracking-tight mb-3 text-gray-950 dark:text-white">
           {{ t('keyUsage.title') }}
         </h1>
         <p class="text-gray-500 dark:text-dark-400 text-base max-w-md mx-auto">
@@ -529,7 +529,7 @@ function setDailyUsageDays(days: 7 | 30 | 90) {
 
 const CIRCUMFERENCE = 2 * Math.PI * 68
 const RING_GRADIENTS = [
-  { from: '#14b8a6', to: '#5eead4' },
+  { from: '#C6613F', to: '#E7AC93' },
   { from: '#6366F1', to: '#A5B4FC' },
   { from: '#10B981', to: '#6EE7B7' },
   { from: '#F59E0B', to: '#FCD34D' },
@@ -949,8 +949,8 @@ onUnmounted(() => {
   transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 .input-ring:focus {
-  box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.2);
-  border-color: #14b8a6;
+  box-shadow: 0 0 0 3px rgba(198, 97, 63, 0.2);
+  border-color: #c6613f;
   outline: none;
 }
 

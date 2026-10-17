@@ -1,5 +1,5 @@
 <template>
-  <header class="glass sticky top-0 z-30 border-b border-gray-200/50 dark:border-dark-700/50">
+  <header class="sticky top-0 z-30 border-b border-gray-200 bg-gray-50/90 backdrop-blur-sm dark:border-dark-800 dark:bg-dark-950/90">
     <div class="flex h-16 items-center justify-between gap-2 px-2 sm:px-4 md:px-6">
       <!-- Left: Mobile Menu Toggle + Page Title -->
       <div class="flex shrink-0 items-center gap-2 sm:gap-4">
@@ -12,7 +12,7 @@
         </button>
 
         <div class="hidden lg:block">
-          <h1 class="text-lg font-semibold text-gray-900 dark:text-white">
+          <h1 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
             {{ pageTitle }}
           </h1>
           <p v-if="pageDescription" class="text-xs text-gray-500 dark:text-dark-400">
@@ -59,7 +59,7 @@
         <!-- Balance Display -->
         <div
           v-if="user"
-          class="group relative hidden items-center gap-2 rounded-xl bg-primary-50 px-3 py-1.5 dark:bg-primary-900/20 sm:flex"
+          class="group relative hidden items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 dark:border-dark-700 dark:bg-dark-800 sm:flex"
         >
           <svg
             class="h-4 w-4 text-primary-600 dark:text-primary-400"
@@ -110,7 +110,7 @@
             class="flex items-center gap-2 rounded-xl p-1.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-800"
             :aria-label="t('common.userMenu')"
           >
-            <div class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-primary-500 to-primary-600 text-sm font-medium text-white shadow-sm">
+            <div class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-xl text-sm font-medium shadow-sm bg-primary-50 text-primary-600 dark:bg-primary-400/10 dark:text-primary-300">
               <img
                 v-if="avatarUrl"
                 :src="avatarUrl"

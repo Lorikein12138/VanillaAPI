@@ -71,7 +71,7 @@
               </span>
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-2">
-                  <h2 class="text-xl font-bold tracking-normal text-gray-950 dark:text-white">
+                  <h2 class="text-xl font-serif font-normal tracking-normal text-gray-950 dark:text-white">
                     {{ t('legal.loginAgreementPrompt.dialogTitle') }}
                   </h2>
                   <span
@@ -129,7 +129,7 @@
               </button>
               <button
                 type="button"
-                class="rounded-xl bg-primary-600 px-4 py-3 text-sm font-semibold text-white shadow-sm shadow-primary-600/20 transition hover:bg-primary-700"
+                class="rounded-lg bg-gray-950 px-4 py-3 text-sm font-medium text-gray-50 transition-colors hover:bg-gray-800 dark:bg-dark-50 dark:text-gray-950 dark:hover:bg-dark-200"
                 @click="emit('accept')"
               >
                 {{ t('legal.loginAgreementPrompt.accept') }}

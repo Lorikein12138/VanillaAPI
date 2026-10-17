@@ -25,7 +25,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </div>
-          <h2 class="mt-4 text-2xl font-bold text-gray-900 dark:text-white">
+          <h2 class="mt-4 text-2xl font-serif font-normal text-gray-950 dark:text-white">
             {{ statusTitle }}
           </h2>
           <p v-if="isPending" class="mt-2 text-sm text-gray-500 dark:text-gray-400">

@@ -279,7 +279,7 @@
         <div
           class="relative z-10 w-full max-w-md rounded-xl bg-white p-6 shadow-xl dark:bg-dark-800"
         >
-          <h2 class="mb-4 text-lg font-semibold text-gray-900 dark:text-white">
+          <h2 class="mb-4 text-lg font-serif font-normal text-gray-950 dark:text-white">
             {{ t('admin.redeem.generateCodesTitle') }}
           </h2>
           <form @submit.prevent="handleGenerateCodes" class="space-y-4">
@@ -419,7 +419,7 @@
         <div
           class="relative z-10 w-full max-w-lg rounded-xl bg-white p-6 shadow-xl dark:bg-dark-800"
         >
-          <h2 class="mb-1 text-lg font-semibold text-gray-900 dark:text-white">
+          <h2 class="mb-1 text-lg font-serif font-normal text-gray-950 dark:text-white">
             {{ t('admin.redeem.batchUpdateTitle') }}
           </h2>
           <p class="mb-4 text-sm text-gray-500 dark:text-gray-400">

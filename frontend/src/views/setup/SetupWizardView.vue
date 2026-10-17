@@ -10,7 +10,7 @@
         >
           <Icon name="cog" size="xl" class="text-white" />
         </div>
-        <h1 class="text-3xl font-bold text-gray-900 dark:text-white">{{ t('setup.title') }}</h1>
+        <h1 class="text-3xl font-serif font-normal text-gray-950 dark:text-white">{{ t('setup.title') }}</h1>
         <p class="mt-2 text-gray-500 dark:text-dark-400">{{ t('setup.description') }}</p>
       </div>
 
@@ -62,7 +62,7 @@
         <!-- Step 1: Database -->
         <div v-if="currentStep === 0" class="space-y-6">
           <div class="mb-6 text-center">
-            <h2 class="text-xl font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-xl font-serif font-normal text-gray-950 dark:text-white">
               {{ t('setup.database.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -187,7 +187,7 @@
         <!-- Step 2: Redis -->
         <div v-if="currentStep === 1" class="space-y-6">
           <div class="mb-6 text-center">
-            <h2 class="text-xl font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-xl font-serif font-normal text-gray-950 dark:text-white">
               {{ t('setup.redis.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -303,7 +303,7 @@
         <!-- Step 3: Admin -->
         <div v-if="currentStep === 2" class="space-y-6">
           <div class="mb-6 text-center">
-            <h2 class="text-xl font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-xl font-serif font-normal text-gray-950 dark:text-white">
               {{ t('setup.admin.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
@@ -351,7 +351,7 @@
         <!-- Step 4: Complete -->
         <div v-if="currentStep === 3" class="space-y-6">
           <div class="mb-6 text-center">
-            <h2 class="text-xl font-semibold text-gray-900 dark:text-white">
+            <h2 class="text-xl font-serif font-normal text-gray-950 dark:text-white">
               {{ t('setup.ready.title') }}
             </h2>
             <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">
