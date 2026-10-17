@@ -539,7 +539,7 @@
   /* ============ 侧边栏 ============ */
   .sidebar {
     @apply fixed inset-y-0 left-0 z-40;
-    @apply w-64 bg-gray-100 dark:bg-dark-900;
+    @apply w-64 bg-gray-100 dark:bg-dark-sidebar;
     @apply border-r border-gray-200 dark:border-dark-800;
     @apply flex flex-col;
     @apply transition-transform duration-300;
@@ -693,7 +693,7 @@
 
   .code-block {
     @apply font-mono text-sm;
-    @apply bg-gray-950 text-dark-100 dark:bg-dark-900;
+    @apply bg-gray-950 text-dark-100 dark:bg-dark-sidebar;
     @apply overflow-x-auto rounded-lg p-4;
   }
 
@@ -715,8 +715,8 @@
   }
 
   .tour-info-box {
-    @apply rounded-md border-l-4 border-blue-500 bg-blue-50 px-3 py-2 text-xs text-blue-900;
-    @apply dark:border-blue-400 dark:bg-blue-950/40 dark:text-blue-200;
+    @apply rounded-none border-l-2 border-primary-500 bg-gray-50 px-3 py-2 text-xs text-gray-700;
+    @apply dark:border-primary-400 dark:bg-dark-900 dark:text-dark-200;
   }
 
   .tour-success-box {

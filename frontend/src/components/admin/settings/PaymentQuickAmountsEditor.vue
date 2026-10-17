@@ -3,7 +3,7 @@
     <div class="border-b border-gray-100 px-4 py-3 dark:border-dark-700">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+          <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ t('admin.settings.payment.quickAmounts.label') }}
           </h2>
           <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">

@@ -18,7 +18,7 @@
             >
               <Icon name="link" size="lg" class="text-gray-400" />
             </div>
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ t('customPage.notFoundTitle') }}
             </h3>
             <p class="mt-2 text-sm text-gray-500 dark:text-dark-400">
@@ -84,7 +84,7 @@
             >
               <Icon name="link" size="lg" class="text-gray-400" />
             </div>
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+            <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ t('customPage.notConfiguredTitle') }}
             </h3>
             <p class="mt-2 text-sm text-gray-500 dark:text-dark-400">
@@ -519,7 +519,7 @@ onUnmounted(() => {
 .custom-embed-shell {
   @apply relative;
   @apply h-full w-full overflow-hidden rounded-2xl;
-  @apply bg-gradient-to-b from-gray-50 to-white dark:from-dark-900 dark:to-dark-950;
+  @apply bg-gray-50 dark:bg-dark-900;
   @apply p-0;
 }
 
@@ -545,16 +545,16 @@ onUnmounted(() => {
   line-height: 1.7;
   color: inherit;
 }
-.markdown-page-content h1 { @apply text-3xl font-bold mt-8 mb-4 pb-2 border-b border-gray-200 dark:border-dark-600; }
-.markdown-page-content h2 { @apply text-2xl font-bold mt-6 mb-3; }
-.markdown-page-content h3 { @apply text-xl font-semibold mt-5 mb-2; }
+.markdown-page-content h1 { @apply font-serif text-3xl font-normal mt-8 mb-4 pb-2 border-b border-gray-200 dark:border-dark-600; }
+.markdown-page-content h2 { @apply font-serif text-2xl font-normal mt-6 mb-3; }
+.markdown-page-content h3 { @apply font-serif text-xl font-normal mt-5 mb-2; }
 .markdown-page-content h4 { @apply text-lg font-semibold mt-4 mb-2; }
 .markdown-page-content p { @apply mb-4; }
 .markdown-page-content ul { @apply list-disc pl-6 mb-4; }
 .markdown-page-content ol { @apply list-decimal pl-6 mb-4; }
 .markdown-page-content li { @apply mb-1; }
 .markdown-page-content a { @apply text-primary-500 hover:text-primary-600 underline; }
-.markdown-page-content blockquote { @apply border-l-4 border-gray-300 dark:border-dark-500 pl-4 italic text-gray-600 dark:text-dark-300 my-4; }
+.markdown-page-content blockquote { @apply border-l-2 border-primary-500 pl-4 italic text-gray-600 dark:text-dark-300 my-4; }
 .markdown-page-content img { @apply max-w-full h-auto rounded-lg my-4; }
 .markdown-page-content table { @apply w-full border-collapse my-4; }
 .markdown-page-content th { @apply border border-gray-300 dark:border-dark-500 px-3 py-2 bg-gray-50 dark:bg-dark-700 font-semibold text-left; }

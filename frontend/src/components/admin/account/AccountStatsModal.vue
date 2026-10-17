@@ -9,11 +9,11 @@
       <!-- Account Info Header -->
       <div
         v-if="account"
-        class="flex items-center justify-between rounded-xl border border-primary-200 bg-gradient-to-r from-primary-50 to-primary-100 p-3 dark:border-primary-700/50 dark:from-primary-900/20 dark:to-primary-800/20"
+        class="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-dark-700 dark:bg-dark-900"
       >
         <div class="flex items-center gap-3">
           <div
-            class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary-500 to-primary-600"
+            class="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-500"
           >
             <Icon name="chartBar" size="md" class="text-white" />
           </div>
@@ -46,17 +46,17 @@
         <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <!-- 30-Day Total Cost -->
           <div
-            class="card border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-4 dark:border-emerald-800/30 dark:from-emerald-900/10 dark:to-dark-700"
+            class="card p-4"
           >
             <div class="mb-2 flex items-center justify-between">
               <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{
                 t('admin.accounts.stats.totalCost')
               }}</span>
-              <div class="rounded-lg bg-emerald-100 p-1.5 dark:bg-emerald-900/30">
-                <Icon name="dollar" size="sm" class="text-emerald-600 dark:text-emerald-400" />
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
+                <Icon name="dollar" size="sm" class="text-gray-600 dark:text-dark-300" />
               </div>
             </div>
-            <p class="text-2xl font-bold text-gray-900 dark:text-white">
+            <p class="text-2xl font-serif font-normal text-gray-950 dark:text-dark-50">
               ${{ formatCost(stats.summary.total_cost) }}
             </p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -72,17 +72,17 @@
 
           <!-- 30-Day Total Requests -->
           <div
-            class="card border-blue-200 bg-gradient-to-br from-blue-50 to-white p-4 dark:border-blue-800/30 dark:from-blue-900/10 dark:to-dark-700"
+            class="card p-4"
           >
             <div class="mb-2 flex items-center justify-between">
               <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{
                 t('admin.accounts.stats.totalRequests')
               }}</span>
-              <div class="rounded-lg bg-blue-100 p-1.5 dark:bg-blue-900/30">
-                <Icon name="bolt" size="sm" class="text-blue-600 dark:text-blue-400" />
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
+                <Icon name="bolt" size="sm" class="text-gray-600 dark:text-dark-300" />
               </div>
             </div>
-            <p class="text-2xl font-bold text-gray-900 dark:text-white">
+            <p class="text-2xl font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ formatNumber(stats.summary.total_requests) }}
             </p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -92,21 +92,21 @@
 
           <!-- Daily Average Cost -->
           <div
-            class="card border-amber-200 bg-gradient-to-br from-amber-50 to-white p-4 dark:border-amber-800/30 dark:from-amber-900/10 dark:to-dark-700"
+            class="card p-4"
           >
             <div class="mb-2 flex items-center justify-between">
               <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{
                 t('admin.accounts.stats.avgDailyCost')
               }}</span>
-              <div class="rounded-lg bg-amber-100 p-1.5 dark:bg-amber-900/30">
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
                 <Icon
                   name="calculator"
                   size="sm"
-                  class="text-amber-600 dark:text-amber-400"
+                  class="text-gray-600 dark:text-dark-300"
                 />
               </div>
             </div>
-            <p class="text-2xl font-bold text-gray-900 dark:text-white">
+            <p class="text-2xl font-serif font-normal text-gray-950 dark:text-dark-50">
               ${{ formatCost(stats.summary.avg_daily_cost) }}
             </p>
              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -123,15 +123,15 @@
 
           <!-- Daily Average Requests -->
           <div
-            class="card border-purple-200 bg-gradient-to-br from-purple-50 to-white p-4 dark:border-purple-800/30 dark:from-purple-900/10 dark:to-dark-700"
+            class="card p-4"
           >
             <div class="mb-2 flex items-center justify-between">
               <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{
                 t('admin.accounts.stats.avgDailyRequests')
               }}</span>
-              <div class="rounded-lg bg-purple-100 p-1.5 dark:bg-purple-900/30">
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
                 <svg
-                  class="h-4 w-4 text-purple-600 dark:text-purple-400"
+                  class="h-4 w-4 text-gray-600 dark:text-dark-300"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
@@ -145,7 +145,7 @@
                 </svg>
               </div>
             </div>
-            <p class="text-2xl font-bold text-gray-900 dark:text-white">
+            <p class="text-2xl font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ formatNumber(Math.round(stats.summary.avg_daily_requests)) }}
             </p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -159,8 +159,8 @@
           <!-- Today Overview -->
           <div class="card p-4">
             <div class="mb-3 flex items-center gap-2">
-              <div class="rounded-lg bg-cyan-100 p-1.5 dark:bg-cyan-900/30">
-                <Icon name="clock" size="sm" class="text-cyan-600 dark:text-cyan-400" />
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
+                <Icon name="clock" size="sm" class="text-gray-600 dark:text-dark-300" />
               </div>
               <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
                 t('admin.accounts.stats.todayOverview')
@@ -201,8 +201,8 @@
           <!-- Highest Cost Day -->
           <div class="card p-4">
             <div class="mb-3 flex items-center gap-2">
-              <div class="rounded-lg bg-orange-100 p-1.5 dark:bg-orange-900/30">
-                <Icon name="fire" size="sm" class="text-orange-600 dark:text-orange-400" />
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
+                <Icon name="fire" size="sm" class="text-gray-600 dark:text-dark-300" />
               </div>
               <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
                 t('admin.accounts.stats.highestCostDay')
@@ -219,7 +219,7 @@
               </div>
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.accountBilled') }}</span>
-                <span class="text-sm font-semibold text-orange-600 dark:text-orange-400"
+                <span class="text-sm font-semibold text-gray-950 dark:text-dark-50"
                   >${{ formatCost(stats.summary.highest_cost_day?.cost || 0) }}</span
                 >
               </div>
@@ -243,11 +243,11 @@
           <!-- Highest Request Day -->
           <div class="card p-4">
             <div class="mb-3 flex items-center gap-2">
-              <div class="rounded-lg bg-indigo-100 p-1.5 dark:bg-indigo-900/30">
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
                 <Icon
                   name="trendingUp"
                   size="sm"
-                  class="text-indigo-600 dark:text-indigo-400"
+                  class="text-gray-600 dark:text-dark-300"
                 />
               </div>
               <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
@@ -267,7 +267,7 @@
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{
                   t('admin.accounts.stats.requests')
                 }}</span>
-                <span class="text-sm font-semibold text-indigo-600 dark:text-indigo-400">{{
+                <span class="text-sm font-semibold text-gray-950 dark:text-dark-50">{{
                   formatNumber(stats.summary.highest_request_day?.requests || 0)
                 }}</span>
               </div>
@@ -292,8 +292,8 @@
           <!-- Accumulated Tokens -->
           <div class="card p-4">
             <div class="mb-3 flex items-center gap-2">
-              <div class="rounded-lg bg-teal-100 p-1.5 dark:bg-teal-900/30">
-                <Icon name="cube" size="sm" class="text-teal-600 dark:text-teal-400" />
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
+                <Icon name="cube" size="sm" class="text-gray-600 dark:text-dark-300" />
               </div>
               <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
                 t('admin.accounts.stats.accumulatedTokens')
@@ -322,8 +322,8 @@
           <!-- Performance -->
           <div class="card p-4">
             <div class="mb-3 flex items-center gap-2">
-              <div class="rounded-lg bg-rose-100 p-1.5 dark:bg-rose-900/30">
-                <Icon name="bolt" size="sm" class="text-rose-600 dark:text-rose-400" />
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
+                <Icon name="bolt" size="sm" class="text-gray-600 dark:text-dark-300" />
               </div>
               <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
                 t('admin.accounts.stats.performance')
@@ -352,11 +352,11 @@
           <!-- Recent Activity -->
           <div class="card p-4">
             <div class="mb-3 flex items-center gap-2">
-              <div class="rounded-lg bg-lime-100 p-1.5 dark:bg-lime-900/30">
+              <div class="rounded-lg bg-gray-500/10 p-1.5 dark:bg-white/5">
                 <Icon
                   name="clipboard"
                   size="sm"
-                  class="text-lime-600 dark:text-lime-400"
+                  class="text-gray-600 dark:text-dark-300"
                 />
               </div>
               <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
@@ -394,7 +394,7 @@
 
         <!-- Usage Trend Chart -->
         <div class="card p-4">
-          <h3 class="mb-4 text-sm font-semibold text-gray-900 dark:text-white">
+          <h3 class="mb-4 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ t('admin.accounts.stats.usageTrend') }}
           </h3>
           <div class="h-64">

@@ -7,7 +7,7 @@
             <span class="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-200 dark:bg-dark-800 dark:ring-dark-700">
               <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
             </span>
-            <span class="truncate text-base font-semibold text-gray-950 dark:text-white">
+            <span class="truncate font-serif text-lg font-normal text-gray-950 dark:text-dark-50">
               {{ siteName }}
             </span>
           </template>
@@ -190,15 +190,15 @@ onMounted(async () => {
 }
 
 .legal-document-content :deep(h1) {
-  @apply mb-4 mt-8 border-b border-gray-200 pb-3 text-3xl font-bold dark:border-dark-700;
+  @apply mb-4 mt-8 border-b border-gray-200 pb-3 font-serif text-3xl font-normal dark:border-dark-700;
 }
 
 .legal-document-content :deep(h2) {
-  @apply mb-3 mt-7 text-2xl font-bold;
+  @apply mb-3 mt-7 font-serif text-2xl font-normal;
 }
 
 .legal-document-content :deep(h3) {
-  @apply mb-2 mt-6 text-xl font-semibold;
+  @apply mb-2 mt-6 font-serif text-xl font-normal;
 }
 
 .legal-document-content :deep(h4) {

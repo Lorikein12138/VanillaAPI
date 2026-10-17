@@ -13,14 +13,14 @@
         <div class="flex items-center gap-3">
           <div
             :class="[
-              'flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br',
+              'flex h-10 w-10 items-center justify-center rounded-lg',
               isOpenAILike
-                ? 'from-green-500 to-green-600'
+                ? 'bg-green-500'
                 : isGemini
-                  ? 'from-blue-500 to-blue-600'
+                  ? 'bg-blue-500'
                   : isAntigravity
-                    ? 'from-purple-500 to-purple-600'
-                    : 'from-orange-500 to-orange-600'
+                    ? 'bg-purple-500'
+                    : 'bg-orange-500'
             ]"
           >
             <Icon name="sparkles" size="md" class="text-white" />
@@ -85,7 +85,7 @@
               geminiOAuthType === 'google_one'
                 ? 'bg-purple-500 text-white'
                 : geminiOAuthType === 'code_assist'
-                  ? 'bg-blue-500 text-white'
+                  ? 'bg-primary-600 text-white'
                   : 'bg-amber-500 text-white'
             ]"
           >

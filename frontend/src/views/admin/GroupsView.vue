@@ -916,7 +916,7 @@
               <input
                 v-model="createForm.allow_image_generation"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t(imagePricingI18nKey(createForm.platform, "allowImageGeneration")) }}
             </label>
@@ -924,7 +924,7 @@
               <input
                 v-model="createForm.image_rate_independent"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t(imagePricingI18nKey(createForm.platform, "independentMultiplier")) }}
             </label>
@@ -1003,7 +1003,7 @@
               <input
                 v-model="createForm.allow_batch_image_generation"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t("admin.groups.imagePricing.allowBatchImageGeneration") }}
             </label>
@@ -1068,7 +1068,7 @@
               <input
                 v-model="createForm.video_rate_independent"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t(videoPricingI18nKey("independentMultiplier")) }}
             </label>
@@ -1188,7 +1188,7 @@
               <input
                 v-model="createForm.peak_rate_enabled"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               <span>{{ t("admin.groups.peakRate.enable") }}</span>
             </label>
@@ -1234,7 +1234,7 @@
             <input
               v-model="createForm.profit_control_enabled"
               type="checkbox"
-              class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
             <span>{{ t("admin.groups.profitControl.enable") }}</span>
           </label>
@@ -1454,7 +1454,7 @@
           v-if="createForm.platform === 'openai'"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.webSearchPricing.title") }}
           </h4>
           <div>
@@ -1488,7 +1488,7 @@
         <div class="border-t border-gray-200 pt-4 mt-4 dark:border-dark-400">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="min-w-0 flex-1">
-              <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t("admin.groups.modelPricing.title") }}</h4>
+              <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300">{{ t("admin.groups.modelPricing.title") }}</h4>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t("admin.groups.modelPricing.description") }}</p>
             </div>
             <button type="button" class="btn btn-secondary shrink-0 whitespace-nowrap" @click="addGroupPricing(createForm.model_pricing)">
@@ -1509,7 +1509,7 @@
           v-if="createForm.platform === 'grok'"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-1">
             {{ t("admin.groups.explicitPricing.title") }}
           </h4>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
@@ -1571,7 +1571,7 @@
           v-if="supportsGroupOpenAIFast(createForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.openaiFast.title") }}
           </h4>
           <div class="flex items-center justify-between gap-4">
@@ -1607,7 +1607,7 @@
           v-if="supportsLivePlatform(createForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.openaiLive.title") }}
           </h4>
           <div class="flex items-center justify-between">
@@ -1629,7 +1629,7 @@
           v-if="supportsMessagesDispatchPlatform(createForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.openaiMessages.title") }}
           </h4>
 
@@ -1719,14 +1719,14 @@
               class="mt-5 relative overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm dark:border-primary-900/50 dark:bg-dark-800"
             >
               <div
-                class="border-b border-primary-100 bg-primary-50/80 px-4 py-3 dark:border-primary-900/40 dark:bg-primary-900/20"
+                class="border-b border-gray-200 bg-gray-50 px-4 py-3 dark:border-dark-700 dark:bg-dark-900"
               >
                 <div class="flex items-start justify-between gap-3">
                   <div>
                     <div class="flex items-center gap-2">
                       <div class="h-2 w-2 rounded-full bg-primary-500"></div>
                       <label
-                        class="text-sm font-medium text-primary-900 dark:text-primary-100"
+                        class="text-sm font-medium text-gray-950 dark:text-dark-50"
                         >{{
                           t("admin.groups.openaiMessages.exactMappingTitle")
                         }}</label
@@ -1845,7 +1845,7 @@
           "
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4 space-y-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.accountFilters.title") }}
           </h4>
 
@@ -2585,7 +2585,7 @@
               <input
                 v-model="editForm.allow_image_generation"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t(imagePricingI18nKey(editForm.platform, "allowImageGeneration")) }}
             </label>
@@ -2593,7 +2593,7 @@
               <input
                 v-model="editForm.image_rate_independent"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t(imagePricingI18nKey(editForm.platform, "independentMultiplier")) }}
             </label>
@@ -2672,7 +2672,7 @@
               <input
                 v-model="editForm.allow_batch_image_generation"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t("admin.groups.imagePricing.allowBatchImageGeneration") }}
             </label>
@@ -2737,7 +2737,7 @@
               <input
                 v-model="editForm.video_rate_independent"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               {{ t(videoPricingI18nKey("independentMultiplier")) }}
             </label>
@@ -2857,7 +2857,7 @@
               <input
                 v-model="editForm.peak_rate_enabled"
                 type="checkbox"
-                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
               />
               <span>{{ t("admin.groups.peakRate.enable") }}</span>
             </label>
@@ -2903,7 +2903,7 @@
             <input
               v-model="editForm.profit_control_enabled"
               type="checkbox"
-              class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
             />
             <span>{{ t("admin.groups.profitControl.enable") }}</span>
           </label>
@@ -3123,7 +3123,7 @@
           v-if="editForm.platform === 'openai'"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.webSearchPricing.title") }}
           </h4>
           <div>
@@ -3167,7 +3167,7 @@
         <div class="border-t border-gray-200 pt-4 mt-4 dark:border-dark-400">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="min-w-0 flex-1">
-              <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t("admin.groups.modelPricing.title") }}</h4>
+              <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300">{{ t("admin.groups.modelPricing.title") }}</h4>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t("admin.groups.modelPricing.description") }}</p>
             </div>
             <button type="button" class="btn btn-secondary shrink-0 whitespace-nowrap" @click="addGroupPricing(editForm.model_pricing)">
@@ -3188,7 +3188,7 @@
           v-if="editForm.platform === 'grok'"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-1">
             {{ t("admin.groups.explicitPricing.title") }}
           </h4>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
@@ -3250,7 +3250,7 @@
           v-if="supportsGroupOpenAIFast(editForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.openaiFast.title") }}
           </h4>
           <div class="flex items-center justify-between gap-4">
@@ -3286,7 +3286,7 @@
           v-if="supportsLivePlatform(editForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.openaiLive.title") }}
           </h4>
           <div class="flex items-center justify-between">
@@ -3308,7 +3308,7 @@
           v-if="supportsMessagesDispatchPlatform(editForm.platform)"
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.openaiMessages.title") }}
           </h4>
 
@@ -3397,14 +3397,14 @@
               class="mt-5 relative overflow-hidden rounded-xl border border-primary-200 bg-white shadow-sm dark:border-primary-900/50 dark:bg-dark-800"
             >
               <div
-                class="border-b border-primary-100 bg-primary-50/80 px-4 py-3 dark:border-primary-900/40 dark:bg-primary-900/20"
+                class="border-b border-gray-200 bg-gray-50 px-4 py-3 dark:border-dark-700 dark:bg-dark-900"
               >
                 <div class="flex items-start justify-between gap-3">
                   <div>
                     <div class="flex items-center gap-2">
                       <div class="h-2 w-2 rounded-full bg-primary-500"></div>
                       <label
-                        class="text-sm font-medium text-primary-900 dark:text-primary-100"
+                        class="text-sm font-medium text-gray-950 dark:text-dark-50"
                         >{{
                           t("admin.groups.openaiMessages.exactMappingTitle")
                         }}</label
@@ -3523,7 +3523,7 @@
           "
           class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4 space-y-4"
         >
-          <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-300 mb-3">
             {{ t("admin.groups.accountFilters.title") }}
           </h4>
 
@@ -3941,7 +3941,7 @@
       <div class="grid gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
         <section class="min-w-0">
           <div class="mb-3 flex items-center justify-between gap-3">
-            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+            <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ t("admin.groups.compositeRoutes.routes") }}
             </h3>
             <button
@@ -3975,7 +3975,7 @@
             </div>
             <div v-else class="overflow-x-auto">
               <table class="min-w-full divide-y divide-gray-200 text-sm dark:divide-dark-600">
-                <thead class="bg-gray-50 text-left text-xs font-medium uppercase tracking-wide text-gray-500 dark:bg-dark-800 dark:text-gray-400">
+                <thead class="bg-gray-50 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:bg-dark-800 dark:text-gray-400">
                   <tr>
                     <th class="px-3 py-2">
                       {{ t("admin.groups.compositeRoutes.publicModel") }}
@@ -4061,7 +4061,7 @@
         <section class="space-y-5">
           <form class="space-y-3" @submit.prevent="saveCompositeRoute">
             <div class="flex items-center justify-between gap-3">
-              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+              <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                 {{
                   compositeRouteEditingId
                     ? t("admin.groups.compositeRoutes.editRoute")
@@ -4188,7 +4188,7 @@
           </form>
 
           <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
-            <h3 class="mb-3 text-sm font-semibold text-gray-900 dark:text-white">
+            <h3 class="mb-3 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ t("admin.groups.compositeRoutes.preview") }}
             </h3>
             <div class="space-y-3">

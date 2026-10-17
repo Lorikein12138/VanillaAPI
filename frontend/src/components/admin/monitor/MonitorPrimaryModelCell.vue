@@ -26,12 +26,12 @@
           {{ t('monitorCommon.extraModelsEmpty') }}
         </div>
         <div v-else class="space-y-1">
-          <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+          <div class="text-[11px] font-medium font-mono uppercase tracking-[0.08em] text-gray-400">
             {{ t('monitorCommon.extraModelsHeader') }}
           </div>
           <table class="w-full text-left text-[11px]">
             <thead>
-              <tr class="text-gray-400">
+              <tr class="text-gray-400 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
                 <th class="py-0.5 pr-2 font-medium">{{ t('admin.channelMonitor.columns.primaryModel') }}</th>
                 <th class="py-0.5 pr-2 font-medium">{{ t('admin.channelMonitor.columns.actions') }}</th>
                 <th class="py-0.5 font-medium">{{ t('admin.channelMonitor.columns.latency') }}</th>

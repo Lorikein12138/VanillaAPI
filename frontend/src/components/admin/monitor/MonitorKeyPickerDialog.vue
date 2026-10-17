@@ -31,7 +31,7 @@
       <div v-else class="max-h-96 overflow-auto rounded-lg border border-gray-200 dark:border-dark-600">
         <table class="w-full text-sm">
           <thead class="bg-gray-50 dark:bg-dark-800 sticky top-0 z-10">
-            <tr class="text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+            <tr class="text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
               <th class="px-3 py-2">{{ t('common.name') }}</th>
               <th class="px-3 py-2">{{ t('keys.apiKey') }}</th>
               <th class="px-3 py-2">{{ t('keys.group') }}</th>
