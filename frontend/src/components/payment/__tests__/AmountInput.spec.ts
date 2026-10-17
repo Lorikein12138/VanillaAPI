@@ -73,10 +73,17 @@ describe('recharge bonus hints on quick amounts', () => {
     { min_amount: 500, bonus_percent: 30 },
   ]
 
-  it('renders no badge or second line when no tiers are configured', () => {
-    const wrapper = mount(AmountInput, { props: { modelValue: null, amounts: [50, 100, 500] } })
+  it('renders no badge but still shows credited totals when no tiers are configured', () => {
+    const wrapper = mount(AmountInput, { props: { modelValue: null, amounts: [50, 100, 500], multiplier: 2 } })
     expect(wrapper.find('[data-testid="quick-amount-bonus-badge"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="quick-amount-credited"]').exists()).toBe(false)
+    const credited = wrapper.findAll('[data-testid="quick-amount-credited"]')
+    expect(credited).toHaveLength(3)
+    expect(credited[0].text()).toContain('$100.00')
+  })
+
+  it('discount mode without tiers shows credited totals instead of the payment', () => {
+    const wrapper = mount(AmountInput, { props: { modelValue: null, amounts: [50], bonusMode: 'discount' } })
+    expect(wrapper.get('[data-testid="quick-amount-credited"]').text()).toContain('$50.00')
   })
 
   it('bonus mode: price tag only on amounts that hit a tier, credited totals on every button', () => {

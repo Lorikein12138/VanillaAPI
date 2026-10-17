@@ -315,6 +315,12 @@ export default {
     amountLabel: '充值金额',
     paymentAmount: '支付金额',
     creditedBalance: '到账余额',
+    balanceAfterRecharge: '充值后余额',
+    recentOrders: {
+      title: '最近订单',
+      viewAll: '全部订单',
+      empty: '还没有订单，完成第一笔充值后会显示在这里',
+    },
     rechargeBonus: {
       noticeTag: '充值优惠',
       creditedShort: '到账 {amount}',
