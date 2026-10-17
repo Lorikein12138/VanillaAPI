@@ -1,7 +1,7 @@
 <template>
-  <div class="flex min-h-screen flex-col bg-gray-50 text-gray-950 dark:bg-dark-950 dark:text-dark-50">
+  <div class="flex min-h-screen flex-col bg-gray-50 sm:h-[100dvh] sm:min-h-0 text-gray-950 dark:bg-dark-950 dark:text-dark-50">
     <!-- Top bar -->
-    <header class="border-b border-gray-200 dark:border-dark-700">
+    <header class="flex-none border-b border-gray-200 dark:border-dark-700">
       <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4 sm:px-8">
         <router-link to="/" class="flex min-w-0 items-center gap-2.5">
           <template v-if="settingsLoaded">
@@ -25,7 +25,7 @@
     </header>
 
     <!-- Content -->
-    <main class="mx-auto flex w-full max-w-6xl flex-1 flex-wrap items-center justify-center gap-x-20 gap-y-10 px-4 py-10 sm:px-8 sm:py-14">
+    <main class="mx-auto flex w-full max-w-6xl flex-1 flex-wrap items-center justify-center gap-x-20 gap-y-10 px-4 py-10 sm:min-h-0 sm:px-8 sm:py-8">
       <!-- Editorial intro -->
       <section v-if="settingsLoaded" class="hidden min-w-0 max-w-md flex-[1_1_360px] flex-col gap-6 lg:flex">
         <h1 class="font-serif text-[2.75rem] font-normal leading-[1.2] tracking-tight">
@@ -38,20 +38,21 @@
       </section>
 
       <!-- Card Container -->
-      <div class="w-full min-w-0 max-w-[26rem] flex-[1_1_360px]">
-        <div class="rounded-xl border border-gray-200 bg-white p-6 sm:p-9 dark:border-dark-700 dark:bg-dark-800">
+      <!-- 卡片高度受视口约束（sm 及以上），内容过长时卡片内滚动，页面不出现滚动条 -->
+      <div class="flex w-full min-w-0 max-w-[26rem] flex-[1_1_360px] flex-col sm:max-h-full">
+        <div class="auth-card min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-gray-200 bg-white p-6 sm:p-9 dark:border-dark-700 dark:bg-dark-800">
           <slot />
         </div>
 
         <!-- Footer Links -->
-        <div class="mt-6 text-center text-sm">
+        <div class="mt-5 flex-none text-center text-sm">
           <slot name="footer" />
         </div>
       </div>
     </main>
 
     <!-- Copyright -->
-    <footer class="px-4 pb-8 text-center text-xs text-gray-500 dark:text-dark-400">
+    <footer class="flex-none px-4 pb-6 text-center text-xs text-gray-500 dark:text-dark-400">
       &copy; {{ currentYear }} {{ siteName }}. All rights reserved.
     </footer>
   </div>

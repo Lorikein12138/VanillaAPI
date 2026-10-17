@@ -30,12 +30,12 @@
 
     *:hover,
     *:focus-within {
-      scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+      scrollbar-color: rgba(156, 154, 146, 0.5) transparent;
     }
 
     .dark *:hover,
     .dark *:focus-within {
-      scrollbar-color: rgba(75, 85, 99, 0.5) transparent;
+      scrollbar-color: rgba(94, 93, 89, 0.5) transparent;
     }
   }
 
@@ -81,7 +81,7 @@
   .btn-primary {
     @apply bg-gray-950 text-gray-50;
     @apply hover:bg-gray-800;
-    @apply dark:bg-dark-50 dark:text-gray-950 dark:hover:bg-dark-200;
+    @apply dark:bg-primary-600 dark:text-white dark:hover:bg-primary-500;
   }
 
   .btn-secondary {
@@ -100,18 +100,22 @@
   .btn-danger {
     @apply bg-red-700 text-white;
     @apply hover:bg-red-800;
-    @apply dark:bg-red-600 dark:hover:bg-red-700;
+    @apply dark:bg-red-500/15 dark:text-red-300 dark:ring-1 dark:ring-inset dark:ring-red-400/30;
+    @apply dark:hover:bg-red-500/25 dark:hover:text-red-200;
   }
 
   .btn-success {
     @apply bg-emerald-700 text-white;
     @apply hover:bg-emerald-800;
-    @apply dark:bg-emerald-600 dark:hover:bg-emerald-700;
+    @apply dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-1 dark:ring-inset dark:ring-emerald-400/30;
+    @apply dark:hover:bg-emerald-500/25 dark:hover:text-emerald-200;
   }
 
   .btn-warning {
-    @apply bg-amber-600 text-white;
-    @apply hover:bg-amber-700;
+    @apply bg-amber-700 text-white;
+    @apply hover:bg-amber-800;
+    @apply dark:bg-amber-500/15 dark:text-amber-300 dark:ring-1 dark:ring-inset dark:ring-amber-400/30;
+    @apply dark:hover:bg-amber-500/25 dark:hover:text-amber-200;
   }
 
   .btn-stripe {
@@ -161,7 +165,7 @@
   /* ============ 输入框样式 ============ */
   .input {
     @apply w-full rounded-lg px-3.5 py-2.5 text-sm;
-    @apply bg-white dark:bg-dark-900;
+    @apply bg-white dark:bg-dark-950;
     @apply border border-gray-300 dark:border-dark-600;
     @apply text-gray-950 dark:text-dark-50;
     @apply placeholder:text-gray-400 dark:placeholder:text-dark-500;
@@ -311,9 +315,9 @@
   }
 
   .table th {
-    @apply px-4 py-3 text-left text-xs font-medium;
+    @apply px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.08em];
     @apply text-gray-500 dark:text-dark-400;
-    @apply bg-gray-50 dark:bg-dark-900/40;
+    @apply bg-gray-50 dark:bg-white/[0.02];
     @apply border-b border-gray-200 dark:border-dark-700;
   }
 
@@ -335,7 +339,7 @@
   /* ============ 徽章样式 ============ */
   .badge {
     @apply inline-flex items-center gap-1;
-    @apply rounded-md px-2 py-0.5 text-xs font-medium;
+    @apply rounded px-2 py-0.5 text-xs font-medium;
   }
 
   .badge-primary {
@@ -578,7 +582,7 @@
 
   .sidebar-section-title {
     @apply mb-2 px-3;
-    @apply text-xs font-medium;
+    @apply font-mono text-[11px] font-medium uppercase tracking-[0.08em];
     @apply text-gray-500 dark:text-dark-400;
   }
 
@@ -738,7 +742,11 @@
 
   /* 表头固定时添加底部阴影，增强视觉层次 */
   .table-wrapper thead.sticky {
-    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+    box-shadow: inset 0 -1px 0 rgb(227 225 216);
+  }
+
+  .dark .table-wrapper thead.sticky {
+    box-shadow: inset 0 -1px 0 rgb(61 61 58);
   }
 }
 

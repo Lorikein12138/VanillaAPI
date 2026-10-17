@@ -340,7 +340,7 @@
                 <span :class="proxyExpiryBadge(row.proxy)">{{ proxyExpiryText(row.proxy) }}</span>
               </div>
               <div v-if="row.proxy_fallback_origin_id" class="flex items-center gap-1">
-                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200" :title="t('admin.accounts.fallbackActiveTip', { origin: row.proxy_fallback_origin_name })">
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200" :title="t('admin.accounts.fallbackActiveTip', { origin: row.proxy_fallback_origin_name })">
                   {{ t('admin.accounts.fallbackActive') }}
                 </span>
                 <button class="text-xs px-1.5 py-0.5 rounded border border-gray-300 dark:border-dark-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700" @click="onRevertFallback(row)">{{ t('admin.accounts.revertProxy') }}</button>
@@ -1748,13 +1748,13 @@ function getOpenAICompactMeta(row: any): { label: string; className: string; dot
       return {
         label: t('admin.accounts.openai.compactSupported'),
         className: 'text-emerald-600 dark:text-emerald-300',
-        dotClass: 'bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.14)]'
+        dotClass: 'bg-emerald-500 shadow-[0_0_0_2px_rgba(122,170,143,0.14)]'
       }
     case 'blocked':
       return {
         label: t('admin.accounts.openai.compactUnsupported'),
         className: 'text-rose-600 dark:text-rose-300',
-        dotClass: 'bg-rose-500 shadow-[0_0_0_2px_rgba(244,63,94,0.14)]'
+        dotClass: 'bg-rose-500 shadow-[0_0_0_2px_rgba(204,109,119,0.14)]'
       }
     case 'auto':
       return {
