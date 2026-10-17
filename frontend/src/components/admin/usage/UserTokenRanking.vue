@@ -19,14 +19,14 @@
       <table class="w-full min-w-max divide-y divide-gray-200 dark:divide-dark-700">
         <thead class="bg-gray-50 dark:bg-dark-800">
           <tr>
-            <th class="w-16 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-dark-400 sm:px-6">#</th>
-            <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-dark-400">
+            <th class="w-16 px-4 py-3 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400 sm:px-6">#</th>
+            <th class="px-4 py-3 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">
               {{ t('admin.usage.tokenRanking.columns.user') }}
             </th>
             <th
               v-for="col in sortableColumns"
               :key="col.key"
-              class="cursor-pointer select-none whitespace-nowrap px-4 py-3 text-right text-xs font-medium uppercase tracking-wider transition-colors hover:bg-gray-100 dark:hover:bg-dark-700"
+              class="cursor-pointer select-none whitespace-nowrap px-4 py-3 text-right text-xs font-medium font-mono uppercase tracking-[0.08em] transition-colors hover:bg-gray-100 dark:hover:bg-dark-700"
               :class="sortBy === col.key ? 'text-primary-600 dark:text-primary-400' : 'text-gray-500 dark:text-dark-400'"
               @click="setSort(col.key)"
             >

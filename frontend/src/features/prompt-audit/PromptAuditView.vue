@@ -3,7 +3,7 @@
     <div class="mx-auto max-w-[1600px]" :class="activeTab === 'config' && draft ? 'pb-28' : 'pb-8'">
       <header class="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p class="text-xs font-semibold uppercase tracking-[0.16em] text-primary-600 dark:text-primary-400">{{ t('nav.securityAudit') }}</p>
+          <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-primary-600 dark:text-primary-400">{{ t('nav.securityAudit') }}</p>
           <h1 class="mt-1 text-2xl font-serif font-normal tracking-tight text-gray-950 dark:text-white">{{ t('admin.promptAudit.title') }}</h1>
           <p class="mt-2 max-w-3xl text-sm text-gray-500 dark:text-dark-300">{{ t('admin.promptAudit.description') }}</p>
         </div>

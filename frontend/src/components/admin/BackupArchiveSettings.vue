@@ -1,7 +1,7 @@
 <template>
   <section class="mt-5 border-t border-gray-200 pt-5 dark:border-dark-600" aria-labelledby="backup-archive-title">
     <div class="mb-3 flex items-center justify-between gap-3">
-      <h4 id="backup-archive-title" class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.backup.archive.title') }}</h4>
+      <h4 id="backup-archive-title" class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('admin.backup.archive.title') }}</h4>
       <label class="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
         <input data-testid="archive-enabled" type="checkbox" :checked="modelValue.enabled" @change="update({ enabled: ($event.target as HTMLInputElement).checked })" />
         {{ t('admin.backup.archive.enabled') }}

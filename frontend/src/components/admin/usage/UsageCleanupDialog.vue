@@ -16,7 +16,7 @@
 
       <div class="rounded-xl border border-gray-200 p-4 dark:border-dark-700">
         <div class="flex items-center justify-between">
-          <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-200">
+          <h4 class="text-[0.9375rem] font-serif font-normal text-gray-700 dark:text-gray-200">
             {{ t('admin.usage.cleanup.recentTasks') }}
           </h4>
           <button type="button" class="btn btn-ghost btn-sm" @click="loadTasks">

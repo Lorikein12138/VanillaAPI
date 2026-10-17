@@ -179,7 +179,7 @@
         >
           <div class="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">
-              <h3 class="text-sm font-medium text-gray-900 dark:text-white">
+              <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                 {{ t('keys.useKeyModal.codexModelCatalog.title') }}
               </h3>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -244,9 +244,9 @@
         </section>
 
         <!-- Usage Note -->
-        <div v-if="showPlatformNote" class="flex items-start gap-3 p-3 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-          <Icon name="infoCircle" size="md" class="text-blue-500 flex-shrink-0 mt-0.5" />
-          <p class="text-sm text-blue-700 dark:text-blue-300">
+        <div v-if="showPlatformNote" class="flex items-start gap-3 p-3 rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-700">
+          <Icon name="infoCircle" size="md" class="text-gray-500 dark:text-dark-400 flex-shrink-0 mt-0.5" />
+          <p class="text-sm text-gray-700 dark:text-dark-200">
             {{ platformNote }}
           </p>
         </div>

@@ -17,17 +17,17 @@
 
       <div
         v-if="contactInfo"
-        class="card border-primary-200 bg-primary-50 p-6 dark:bg-primary-900/20"
+        class="card p-6"
       >
         <div class="flex items-center gap-4">
-          <div class="rounded-xl bg-primary-100 p-3 text-primary-600">
+          <div class="rounded-lg bg-gray-500/10 p-3 text-primary-600 dark:bg-white/5 dark:text-primary-400">
             <Icon name="chat" size="lg" />
           </div>
           <div>
-            <h3 class="font-semibold text-primary-800 dark:text-primary-200">
+            <h3 class="font-serif text-lg font-normal text-gray-950 dark:text-dark-50">
               {{ t('common.contactSupport') }}
             </h3>
-            <p class="text-sm font-medium">{{ contactInfo }}</p>
+            <p class="text-sm text-gray-600 dark:text-dark-300">{{ contactInfo }}</p>
           </div>
         </div>
       </div>

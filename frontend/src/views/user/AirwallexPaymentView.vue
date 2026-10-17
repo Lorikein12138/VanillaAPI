@@ -9,7 +9,7 @@
         <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
           <Icon name="exclamationCircle" size="xl" class="text-red-500" />
         </div>
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('payment.airwallexLoadFailed') }}</h3>
+        <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('payment.airwallexLoadFailed') }}</h3>
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ errorMessage }}</p>
         <button class="btn btn-primary mt-6" @click="router.push('/purchase')">{{ t('payment.result.backToRecharge') }}</button>
       </div>

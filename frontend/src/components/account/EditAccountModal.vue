@@ -331,8 +331,8 @@
 
             <!-- Mapping Mode -->
             <div v-else>
-              <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
-                <p class="text-xs text-purple-700 dark:text-purple-400">
+              <div class="mb-3 rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900 p-3">
+                <p class="text-xs text-gray-700 dark:text-dark-200">
                   <svg
                     class="mr-1 inline h-4 w-4"
                     fill="none"
@@ -461,8 +461,8 @@
               />
             </button>
           </div>
-          <div v-if="poolModeEnabled" class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
-            <p class="text-xs text-blue-700 dark:text-blue-400">
+          <div v-if="poolModeEnabled" class="border border-gray-200 dark:border-dark-700 rounded-lg bg-gray-50 p-3 dark:bg-dark-900">
+            <p class="text-xs text-gray-700 dark:text-dark-200">
               <Icon name="exclamationCircle" size="sm" class="mr-1 inline" :stroke-width="2" />
               {{ t('admin.accounts.poolModeInfo') }}
             </p>
@@ -519,8 +519,8 @@
               :aria-label="t('admin.accounts.explicitCacheUpstream')"
             />
           </div>
-          <div v-if="explicitCacheUpstreamEnabled" class="mt-3 rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
-            <p class="text-xs text-blue-700 dark:text-blue-400">
+          <div v-if="explicitCacheUpstreamEnabled" class="border border-gray-200 dark:border-dark-700 mt-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-900">
+            <p class="text-xs text-gray-700 dark:text-dark-200">
               <Icon name="exclamationCircle" size="sm" class="mr-1 inline" :stroke-width="2" />
               {{ t('admin.accounts.explicitCacheUpstreamInfo') }}
             </p>
@@ -781,8 +781,8 @@
         </div>
 
         <div v-if="headerOverrideEnabled" class="space-y-3">
-          <div class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
-            <p class="text-xs text-blue-700 dark:text-blue-400">
+          <div class="border border-gray-200 dark:border-dark-700 rounded-lg bg-gray-50 p-3 dark:bg-dark-900">
+            <p class="text-xs text-gray-700 dark:text-dark-200">
               <Icon name="exclamationCircle" size="sm" class="mr-1 inline" :stroke-width="2" />
               {{ t('admin.accounts.headerOverride.info') }}
             </p>
@@ -853,8 +853,8 @@
 
           <!-- Mapping Mode -->
           <div v-else>
-            <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
-              <p class="text-xs text-purple-700 dark:text-purple-400">
+            <div class="mb-3 rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900 p-3">
+              <p class="text-xs text-gray-700 dark:text-dark-200">
                 {{ t('admin.accounts.mapRequestModels') }}
               </p>
             </div>
@@ -1087,8 +1087,8 @@
 
           <!-- Mapping Mode -->
           <div v-else>
-            <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
-              <p class="text-xs text-purple-700 dark:text-purple-400">
+            <div class="mb-3 rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900 p-3">
+              <p class="text-xs text-gray-700 dark:text-dark-200">
                 <svg
                   class="mr-1 inline h-4 w-4"
                   fill="none"
@@ -1358,8 +1358,8 @@
               />
             </button>
           </div>
-          <div v-if="poolModeEnabled" class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
-            <p class="text-xs text-blue-700 dark:text-blue-400">
+          <div v-if="poolModeEnabled" class="border border-gray-200 dark:border-dark-700 rounded-lg bg-gray-50 p-3 dark:bg-dark-900">
+            <p class="text-xs text-gray-700 dark:text-dark-200">
               <Icon name="exclamationCircle" size="sm" class="mr-1 inline" :stroke-width="2" />
               {{ t('admin.accounts.poolModeInfo') }}
             </p>
@@ -1420,8 +1420,8 @@
 
         <!-- Mapping Mode Only (no toggle for Antigravity) -->
         <div>
-          <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
-            <p class="text-xs text-purple-700 dark:text-purple-400">{{ t('admin.accounts.mapRequestModels') }}</p>
+          <div class="mb-3 rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900 p-3">
+            <p class="text-xs text-gray-700 dark:text-dark-200">{{ t('admin.accounts.mapRequestModels') }}</p>
           </div>
 
           <div class="mb-3 flex flex-wrap gap-2">
@@ -1541,8 +1541,8 @@
         </div>
 
         <div v-if="tempUnschedEnabled" class="space-y-3">
-          <div class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
-            <p class="text-xs text-blue-700 dark:text-blue-400">
+          <div class="border border-gray-200 dark:border-dark-700 rounded-lg bg-gray-50 p-3 dark:bg-dark-900">
+            <p class="text-xs text-gray-700 dark:text-dark-200">
               <Icon name="exclamationTriangle" size="sm" class="mr-1 inline" :stroke-width="2" />
               {{ t('admin.accounts.tempUnschedulable.notice') }}
             </p>
@@ -2122,7 +2122,7 @@
       >
         <div class="flex items-start justify-between gap-4">
           <div>
-            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+            <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
               {{ t('admin.accounts.opencodeGo.title') }}
             </h3>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">

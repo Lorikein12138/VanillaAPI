@@ -14,7 +14,7 @@
 
     <div :class="props.embedded ? 'space-y-4' : 'divide-y divide-gray-100 dark:divide-dark-700'">
       <div v-if="props.embedded">
-        <p class="text-sm font-semibold text-gray-900 dark:text-white">
+        <p class="font-serif text-lg font-normal text-gray-950 dark:text-dark-50">
           {{ t('profile.authBindings.title') }}
         </p>
         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -44,7 +44,7 @@
 
             <div class="min-w-0 flex-1 space-y-3">
               <div class="flex flex-wrap items-center gap-2">
-                <h3 class="font-medium text-gray-900 dark:text-white">
+                <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                   {{ item.label }}
                 </h3>
                 <span

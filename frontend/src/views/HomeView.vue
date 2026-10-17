@@ -371,7 +371,7 @@
             <div
               class="flex h-8 w-8 items-center justify-center rounded-md bg-primary-500"
             >
-              <span class="text-xs font-bold text-white">C</span>
+              <span class="text-xs font-semibold text-white">C</span>
             </div>
             <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.claude') }}</span>
             <span
@@ -386,7 +386,7 @@
             <div
               class="flex h-8 w-8 items-center justify-center rounded-md bg-emerald-700"
             >
-              <span class="text-xs font-bold text-white">G</span>
+              <span class="text-xs font-semibold text-white">G</span>
             </div>
             <span class="text-sm font-medium text-gray-700 dark:text-dark-200">GPT</span>
             <span
@@ -401,7 +401,7 @@
             <div
               class="flex h-8 w-8 items-center justify-center rounded-md bg-blue-700"
             >
-              <span class="text-xs font-bold text-white">G</span>
+              <span class="text-xs font-semibold text-white">G</span>
             </div>
             <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.gemini') }}</span>
             <span
@@ -416,7 +416,7 @@
             <div
               class="flex h-8 w-8 items-center justify-center rounded-md bg-rose-700"
             >
-              <span class="text-xs font-bold text-white">A</span>
+              <span class="text-xs font-semibold text-white">A</span>
             </div>
             <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.antigravity') }}</span>
             <span
@@ -431,7 +431,7 @@
             <div
               class="flex h-8 w-8 items-center justify-center rounded-md bg-gray-500"
             >
-              <span class="text-xs font-bold text-white">+</span>
+              <span class="text-xs font-semibold text-white">+</span>
             </div>
             <span class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('home.providers.more') }}</span>
             <span

@@ -4,7 +4,7 @@
   >
     <div class="card-header mb-4 flex shrink-0 flex-wrap items-start justify-between gap-3 !border-0 !p-0">
       <div class="min-w-0">
-        <h2 class="flex items-center gap-2 text-sm font-bold text-gray-900 dark:text-white">
+        <h2 class="flex items-center gap-2 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
           <span class="inline-flex h-4 w-4 text-sky-500" aria-hidden="true">
             <Icon name="chart" size="sm" />
           </span>

@@ -3,10 +3,10 @@
     <!-- Mini Progress Display -->
     <button
       @click="toggleTooltip"
-      class="flex cursor-pointer items-center gap-2 rounded-xl bg-purple-50 px-3 py-1.5 transition-colors hover:bg-purple-100 dark:bg-purple-900/20 dark:hover:bg-purple-900/30"
+      class="flex cursor-pointer items-center gap-2 rounded-lg bg-gray-500/10 px-3 py-1.5 transition-colors hover:bg-gray-500/15 dark:bg-white/5 dark:hover:bg-white/10"
       :title="t('subscriptionProgress.viewDetails')"
     >
-      <Icon name="creditCard" size="sm" class="text-purple-600 dark:text-purple-400" />
+      <Icon name="creditCard" size="sm" class="text-primary-600 dark:text-primary-400" />
       <div class="flex items-center gap-1.5">
         <!-- Combined progress indicator -->
         <div class="flex items-center gap-0.5">
@@ -17,7 +17,7 @@
             :class="getProgressDotClass(sub)"
           ></div>
         </div>
-        <span class="text-xs font-medium text-purple-700 dark:text-purple-300">
+        <span class="text-xs font-medium text-gray-700 dark:text-dark-200">
           {{ activeSubscriptions.length }}
         </span>
       </div>
@@ -30,7 +30,7 @@
         class="absolute right-0 z-50 mt-2 w-[340px] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl dark:border-dark-700 dark:bg-dark-800"
       >
         <div class="border-b border-gray-100 p-3 dark:border-dark-700">
-          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+          <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ t('subscriptionProgress.title') }}
           </h3>
           <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">

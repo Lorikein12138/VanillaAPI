@@ -15,8 +15,8 @@
     <div :class="props.embedded ? 'space-y-3' : 'flex flex-col gap-5 px-6 py-6 sm:flex-row sm:items-start'">
       <div
         :class="props.embedded
-          ? 'flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-xl font-bold bg-primary-50 text-primary-600 dark:bg-primary-400/10 dark:text-primary-300'
-          : 'flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-3xl font-bold bg-primary-50 text-primary-600 dark:bg-primary-400/10 dark:text-primary-300'"
+          ? 'flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-xl font-serif font-normal bg-primary-50 text-primary-600 dark:bg-primary-400/10 dark:text-primary-300'
+          : 'flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-3xl font-serif font-normal bg-primary-50 text-primary-600 dark:bg-primary-400/10 dark:text-primary-300'"
       >
         <img
           v-if="avatarPreviewUrl"
@@ -30,7 +30,7 @@
 
       <div :class="props.embedded ? 'space-y-3' : 'min-w-0 flex-1 space-y-4'">
         <div class="space-y-1">
-          <p v-if="props.embedded" class="text-sm font-semibold text-gray-900 dark:text-white">
+          <p v-if="props.embedded" class="font-serif text-[0.9375rem] text-gray-950 dark:text-dark-50">
             {{ t('profile.avatar.title') }}
           </p>
           <p v-else class="text-sm font-medium text-gray-900 dark:text-white">

@@ -19,7 +19,7 @@
               <Icon name="checkCircle" size="lg" class="text-green-600 dark:text-green-400" />
             </div>
             <div>
-              <h3 class="text-lg font-semibold text-green-800 dark:text-green-200">
+              <h3 class="text-lg font-serif font-normal text-green-800 dark:text-green-200">
                 {{ t('auth.resetEmailSent') }}
               </h3>
               <p class="mt-2 text-sm text-green-700 dark:text-green-300">

@@ -609,7 +609,7 @@ onUnmounted(() => {
 .select-dropdown-portal .select-option-group {
   @apply cursor-default select-none;
   @apply bg-gray-50 dark:bg-dark-900;
-  @apply text-[11px] font-bold uppercase tracking-wider;
+  @apply font-mono text-[11px] font-medium uppercase tracking-[0.08em];
   @apply text-gray-500 dark:text-gray-400;
 }
 

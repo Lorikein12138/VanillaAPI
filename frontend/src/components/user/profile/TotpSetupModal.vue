@@ -6,7 +6,7 @@
       <div class="relative w-full max-w-md transform rounded-xl bg-white p-6 shadow-xl transition-all dark:bg-dark-800">
         <!-- Header -->
         <div class="mb-6 text-center">
-          <h3 class="text-xl font-semibold text-gray-900 dark:text-white">
+          <h3 class="text-xl font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ t('profile.totp.setupTitle') }}
           </h3>
           <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">

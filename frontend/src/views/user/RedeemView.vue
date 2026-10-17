@@ -5,11 +5,11 @@
       <div class="card overflow-hidden">
         <div class="px-6 py-8 text-center">
           <div
-            class="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary-50 dark:bg-primary-400/10"
+            class="mb-4 inline-flex h-16 w-16 items-center justify-center rounded-lg bg-gray-500/10 dark:bg-white/5"
           >
-            <Icon name="creditCard" size="xl" class="text-primary-600 dark:text-primary-300" />
+            <Icon name="creditCard" size="xl" class="text-primary-600 dark:text-primary-400" />
           </div>
-          <p class="text-sm font-medium text-gray-600 dark:text-dark-300">{{ t('redeem.currentBalance') }}</p>
+          <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">{{ t('redeem.currentBalance') }}</p>
           <p class="mt-2 font-serif text-4xl font-normal text-gray-950 dark:text-dark-50">
             ${{ user?.balance?.toFixed(2) || '0.00' }}
           </p>
@@ -92,7 +92,7 @@
                 <Icon name="checkCircle" size="md" class="text-emerald-600 dark:text-emerald-400" />
               </div>
               <div class="flex-1">
-                <h3 class="text-sm font-semibold text-emerald-800 dark:text-emerald-300">
+                <h3 class="text-[0.9375rem] font-serif font-normal text-emerald-800 dark:text-emerald-300">
                   {{ t('redeem.redeemSuccess') }}
                 </h3>
                 <div class="mt-2 text-sm text-emerald-700 dark:text-emerald-400">
@@ -150,7 +150,7 @@
                 />
               </div>
               <div class="flex-1">
-                <h3 class="text-sm font-semibold text-red-800 dark:text-red-300">
+                <h3 class="text-[0.9375rem] font-serif font-normal text-red-800 dark:text-red-300">
                   {{ t('redeem.redeemFailed') }}
                 </h3>
                 <p class="mt-2 text-sm text-red-700 dark:text-red-400">
@@ -164,21 +164,21 @@
 
       <!-- Information Card -->
       <div
-        class="card border-primary-200 bg-primary-50 dark:border-primary-800/50 dark:bg-primary-900/20"
+        class="card"
       >
         <div class="p-6">
           <div class="flex items-start gap-4">
             <div
-              class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-primary-100 dark:bg-primary-900/30"
+              class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-gray-500/10 dark:bg-white/5"
             >
               <Icon name="infoCircle" size="md" class="text-primary-600 dark:text-primary-400" />
             </div>
             <div class="flex-1">
-              <h3 class="text-sm font-semibold text-primary-800 dark:text-primary-300">
+              <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                 {{ t('redeem.aboutCodes') }}
               </h3>
               <ul
-                class="mt-2 list-inside list-disc space-y-1 text-sm text-primary-700 dark:text-primary-400"
+                class="mt-2 list-inside list-disc space-y-1 text-sm text-gray-600 dark:text-dark-300"
               >
                 <li>{{ t('redeem.codeRule1') }}</li>
                 <li>{{ t('redeem.codeRule2') }}</li>

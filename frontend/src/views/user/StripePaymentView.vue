@@ -8,7 +8,7 @@
         <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
           <Icon name="exclamationCircle" size="xl" class="text-red-500" />
         </div>
-        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('payment.stripeLoadFailed') }}</h3>
+        <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('payment.stripeLoadFailed') }}</h3>
         <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ initError }}</p>
         <button class="btn btn-primary mt-6" @click="router.push('/purchase')">{{ t('payment.result.backToRecharge') }}</button>
       </div>
@@ -17,7 +17,7 @@
         <div v-if="order" class="card overflow-hidden">
           <div class="bg-gradient-to-br from-[#635bff] to-[#4f46e5] px-6 py-6 text-center">
             <p class="text-sm font-medium text-indigo-200">{{ t('payment.actualPay') }}</p>
-            <p class="mt-1 text-3xl font-bold text-white">{{ formatGatewayAmount(order.pay_amount) }}</p>
+            <p class="mt-1 text-3xl font-serif font-normal text-white">{{ formatGatewayAmount(order.pay_amount) }}</p>
           </div>
         </div>
 
@@ -59,7 +59,7 @@
               <div class="flex h-16 w-16 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30">
                 <Icon name="check" size="lg" class="text-green-500" />
               </div>
-              <p class="text-lg font-bold text-gray-900 dark:text-white">{{ t('payment.result.success') }}</p>
+              <p class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('payment.result.success') }}</p>
               <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.stripeSuccessProcessing') }}</p>
             </div>
           </div>

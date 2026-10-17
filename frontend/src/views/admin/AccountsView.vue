@@ -84,24 +84,24 @@
                   >
                     <div class="overflow-y-auto p-2" :style="{ maxHeight: `${accountToolsDropdownPosition.maxHeight}px` }">
                       <div class="px-2 py-2">
-                        <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                        <div class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500">
                           {{ t('admin.accounts.dataActions') }}
                         </div>
                       </div>
                       <button class="account-tools-menu-item" @click="openSyncFromCrs">
-                        <span class="account-tools-menu-icon bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300">
+                        <span class="account-tools-menu-icon bg-gray-500/10 text-gray-600 dark:bg-white/5 dark:text-dark-300">
                           <Icon name="sync" size="sm" />
                         </span>
                         <span class="flex-1 text-left">{{ t('admin.accounts.syncFromCrs') }}</span>
                       </button>
                       <button class="account-tools-menu-item" @click="openImportData">
-                        <span class="account-tools-menu-icon bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300">
+                        <span class="account-tools-menu-icon bg-gray-500/10 text-gray-600 dark:bg-white/5 dark:text-dark-300">
                           <Icon name="upload" size="sm" />
                         </span>
                         <span class="flex-1 text-left">{{ t('admin.accounts.dataImport') }}</span>
                       </button>
                       <button class="account-tools-menu-item" @click="openExportDataDialogFromMenu">
-                        <span class="account-tools-menu-icon bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300">
+                        <span class="account-tools-menu-icon bg-gray-500/10 text-gray-600 dark:bg-white/5 dark:text-dark-300">
                           <Icon name="download" size="sm" />
                         </span>
                         <span class="flex-1 text-left">
@@ -117,12 +117,12 @@
 
                       <div class="my-2 border-t border-gray-100 dark:border-dark-700"></div>
                       <div class="px-2 py-2">
-                        <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                        <div class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500">
                           {{ t('admin.accounts.toolActions') }}
                         </div>
                       </div>
                       <button class="account-tools-menu-item" @click="openErrorPassthrough">
-                        <span class="account-tools-menu-icon bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300">
+                        <span class="account-tools-menu-icon bg-gray-500/10 text-gray-600 dark:bg-white/5 dark:text-dark-300">
                           <Icon name="shield" size="sm" />
                         </span>
                         <span class="flex-1 text-left">{{ t('admin.errorPassthrough.title') }}</span>
@@ -137,7 +137,7 @@
                       <div class="my-2 border-t border-gray-100 dark:border-dark-700"></div>
                       <div class="px-2 py-2">
                         <div class="flex items-center justify-between gap-3">
-                          <span class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                          <span class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-gray-500">
                             {{ t('admin.accounts.viewColumns') }}
                           </span>
                           <Icon name="grid" size="sm" class="text-gray-400" />

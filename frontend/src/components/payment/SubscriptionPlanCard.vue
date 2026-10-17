@@ -2,7 +2,7 @@
   <div
     :class="[
       'group relative flex flex-col overflow-hidden rounded-2xl border transition-all',
-      'hover:shadow-xl hover:-translate-y-0.5',
+      'hover:border-gray-400 dark:hover:border-dark-500',
       borderClass,
       'bg-white dark:bg-dark-800',
     ]"
@@ -16,7 +16,7 @@
         <div class="min-w-0 flex-1">
           <h3
             :title="plan.name"
-            class="h-12 min-w-0 break-words [overflow-wrap:anywhere] text-base font-bold leading-6 text-gray-900 dark:text-white line-clamp-2"
+            class="h-12 min-w-0 break-words [overflow-wrap:anywhere] text-lg font-serif font-normal leading-6 text-gray-950 dark:text-dark-50 line-clamp-2"
           >
             {{ plan.name }}
           </h3>
@@ -27,7 +27,7 @@
         <div class="shrink-0 text-right">
           <div class="flex items-baseline gap-1">
             <span class="text-xs text-gray-400 dark:text-dark-500">{{ planCurrencySymbol }}</span>
-            <span :class="['text-2xl font-extrabold tracking-tight', textClass]">{{ plan.price }}</span>
+            <span :class="['text-2xl font-semibold tracking-tight', textClass]">{{ plan.price }}</span>
             <span v-if="plan.currency" class="text-xs font-medium text-gray-400 dark:text-dark-500">{{ plan.currency }}</span>
           </div>
           <div class="flex items-center justify-end gap-1">

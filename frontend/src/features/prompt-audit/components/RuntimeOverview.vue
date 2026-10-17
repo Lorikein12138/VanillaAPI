@@ -2,7 +2,7 @@
   <section aria-labelledby="prompt-runtime-title" class="border-b border-gray-200 py-6 dark:border-dark-700/60">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <h2 id="prompt-runtime-title" class="text-base font-semibold text-gray-950 dark:text-white">
+        <h2 id="prompt-runtime-title" class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
           {{ t('admin.promptAudit.runtime.title') }}
         </h2>
         <p class="mt-1 text-sm text-gray-500 dark:text-dark-300">
@@ -33,7 +33,7 @@
 
       <div class="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(220px,0.6fr)]">
         <div class="rounded-xl border border-gray-100 px-4 py-3 dark:border-dark-700/60 dark:bg-dark-900/20">
-          <h3 class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.runtime.guardMetrics') }}</h3>
+          <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('admin.promptAudit.runtime.guardMetrics') }}</h3>
           <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
             <div v-for="metric in guardMetricItems" :key="metric.label" class="rounded-lg bg-gray-50 px-2.5 py-2 dark:bg-dark-900/60">
               <p class="text-[11px] text-gray-500 dark:text-dark-400">{{ metric.label }}</p>
@@ -53,7 +53,7 @@
           </p>
         </div>
         <div class="rounded-xl border border-gray-100 px-4 py-3 dark:border-dark-700/60 dark:bg-dark-900/20">
-          <h3 class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.runtime.latest') }}</h3>
+          <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('admin.promptAudit.runtime.latest') }}</h3>
           <p class="mt-2 text-sm text-gray-600 dark:text-dark-300">
             {{ runtime.last_processed_at ? formatDate(runtime.last_processed_at) : t('admin.promptAudit.common.never') }}
           </p>

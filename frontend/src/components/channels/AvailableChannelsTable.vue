@@ -7,7 +7,7 @@
       class="!hidden w-full table-fixed border-collapse text-sm lg:!table"
     >
       <thead>
-        <tr class="border-b border-gray-100 bg-gray-50/50 text-xs font-medium uppercase tracking-wide text-gray-500 dark:border-dark-700 dark:bg-dark-800/50 dark:text-gray-400">
+        <tr class="border-b border-gray-100 bg-gray-50/50 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:border-dark-700 dark:bg-dark-800/50 dark:text-gray-400">
           <th class="w-[180px] px-4 py-3 text-center">{{ columns.name }}</th>
           <th class="w-[200px] px-4 py-3 text-left">{{ columns.description }}</th>
           <th class="w-[140px] px-4 py-3 text-left">{{ columns.platform }}</th>
@@ -84,7 +84,7 @@
                 class="flex flex-wrap items-center gap-1.5"
               >
                 <span
-                  class="inline-flex items-center gap-0.5 text-[10px] font-medium uppercase text-purple-600 dark:text-purple-400"
+                  class="inline-flex items-center gap-0.5 text-[10px] font-medium font-mono uppercase text-purple-600 dark:text-purple-400"
                   :title="t('availableChannels.exclusiveTooltip')"
                 >
                   <Icon name="shield" size="xs" class="h-3 w-3" />
@@ -118,7 +118,7 @@
                 class="flex flex-wrap items-center gap-1.5"
               >
                 <span
-                  class="inline-flex items-center gap-0.5 text-[10px] font-medium uppercase text-gray-500 dark:text-gray-400"
+                  class="inline-flex items-center gap-0.5 text-[10px] font-medium font-mono uppercase text-gray-500 dark:text-gray-400"
                   :title="t('availableChannels.publicTooltip')"
                 >
                   <Icon name="globe" size="xs" class="h-3 w-3" />
@@ -187,7 +187,7 @@
         class="border-b-2 border-gray-200 px-4 py-4 last:border-b-0 dark:border-dark-600"
       >
         <header class="mb-3 min-w-0">
-          <h3 class="break-words text-sm font-semibold text-gray-900 dark:text-white">
+          <h3 class="break-words text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ channel.name }}
           </h3>
           <p class="mt-1 break-words text-xs leading-5 text-gray-500 dark:text-gray-400">
@@ -222,7 +222,7 @@
                     class="flex min-w-0 flex-wrap items-center gap-1.5"
                   >
                     <span
-                      class="inline-flex items-center gap-0.5 text-[10px] font-medium uppercase text-purple-600 dark:text-purple-400"
+                      class="inline-flex items-center gap-0.5 text-[10px] font-medium font-mono uppercase text-purple-600 dark:text-purple-400"
                       :title="t('availableChannels.exclusiveTooltip')"
                     >
                       <Icon name="shield" size="xs" class="h-3 w-3" />
@@ -257,7 +257,7 @@
                     class="flex min-w-0 flex-wrap items-center gap-1.5"
                   >
                     <span
-                      class="inline-flex items-center gap-0.5 text-[10px] font-medium uppercase text-gray-500 dark:text-gray-400"
+                      class="inline-flex items-center gap-0.5 text-[10px] font-medium font-mono uppercase text-gray-500 dark:text-gray-400"
                       :title="t('availableChannels.publicTooltip')"
                     >
                       <Icon name="globe" size="xs" class="h-3 w-3" />

@@ -2,7 +2,7 @@
   <section v-if="state?.eligible" class="space-y-4 border-t border-gray-200 pt-4 dark:border-dark-600" data-testid="ollama-cloud-usage-settings">
     <div class="flex items-start justify-between gap-4">
       <div>
-        <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+        <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
           {{ t('admin.accounts.ollamaCloud.title') }}
         </h3>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">

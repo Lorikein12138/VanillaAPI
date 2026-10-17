@@ -5,7 +5,7 @@
     >
       <!-- Amount + Order ID -->
       <div v-if="amount" class="text-center">
-        <p class="text-3xl font-bold" :style="{ color: methodColor }">¥{{ amount }}</p>
+        <p class="text-3xl font-serif font-normal" :style="{ color: methodColor }">¥{{ amount }}</p>
         <p v-if="orderId" class="mt-1 text-sm text-gray-500 dark:text-slate-400">
           {{ t('payment.orders.orderId') }}: {{ orderId }}
         </p>

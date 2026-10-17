@@ -55,16 +55,22 @@
   margin: 0 !important;
   background-color: transparent !important;
   position: relative !important;
+  font-family: Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", "PingFang SC", "Microsoft YaHei", serif !important;
+  font-size: 19px !important;
+  font-weight: 400 !important;
+  color: #141413 !important;
 }
+.dark .theme-tour-popover .driver-popover-title { color: #FAF9F5 !important; }
 
 .driver-popover-title-text {
-  font-size: 18px !important;
-  font-weight: 700 !important;
+  font-family: Georgia, "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif !important;
+  font-size: 19px !important;
+  font-weight: 400 !important;
   color: #141413 !important;
   line-height: 1.3 !important;
   padding-right: 100px !important; /* Ensure title doesn't overlap Skip/Close */
 }
-.dark .driver-popover-title-text { color: #ffffff !important; }
+.dark .driver-popover-title-text { color: #FAF9F5 !important; }
 
 /* Close Button */
 .theme-tour-popover .driver-popover-close-btn {
@@ -98,6 +104,24 @@
   background-color: transparent !important;
 }
 .dark .theme-tour-popover .driver-popover-description { color: #C2C0B6 !important; }
+
+/* Step copy carries inline callout colours; fold them into the editorial palette. */
+.theme-tour-popover .driver-popover-description [style*="border-left"] {
+  background: #FAF9F5 !important;
+  border-left: 2px solid #D97757 !important;
+  border-radius: 0 !important;
+  color: #3D3D3A !important;
+}
+.theme-tour-popover .driver-popover-description [style*="border-left: 3px solid #dca968"] { border-left-color: #C08532 !important; }
+.theme-tour-popover .driver-popover-description [style*="border-left: 3px solid #ce6a5c"] { border-left-color: #BF4D43 !important; }
+.dark .theme-tour-popover .driver-popover-description [style*="border-left"] {
+  background: #2A2A28 !important;
+  color: #DEDCD1 !important;
+}
+.theme-tour-popover .driver-popover-description [style*="color: #7aaa8f"] { color: #C6613F !important; }
+.dark .theme-tour-popover .driver-popover-description [style*="color: #7aaa8f"] { color: #D97757 !important; }
+.theme-tour-popover .driver-popover-description [style*="color: #73726c"] { color: #73726C !important; }
+.dark .theme-tour-popover .driver-popover-description [style*="color: #73726c"] { color: #9C9A92 !important; }
 
 /* 5. Footer Area - Flex Row with Left/Right Containers */
 .theme-tour-popover .driver-popover-footer {

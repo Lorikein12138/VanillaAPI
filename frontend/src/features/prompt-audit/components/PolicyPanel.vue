@@ -1,7 +1,7 @@
 <template>
   <section aria-labelledby="prompt-policy-title" class="py-6">
     <div>
-      <h2 id="prompt-policy-title" class="text-base font-semibold text-gray-950 dark:text-white">{{ t('admin.promptAudit.policy.title') }}</h2>
+      <h2 id="prompt-policy-title" class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('admin.promptAudit.policy.title') }}</h2>
       <p class="mt-1 text-sm text-gray-500 dark:text-dark-300">{{ t('admin.promptAudit.policy.description') }}</p>
     </div>
 

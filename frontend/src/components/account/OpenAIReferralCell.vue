@@ -3,7 +3,7 @@
     <button
       type="button"
       data-testid="referral-count"
-      class="rounded px-1.5 py-0.5 text-[10px] font-medium text-violet-600 hover:bg-violet-50 disabled:opacity-50 dark:text-violet-400 dark:hover:bg-violet-900/30"
+      class="rounded px-1.5 py-0.5 text-[10px] font-medium text-primary-600 hover:bg-gray-500/10 disabled:opacity-50 dark:text-primary-400 dark:hover:bg-white/5"
       :disabled="loading || sending"
       :title="countTitle"
       @click="refresh()"
@@ -13,7 +13,7 @@
     <button
       type="button"
       data-testid="referral-open"
-      class="rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
+      class="rounded px-1.5 py-0.5 text-[10px] font-medium text-primary-600 hover:bg-gray-500/10 disabled:opacity-50 dark:text-primary-400 dark:hover:bg-white/5"
       :disabled="sending || isShadow"
       :title="isShadow ? t('admin.accounts.openaiReferral.shadowHint') : undefined"
       @click="openDialog"
@@ -34,9 +34,9 @@
         <p class="text-sm text-gray-600 dark:text-gray-300">
           {{ t('admin.accounts.openaiReferral.fromAccount') }} <strong>{{ account.name }}</strong>
         </p>
-        <div class="flex items-center justify-between rounded-lg bg-violet-50 p-3 text-sm dark:bg-violet-900/20">
+        <div class="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900 p-3 text-sm">
           <div>
-            <p class="font-medium text-violet-800 dark:text-violet-300">{{ programLabel }}</p>
+            <p class="font-medium text-gray-950 dark:text-dark-50">{{ programLabel }}</p>
             <p class="mt-1 text-gray-600 dark:text-gray-300">{{ t('admin.accounts.openaiReferral.available') }} {{ countDisplay }}</p>
           </div>
           <button type="button" class="btn btn-secondary btn-sm" :disabled="loading || sending" @click="refresh()">

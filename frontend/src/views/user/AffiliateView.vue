@@ -10,32 +10,32 @@
       <template v-else-if="detail">
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div class="card p-5">
-            <p class="flex items-center gap-1.5 text-sm text-gray-500 dark:text-dark-400">
-              <Icon name="dollar" size="sm" class="text-primary-500" />
+            <p class="flex items-center gap-1.5 font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">
+              <Icon name="dollar" size="xs" class="text-primary-500" />
               {{ t('affiliate.stats.rebateRate') }}
             </p>
-            <p class="mt-2 text-2xl font-semibold text-primary-600 dark:text-primary-400">
-              {{ formattedRebateRate }}<span class="ml-0.5 text-base font-medium">%</span>
+            <p class="mt-2 font-serif text-[1.75rem] font-normal leading-tight text-primary-700 dark:text-primary-400">
+              {{ formattedRebateRate }}<span class="ml-0.5 text-lg">%</span>
             </p>
             <p class="mt-1 text-xs text-gray-400 dark:text-dark-500">
               {{ t('affiliate.stats.rebateRateHint') }}
             </p>
           </div>
           <div class="card p-5">
-            <p class="text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.invitedUsers') }}</p>
-            <p class="mt-2 text-2xl font-semibold text-gray-900 dark:text-white">
+            <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.invitedUsers') }}</p>
+            <p class="mt-2 font-serif text-[1.75rem] font-normal leading-tight text-gray-950 dark:text-dark-50">
               {{ formatCount(detail.aff_count) }}
             </p>
           </div>
           <div class="card p-5">
-            <p class="text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.availableQuota') }}</p>
-            <p class="mt-2 text-2xl font-semibold text-emerald-600 dark:text-emerald-400">
+            <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.availableQuota') }}</p>
+            <p class="mt-2 font-serif text-[1.75rem] font-normal leading-tight text-emerald-700 dark:text-emerald-400">
               {{ formatCurrency(detail.aff_quota) }}
             </p>
           </div>
           <div class="card p-5">
-            <p class="text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.totalQuota') }}</p>
-            <p class="mt-2 text-2xl font-semibold text-gray-900 dark:text-white">
+            <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.totalQuota') }}</p>
+            <p class="mt-2 font-serif text-[1.75rem] font-normal leading-tight text-gray-950 dark:text-dark-50">
               {{ formatCurrency(detail.aff_history_quota) }}
             </p>
             <p v-if="detail.aff_frozen_quota > 0" class="mt-1 text-xs text-amber-600 dark:text-amber-400">
@@ -45,14 +45,14 @@
         </div>
 
         <div class="card p-6">
-          <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('affiliate.title') }}</h3>
+          <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('affiliate.title') }}</h3>
           <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.description') }}</p>
 
           <div class="mt-5 grid gap-4 md:grid-cols-2">
             <div class="space-y-2">
               <p class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('affiliate.yourCode') }}</p>
-              <div class="flex flex-col items-stretch gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 dark:border-dark-700 dark:bg-dark-900 sm:flex-row sm:items-center">
-                <code class="min-w-0 break-all text-sm font-semibold text-gray-900 dark:text-white sm:flex-1 sm:truncate">{{ detail.aff_code }}</code>
+              <div class="flex flex-col items-stretch gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 dark:border-dark-700 dark:bg-dark-900 sm:flex-row sm:items-center">
+                <code class="min-w-0 break-all font-mono text-sm tracking-wide text-gray-950 dark:text-dark-50 sm:flex-1 sm:truncate">{{ detail.aff_code }}</code>
                 <button class="btn btn-secondary btn-sm w-full sm:w-auto sm:shrink-0" @click="copyCode">
                   <Icon name="copy" size="sm" />
                   <span>{{ t('affiliate.copyCode') }}</span>
@@ -62,8 +62,8 @@
 
             <div class="space-y-2">
               <p class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('affiliate.inviteLink') }}</p>
-              <div class="flex flex-col items-stretch gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 dark:border-dark-700 dark:bg-dark-900 sm:flex-row sm:items-center">
-                <code class="min-w-0 break-all text-sm text-gray-700 dark:text-gray-300 sm:flex-1 sm:truncate">{{ inviteLink }}</code>
+              <div class="flex flex-col items-stretch gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 dark:border-dark-700 dark:bg-dark-900 sm:flex-row sm:items-center">
+                <code class="min-w-0 break-all font-mono text-[13px] text-gray-700 dark:text-dark-200 sm:flex-1 sm:truncate">{{ inviteLink }}</code>
                 <button class="btn btn-secondary btn-sm w-full sm:w-auto sm:shrink-0" @click="copyInviteLink">
                   <Icon name="copy" size="sm" />
                   <span>{{ t('affiliate.copyLink') }}</span>
@@ -72,9 +72,9 @@
             </div>
           </div>
 
-          <div class="mt-5 rounded-xl border border-primary-200 bg-primary-50 p-4 dark:border-primary-900/40 dark:bg-primary-900/20">
-            <p class="text-sm font-medium text-primary-800 dark:text-primary-200">{{ t('affiliate.tips.title') }}</p>
-            <ul class="mt-2 space-y-1 text-sm text-primary-700 dark:text-primary-300">
+          <div class="mt-5 border-l-2 border-primary-500 bg-gray-50 py-3 pl-4 pr-3 dark:border-primary-400 dark:bg-dark-900">
+            <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">{{ t('affiliate.tips.title') }}</p>
+            <ul class="mt-2 space-y-1 text-sm text-gray-700 dark:text-dark-200">
               <li>1. {{ t('affiliate.tips.line1') }}</li>
               <li>2. {{ t('affiliate.tips.line2', { rate: `${formattedRebateRate}%` }) }}</li>
               <li>3. {{ t('affiliate.tips.line3') }}</li>
@@ -86,7 +86,7 @@
         <div class="card p-6">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('affiliate.transfer.title') }}</h3>
+              <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('affiliate.transfer.title') }}</h3>
               <p class="mt-1 text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.transfer.description') }}</p>
             </div>
             <button
@@ -99,20 +99,20 @@
               <span>{{ transferring ? t('affiliate.transfer.transferring') : t('affiliate.transfer.button') }}</span>
             </button>
           </div>
-          <p v-if="detail.aff_quota <= 0" class="mt-3 text-sm text-amber-600 dark:text-amber-400">
+          <p v-if="detail.aff_quota <= 0" class="mt-3 text-sm text-gray-500 dark:text-dark-400">
             {{ t('affiliate.transfer.empty') }}
           </p>
         </div>
 
         <div class="card p-6">
-          <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('affiliate.invitees.title') }}</h3>
-          <div v-if="detail.invitees.length === 0" class="mt-4 rounded-xl border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
+          <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">{{ t('affiliate.invitees.title') }}</h3>
+          <div v-if="detail.invitees.length === 0" class="mt-4 rounded-lg border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
             {{ t('affiliate.invitees.empty') }}
           </div>
           <div v-else class="mt-4 overflow-x-auto">
             <table class="w-full min-w-[560px] text-left text-sm">
               <thead>
-                <tr class="border-b border-gray-200 text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                <tr class="border-b border-gray-200 font-mono text-[11px] uppercase tracking-[0.08em] text-gray-500 dark:border-dark-700 dark:text-dark-400">
                   <th class="px-3 py-2 font-medium">{{ t('affiliate.invitees.columns.email') }}</th>
                   <th class="px-3 py-2 font-medium">{{ t('affiliate.invitees.columns.username') }}</th>
                   <th class="px-3 py-2 font-medium text-right">{{ t('affiliate.invitees.columns.rebate') }}</th>

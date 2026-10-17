@@ -19,7 +19,7 @@
       <div v-else class="overflow-x-auto">
         <table class="min-w-full text-sm">
           <thead>
-            <tr class="border-b border-gray-200 text-gray-700 dark:border-dark-700 dark:text-gray-300">
+            <tr class="border-b border-gray-200 text-gray-700 dark:border-dark-700 dark:text-dark-300 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
               <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.platform') }}</th>
               <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.daily') }}</th>
               <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.weekly') }}</th>

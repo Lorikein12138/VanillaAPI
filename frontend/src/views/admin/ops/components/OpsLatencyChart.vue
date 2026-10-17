@@ -20,7 +20,7 @@ const { t } = useI18n()
 
 const isDarkMode = computed(() => document.documentElement.classList.contains('dark'))
 const colors = computed(() => ({
-  blue: '#628ab9',
+  blue: '#6a9bcc',
   grid: isDarkMode.value ? '#3d3d3a' : '#f0eee6',
   text: isDarkMode.value ? '#9c9a92' : '#73726c'
 }))
@@ -76,8 +76,8 @@ const options = computed(() => {
 <template>
   <div class="flex h-full flex-col rounded-3xl bg-white p-6 shadow-sm ring-1 ring-gray-900/5 dark:bg-dark-800 dark:ring-dark-700">
     <div class="mb-4 flex items-center justify-between">
-      <h3 class="flex items-center gap-2 text-sm font-bold text-gray-900 dark:text-white">
-        <svg class="h-4 w-4 text-purple-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <h3 class="flex items-center gap-2 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
+        <svg class="h-4 w-4 text-gray-400 dark:text-dark-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path
             stroke-linecap="round"
             stroke-linejoin="round"
