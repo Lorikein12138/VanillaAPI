@@ -1,3 +1,4 @@
+import { defineComponent, h, nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
@@ -16,6 +17,15 @@ const login2FA = vi.fn()
 const apiClientPost = vi.fn()
 const sendVerifyCode = vi.fn()
 const sendPendingOAuthVerifyCode = vi.fn()
+
+const CaptchaChallengeStub = defineComponent({
+  name: 'TurnstileWidgetStub',
+  emits: ['verify', 'expire', 'error'],
+  setup(_, { expose }) {
+    expose({ reset: vi.fn(), verifyAction: vi.fn() })
+    return () => h('div', { 'data-testid': 'turnstile-stub' })
+  }
+})
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({
@@ -736,5 +746,62 @@ describe('LinuxDoCallbackView', () => {
     })
     expect(setToken).toHaveBeenCalledWith('2fa-access-token')
     expect(replace).toHaveBeenCalledWith('/profile')
+  })
+
+  it('requires a replacement captcha token in the real create-account form after expiry', async () => {
+    getPublicSettings.mockResolvedValue({ turnstile_enabled: true, turnstile_site_key: 'site-key' })
+    exchangePendingOAuthCompletion.mockResolvedValue({ error: 'email_required', redirect: '/welcome' })
+    apiClientPost.mockResolvedValue({ data: { access_token: 'access', refresh_token: 'refresh', expires_in: 3600, token_type: 'Bearer' } })
+    const wrapper = mount(LinuxDoCallbackView, {
+      global: { stubs: { AuthLayout: { template: '<div><slot /></div>' }, Icon: true, RouterLink: { template: '<a><slot /></a>' }, TurnstileWidget: CaptchaChallengeStub, transition: false } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="linuxdo-create-account-email"]').setValue('new@example.com')
+    await wrapper.get('[data-testid="linuxdo-create-account-password"]').setValue('secret-123')
+    await wrapper.get('[data-testid="linuxdo-create-account-verify-code"]').setValue('246810')
+
+    await wrapper.get('[data-testid="linuxdo-create-account-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiClientPost).not.toHaveBeenCalled()
+
+    const captcha = wrapper.getComponent(CaptchaChallengeStub)
+    captcha.vm.$emit('verify', 'expired-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="linuxdo-create-account-submit"]').attributes('disabled')).toBeUndefined()
+    captcha.vm.$emit('expire')
+    await nextTick()
+    expect(wrapper.get('[data-testid="linuxdo-create-account-submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(apiClientPost).not.toHaveBeenCalled()
+
+    captcha.vm.$emit('verify', 'replacement-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="linuxdo-create-account-submit"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="linuxdo-create-account-submit"]').trigger('click')
+    await flushPromises()
+    expect(apiClientPost).toHaveBeenCalledWith('/auth/oauth/pending/create-account', expect.objectContaining({
+      email: 'new@example.com',
+      password: 'secret-123',
+      verify_code: '246810',
+      turnstile_token: 'replacement-proof'
+    }))
+  })
+
+  it('keeps the create-account branch free of a Turnstile placeholder when disabled', async () => {
+    getPublicSettings.mockResolvedValue({ turnstile_enabled: false, turnstile_site_key: '' })
+    exchangePendingOAuthCompletion.mockResolvedValue({ error: 'email_required', redirect: '/welcome' })
+    apiClientPost.mockResolvedValue({ data: { access_token: 'access', refresh_token: 'refresh', expires_in: 3600, token_type: 'Bearer' } })
+    const wrapper = mount(LinuxDoCallbackView, {
+      global: { stubs: { AuthLayout: { template: '<div><slot /></div>' }, Icon: true, RouterLink: { template: '<a><slot /></a>' }, TurnstileWidget: CaptchaChallengeStub, transition: false } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="linuxdo-create-account-email"]').setValue('new@example.com')
+    await wrapper.get('[data-testid="linuxdo-create-account-password"]').setValue('secret-123')
+    await wrapper.get('[data-testid="linuxdo-create-account-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="turnstile-stub"]').exists()).toBe(false)
+    expect(apiClientPost).toHaveBeenCalledWith('/auth/oauth/pending/create-account', expect.not.objectContaining({ turnstile_token: expect.anything() }))
   })
 })
