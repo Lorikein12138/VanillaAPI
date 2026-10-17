@@ -292,6 +292,7 @@ export default {
     paymentAmount: 'Payment Amount',
     creditedBalance: 'Credited Balance',
     rechargeBonus: {
+      noticeTag: 'Bonus',
       creditedShort: 'Get {amount}',
       payShort: 'Pay {amount}',
       amountLabel: 'Bonus',
