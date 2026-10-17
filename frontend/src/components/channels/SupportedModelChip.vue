@@ -48,7 +48,7 @@
           <span class="truncate font-semibold">{{ model.name }}</span>
           <span
             v-if="model.platform"
-            class="flex-shrink-0 rounded bg-white/70 px-1.5 py-0.5 text-[10px] uppercase tracking-wide dark:bg-dark-900/60"
+            class="flex-shrink-0 rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-[0.08em] dark:bg-dark-900/60"
           >
             {{ model.platform }}
           </span>

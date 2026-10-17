@@ -58,7 +58,7 @@
       </p>
 
       <div
-        class="border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200"
+        class="border-l-2 border-primary-500 bg-gray-50 px-4 py-3 text-sm text-gray-700 dark:border-primary-400 dark:bg-dark-900 dark:text-dark-200"
       >
         <p>{{ t("admin.plugins.runtimeNotice") }}</p>
         <p class="mt-1">{{ t("admin.plugins.menuNotice") }}</p>
@@ -96,7 +96,7 @@
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
                 <h3
-                  class="truncate text-base font-semibold text-gray-900 dark:text-white"
+                  class="truncate text-lg font-serif font-normal text-gray-950 dark:text-dark-50"
                 >
                   {{ plugin.name }}
                 </h3>
@@ -133,7 +133,7 @@
 
           <div class="grid grid-cols-1 gap-x-6 gap-y-4 p-5 md:grid-cols-2">
             <div>
-              <p class="text-xs font-medium uppercase text-gray-500">
+              <p class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">
                 {{ t("admin.plugins.compatibility") }}
               </p>
               <div class="mt-2 flex items-center gap-2">
@@ -172,7 +172,7 @@
             </div>
 
             <div>
-              <p class="text-xs font-medium uppercase text-gray-500">
+              <p class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">
                 {{ t("admin.plugins.runtime") }}
               </p>
               <div class="mt-2 flex flex-wrap gap-2 text-xs">

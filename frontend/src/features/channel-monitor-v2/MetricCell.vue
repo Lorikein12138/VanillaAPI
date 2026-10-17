@@ -10,7 +10,7 @@
       aria-hidden="true"
     ></div>
     <div class="min-w-0 flex-1">
-      <span class="stat-label text-[10px] font-bold uppercase tracking-wider text-gray-400">{{ label }}</span>
+      <span class="stat-label text-[10px] font-medium font-mono uppercase tracking-[0.08em] text-gray-400">{{ label }}</span>
       <strong
         class="stat-value mt-1 block overflow-visible text-xl tabular-nums leading-tight !text-clip !whitespace-normal"
         :class="stateClass"

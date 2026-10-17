@@ -73,7 +73,8 @@ export default {
           600: '#4D4C48',
           700: '#3D3D3A',
           800: '#30302E',
-          900: '#1F1E1D',
+          900: '#2A2A28', // 卡片内嵌面板：介于页面与卡片之间，不再是一块黑洞
+          sidebar: '#1F1E1D',
           950: '#262624'
         }
       },
@@ -109,7 +110,11 @@ export default {
         'glow-lg': '0 0 0 1px rgba(198, 97, 63, 0.35)',
         card: '0 1px 2px rgba(20, 20, 19, 0.03)',
         'card-hover': '0 4px 16px rgba(20, 20, 19, 0.06)',
-        'inner-glow': 'none'
+        'inner-glow': 'none',
+        // 编辑风：浮层阴影压低、偏暖
+        lg: '0 2px 4px rgba(20, 20, 19, 0.04), 0 8px 20px rgba(20, 20, 19, 0.07)',
+        xl: '0 2px 6px rgba(20, 20, 19, 0.05), 0 14px 32px rgba(20, 20, 19, 0.09)',
+        '2xl': '0 4px 10px rgba(20, 20, 19, 0.06), 0 22px 48px rgba(20, 20, 19, 0.14)'
       },
       backgroundImage: {
         'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
@@ -164,8 +169,8 @@ export default {
       // 编辑风：收紧圆角
       borderRadius: {
         xl: '0.5rem',
-        '2xl': '0.625rem',
-        '3xl': '0.75rem',
+        '2xl': '0.5rem',
+        '3xl': '0.5rem',
         '4xl': '1rem'
       }
     }

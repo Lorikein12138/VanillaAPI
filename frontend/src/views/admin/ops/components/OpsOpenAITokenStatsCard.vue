@@ -160,7 +160,7 @@ function onNextPage() {
 <template>
   <section class="card p-4 md:p-5">
     <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-      <h3 class="text-sm font-bold text-gray-900 dark:text-white">
+      <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
         {{ t('admin.ops.openaiTokenStats.title') }}
       </h3>
       <div class="flex flex-wrap items-center gap-2">
@@ -248,14 +248,14 @@ function onNextPage() {
           </div>
           <table v-else class="min-w-full text-left text-xs md:text-sm">
             <thead class="sticky top-0 z-10 bg-white dark:bg-dark-800">
-              <tr class="border-b border-gray-200 text-gray-500 dark:border-dark-700 dark:text-gray-400">
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.model') }}</th>
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.requestCount') }}</th>
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.avgTokensPerSec') }}</th>
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.avgFirstTokenMs') }}</th>
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.totalOutputTokens') }}</th>
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.avgDurationMs') }}</th>
-                <th class="px-2 py-2 font-semibold">{{ t('admin.ops.openaiTokenStats.table.requestsWithFirstToken') }}</th>
+              <tr class="border-b border-gray-200 text-gray-500 dark:border-dark-700 dark:text-dark-400 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.model') }}</th>
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.requestCount') }}</th>
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.avgTokensPerSec') }}</th>
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.avgFirstTokenMs') }}</th>
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.totalOutputTokens') }}</th>
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.avgDurationMs') }}</th>
+                <th class="px-2 py-2 font-medium">{{ t('admin.ops.openaiTokenStats.table.requestsWithFirstToken') }}</th>
               </tr>
             </thead>
             <tbody>

@@ -27,7 +27,7 @@
 
         <aside class="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm dark:border-dark-700 dark:bg-dark-900/60">
           <div>
-            <p class="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-dark-400">
+            <p class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">
               {{ t('adminCompliance.version') }}
             </p>
             <p class="mt-1 break-all font-mono text-gray-900 dark:text-white">
@@ -191,7 +191,7 @@ async function logout(): Promise<void> {
 }
 
 .legal-document-content :deep(h1) {
-  @apply mb-4 text-2xl font-bold text-gray-950 dark:text-white;
+  @apply mb-4 font-serif text-2xl font-normal text-gray-950 dark:text-dark-50;
 }
 
 .legal-document-content :deep(h2) {

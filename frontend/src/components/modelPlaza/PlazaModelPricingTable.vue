@@ -13,7 +13,7 @@
       </colgroup>
       <thead>
         <tr
-          class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-dark-400"
+          class="text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400"
         >
           <th
             rowspan="2"
@@ -44,7 +44,7 @@
           </th>
         </tr>
         <tr
-          class="border-b border-gray-200 text-left text-[11px] font-medium uppercase leading-4 tracking-wide text-gray-400 dark:border-dark-700 dark:text-dark-500"
+          class="border-b border-gray-200 text-left text-[11px] font-medium font-mono uppercase leading-4 tracking-[0.08em] text-gray-400 dark:border-dark-700 dark:text-dark-500"
         >
           <th class="pz-bg px-3 py-2 font-medium">{{ t('modelPlaza.table.input') }}</th>
           <th class="pz-bg px-3 py-2 font-medium">{{ t('modelPlaza.table.output') }}</th>
@@ -284,20 +284,20 @@
           >
             <span
               v-if="period"
-              class="font-bold text-primary-600 dark:text-primary-400"
+              class="font-semibold text-primary-600 dark:text-primary-400"
               :title="t('modelPlaza.table.timePricingRateHint', { rate: effectiveRate, multiplier: period.multiplier })"
               >{{ periodRate(period) }}x</span
             >
             <span
               v-else-if="usesIndependentMediaRate(m)"
-              class="font-bold text-gray-700 dark:text-gray-300"
+              class="font-semibold text-gray-700 dark:text-gray-300"
               >{{ requestRate(m) }}x</span
             >
             <template v-else-if="hasCustomRate">
               <span class="mr-1 text-gray-400 line-through dark:text-dark-500">{{ rateMultiplier }}x</span>
-              <span class="font-bold text-primary-600 dark:text-primary-400">{{ requestRate(m) }}x</span>
+              <span class="font-semibold text-primary-600 dark:text-primary-400">{{ requestRate(m) }}x</span>
             </template>
-            <span v-else class="font-bold text-gray-700 dark:text-gray-300">{{ requestRate(m) }}x</span>
+            <span v-else class="font-semibold text-gray-700 dark:text-gray-300">{{ requestRate(m) }}x</span>
           </td>
         </tr>
       </tbody>

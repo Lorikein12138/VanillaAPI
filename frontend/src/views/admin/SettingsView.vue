@@ -2212,7 +2212,7 @@
                   </div>
                   <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
                     <div class="md:col-span-2">
-                      <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                      <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                         {{ t("admin.settings.tencentCaptcha.appCredentialsTitle") }}
                       </h3>
                       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2247,7 +2247,7 @@
                       </p>
                     </div>
                     <div class="border-t border-gray-100 pt-5 md:col-span-2 dark:border-dark-700">
-                      <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                      <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                         {{ t("admin.settings.tencentCaptcha.cloudCredentialsTitle") }}
                       </h3>
                       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -2577,7 +2577,7 @@
                 <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-700">
                   <div class="flex items-start justify-between gap-4">
                     <div>
-                      <h3 class="font-medium text-gray-900 dark:text-white">
+                      <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                         GitHub
                       </h3>
                       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2687,7 +2687,7 @@
                 <div class="rounded-lg border border-gray-200 p-4 dark:border-dark-700">
                   <div class="flex items-start justify-between gap-4">
                     <div>
-                      <h3 class="font-medium text-gray-900 dark:text-white">
+                      <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                         Google
                       </h3>
                       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2819,7 +2819,7 @@
                   >
                     <div class="flex items-start justify-between gap-4">
                       <div>
-                        <h3 class="font-medium text-gray-900 dark:text-white">
+                        <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                           {{ localText("PC 应用", "PC App") }}
                         </h3>
                         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2892,7 +2892,7 @@
                   >
                     <div class="flex items-start justify-between gap-4">
                       <div>
-                        <h3 class="font-medium text-gray-900 dark:text-white">
+                        <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                           {{ localText("公众号", "Official Account") }}
                         </h3>
                         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2970,7 +2970,7 @@
                   >
                     <div class="flex items-start justify-between gap-4">
                       <div>
-                        <h3 class="font-medium text-gray-900 dark:text-white">
+                        <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                           {{ localText("移动应用", "Mobile App") }}
                         </h3>
                         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -4047,7 +4047,7 @@
                 <div class="overflow-x-auto">
                   <table class="min-w-full text-sm">
                     <thead>
-                      <tr class="text-left text-xs text-gray-500 dark:text-gray-400">
+                      <tr class="text-left text-gray-500 dark:text-dark-400 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
                         <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.platform") }}</th>
                         <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.daily") }}</th>
                         <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.weekly") }}</th>
@@ -4382,7 +4382,7 @@
                       <div class="overflow-x-auto">
                         <table class="min-w-full text-sm">
                           <thead>
-                            <tr class="text-left text-xs text-gray-500 dark:text-gray-400">
+                            <tr class="text-left text-gray-500 dark:text-dark-400 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
                               <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.platform") }}</th>
                               <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.daily") }}</th>
                               <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.weekly") }}</th>
@@ -4503,7 +4503,7 @@
             </div>
             <div class="p-6 space-y-4">
                 <div>
-                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">
+                  <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
                     {{ t("admin.settings.gatewayForwarding.codexClientRestrictionTitle") }}
                   </h3>
                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -6280,7 +6280,7 @@
               class="mx-4 w-full max-w-lg rounded-xl bg-white p-6 shadow-xl dark:bg-dark-800"
             >
               <h3
-                class="mb-4 text-lg font-semibold text-gray-900 dark:text-white"
+                class="mb-4 text-lg font-serif font-normal text-gray-950 dark:text-dark-50"
               >
                 {{ t("admin.settings.webSearchEmulation.testResultTitle") }}
               </h3>
@@ -6333,7 +6333,7 @@
                   <a
                     :href="r.url"
                     target="_blank"
-                    class="text-sm font-medium text-blue-600 hover:underline dark:text-blue-400"
+                    class="text-sm font-medium text-primary-600 hover:underline dark:text-primary-400"
                     >{{ r.title }}</a
                   >
                   <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
@@ -6401,10 +6401,10 @@
             <div class="space-y-6 p-6">
               <!-- Backend Mode -->
               <div
-                class="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-900/20"
+                class="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-dark-700 dark:bg-dark-900"
               >
                 <div>
-                  <h3 class="text-sm font-medium text-gray-900 dark:text-white">
+                  <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                     {{ t("admin.settings.site.backendMode") }}
                   </h3>
                   <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -6471,7 +6471,7 @@
 
               <!-- Global Table Preferences -->
               <div class="border-t border-gray-100 pt-4 dark:border-dark-700">
-                <h3 class="text-sm font-medium text-gray-900 dark:text-white">
+                <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                   {{ t("admin.settings.site.tablePreferencesTitle") }}
                 </h3>
                 <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -7045,7 +7045,7 @@
               <div>
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <h3 class="text-sm font-medium text-gray-900 dark:text-white">
+                    <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                       {{ localText("协议文档", "Agreement documents") }}
                     </h3>
                     <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -7610,7 +7610,7 @@
               <div class="border-t border-gray-100 pt-6 dark:border-dark-700">
                 <div class="mb-3 flex items-center justify-between">
                   <div>
-                    <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
+                    <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
                       {{ t('admin.settings.features.affiliate.customUsers.title') }}
                     </h3>
                     <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
@@ -7655,11 +7655,11 @@
                             @change="toggleAffiliateSelectAll"
                           />
                         </th>
-                        <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.email') }}</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.username') }}</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.code') }}</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.rate') }}</th>
-                        <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.actions') }}</th>
+                        <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.email') }}</th>
+                        <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.username') }}</th>
+                        <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.code') }}</th>
+                        <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.rate') }}</th>
+                        <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.actions') }}</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-900">
@@ -7749,7 +7749,7 @@
           @click.self="closeAffiliateModal"
         >
           <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-dark-900">
-            <h3 class="mb-4 text-lg font-semibold">
+            <h3 class="mb-4 text-lg font-serif font-normal">
               {{ affiliateModal.mode === 'add' ? t('admin.settings.features.affiliate.modal.addTitle') : t('admin.settings.features.affiliate.modal.editTitle') }}
             </h3>
             <div class="space-y-4">
@@ -7758,7 +7758,7 @@
                 <!-- Chip showing the picked user; clicking it re-opens the search -->
                 <div
                   v-if="affiliateModal.selectedUser"
-                  class="flex items-center justify-between rounded-md border border-primary-200 bg-primary-50 px-3 py-2 dark:border-primary-700/50 dark:bg-primary-900/20"
+                  class="flex items-center justify-between rounded-md border border-gray-200 bg-gray-50 px-3 py-2 dark:border-dark-700 dark:bg-dark-900"
                 >
                   <div class="text-sm">
                     <span class="font-medium text-gray-900 dark:text-white">{{ affiliateModal.selectedUser.email }}</span>
@@ -7874,7 +7874,7 @@
           @click.self="affiliateBatchModal.open = false"
         >
           <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-dark-900">
-            <h3 class="mb-4 text-lg font-semibold">
+            <h3 class="mb-4 text-lg font-serif font-normal">
               {{ t('admin.settings.features.affiliate.batchModal.title', { count: affiliateState.selected.length }) }}
             </h3>
             <p class="mb-4 text-sm text-gray-500">
@@ -8490,7 +8490,7 @@
                   class="mt-0.5 flex-shrink-0 text-gray-400 dark:text-gray-500"
                 />
                 <div>
-                  <h3 class="font-medium text-gray-900 dark:text-white">
+                  <h3 class="font-serif font-normal text-gray-950 dark:text-dark-50 text-[0.9375rem]">
                     {{ t("admin.settings.emailTabDisabledTitle") }}
                   </h3>
                   <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -8736,7 +8736,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h3 class="text-base font-medium text-gray-900 dark:text-white">
+              <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
                 {{ t("admin.settings.subscriptionExpiryNotify.title") }}
               </h3>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -8767,7 +8767,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h3 class="text-base font-medium text-gray-900 dark:text-white">
+              <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
                 {{ t("admin.settings.balanceNotify.title") }}
               </h3>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -8827,7 +8827,7 @@
             <div
               class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
             >
-              <h3 class="text-base font-medium text-gray-900 dark:text-white">
+              <h3 class="text-lg font-serif font-normal text-gray-950 dark:text-dark-50">
                 {{ t("admin.settings.quotaNotify.title") }}
               </h3>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -13351,11 +13351,8 @@ watch(
 
 /* ============ 系统设置 Tab 导航 ============ */
 .settings-tabs-shell {
-  @apply sticky z-20 -mx-1 rounded-2xl border border-white/80 bg-white/90 p-1.5 backdrop-blur-xl;
+  @apply sticky z-20 -mx-1 rounded-lg border border-gray-200 bg-gray-50 p-1;
   top: 4.75rem;
-  box-shadow:
-    0 12px 28px rgb(31 30 29 / 0.07),
-    0 1px 0 rgb(255 255 255 / 0.9) inset;
 }
 
 .settings-tabs-scroll {
@@ -13373,7 +13370,7 @@ watch(
 }
 
 .settings-tab {
-  @apply relative isolate flex h-10 min-w-[6.75rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl border border-transparent px-3 text-sm font-medium text-gray-600 outline-none transition-colors duration-200 ease-out dark:text-gray-300;
+  @apply relative isolate flex h-10 min-w-[6.75rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-transparent px-3 text-sm font-medium text-gray-600 outline-none transition-colors duration-200 ease-out dark:text-gray-300;
 }
 
 @media (min-width: 768px) {
@@ -13391,9 +13388,9 @@ watch(
 }
 
 .settings-tab::before {
-  @apply absolute inset-0 -z-10 rounded-xl opacity-0 transition-opacity duration-200;
+  @apply absolute inset-0 -z-10 rounded-md opacity-0 transition-opacity duration-200;
   content: "";
-  background: linear-gradient(135deg, rgb(250 249 245 / 0.95), rgb(240 238 230 / 0.8));
+  background: rgb(31 30 29 / 0.05);
 }
 
 .settings-tab:hover::before,
@@ -13406,10 +13403,7 @@ watch(
 }
 
 .settings-tab-active {
-  @apply border-primary-200/80 bg-white text-primary-700 shadow-sm dark:border-primary-400/30 dark:bg-dark-700/95 dark:text-primary-200;
-  box-shadow:
-    0 8px 18px rgb(31 30 29 / 0.08),
-    0 1px 0 rgb(255 255 255 / 0.92) inset;
+  @apply border-gray-200 bg-white text-gray-950 dark:border-dark-600 dark:bg-dark-800 dark:text-dark-50;
 }
 
 .settings-tab-active::before {
@@ -13422,9 +13416,8 @@ watch(
   bottom: 0.25rem;
   left: 0.75rem;
   height: 2px;
-  border-radius: 9999px;
   content: "";
-  background: #c6613f;
+  background: #d97757;
 }
 
 .settings-tab-icon {
@@ -13437,7 +13430,7 @@ watch(
 }
 
 .settings-tab-active .settings-tab-icon {
-  @apply bg-primary-50 text-primary-600 dark:bg-primary-400/10 dark:text-primary-300;
+  @apply text-primary-600 dark:text-primary-400;
 }
 
 .settings-tab-label {
@@ -13450,20 +13443,11 @@ watch(
    because Vue's scoped-CSS compiler was dropping the `:global(.dark) ...`
    rules in the production build, leaving inactive tabs unreadable on dark. */
 .dark .settings-tabs-shell {
-  border-color: rgb(61 61 58 / 0.65);
-  background: rgb(31 30 29 / 0.86);
-  box-shadow:
-    0 16px 36px rgb(0 0 0 / 0.28),
-    0 1px 0 rgb(255 255 255 / 0.06) inset;
+  border-color: #3d3d3a;
+  background: #2a2a28;
 }
 
 .dark .settings-tab::before {
-  background: linear-gradient(135deg, rgb(48 48 46 / 0.9), rgb(61 61 58 / 0.62));
-}
-
-.dark .settings-tab-active {
-  box-shadow:
-    0 12px 26px rgb(0 0 0 / 0.22),
-    0 1px 0 rgb(255 255 255 / 0.08) inset;
+  background: rgb(250 249 245 / 0.05);
 }
 </style>

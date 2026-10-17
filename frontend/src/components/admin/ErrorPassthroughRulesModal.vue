@@ -26,7 +26,7 @@
         <div class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100 dark:bg-dark-700">
           <Icon name="shield" size="lg" class="text-gray-400" />
         </div>
-        <h4 class="mb-1 text-sm font-medium text-gray-900 dark:text-white">
+        <h4 class="mb-1 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
           {{ t('admin.errorPassthrough.noRules') }}
         </h4>
         <p class="text-sm text-gray-500 dark:text-gray-400">
@@ -38,25 +38,25 @@
         <table class="min-w-full divide-y divide-gray-200 dark:divide-dark-700">
           <thead class="sticky top-0 bg-gray-50 dark:bg-dark-700">
             <tr>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.priority') }}
               </th>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.name') }}
               </th>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.conditions') }}
               </th>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.platforms') }}
               </th>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.behavior') }}
               </th>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.status') }}
               </th>
-              <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500 dark:text-gray-400">
+              <th class="px-3 py-2 text-left text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-500 dark:text-gray-400">
                 {{ t('admin.errorPassthrough.columns.actions') }}
               </th>
             </tr>
@@ -252,7 +252,7 @@
 
         <!-- Match Conditions -->
         <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-600">
-          <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">
+          <h4 class="mb-2 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ t('admin.errorPassthrough.form.matchConditions') }}
           </h4>
 
@@ -324,7 +324,7 @@
 
         <!-- Response Behavior -->
         <div class="rounded-lg border border-gray-200 p-3 dark:border-dark-600">
-          <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">
+          <h4 class="mb-2 text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
             {{ t('admin.errorPassthrough.form.responseBehavior') }}
           </h4>
 
