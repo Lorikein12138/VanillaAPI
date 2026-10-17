@@ -1,3 +1,4 @@
+import { defineComponent, h } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import RegisterView from '@/views/auth/RegisterView.vue'
@@ -8,6 +9,7 @@ const {
   showErrorMock,
   pushMock,
   verifyActionMock,
+  captchaResetMock,
   appStoreMock
 } = vi.hoisted(() => ({
   getPublicSettingsMock: vi.fn(),
@@ -15,6 +17,7 @@ const {
   showErrorMock: vi.fn(),
   pushMock: vi.fn(),
   verifyActionMock: vi.fn(),
+  captchaResetMock: vi.fn(),
   appStoreMock: {
     cachedPublicSettings: null as { promo_code_enabled?: boolean } | null,
     showError: (...args: unknown[]) => showErrorMock(...args),
@@ -22,6 +25,15 @@ const {
     showWarning: vi.fn()
   }
 }))
+
+const CaptchaChallengeStub = defineComponent({
+  name: 'TurnstileWidgetStub',
+  emits: ['verify', 'expire', 'error'],
+  setup(_, { expose }) {
+    expose({ verifyAction: verifyActionMock, reset: captchaResetMock })
+    return () => h('div', { 'data-testid': 'turnstile-widget' })
+  }
+})
 
 const publicSettings = {
   registration_enabled: true,
@@ -79,10 +91,7 @@ function mountRegister() {
       stubs: {
         AuthLayout: { template: '<div><slot /><slot name="footer" /></div>' },
         Icon: true,
-        TurnstileWidget: {
-          template: '<div data-testid="turnstile-widget" />',
-          methods: { verifyAction: verifyActionMock, reset: vi.fn() }
-        },
+        TurnstileWidget: CaptchaChallengeStub,
         LoginAgreementPrompt: true,
         EmailOAuthButtons: true,
         LinuxDoOAuthSection: true,
@@ -102,6 +111,7 @@ describe('RegisterView', () => {
     showErrorMock.mockReset()
     pushMock.mockReset()
     verifyActionMock.mockReset()
+    captchaResetMock.mockReset()
     appStoreMock.cachedPublicSettings = null
     sessionStorage.removeItem('register_data')
     verifyActionMock.mockResolvedValue({ token: 'ticket', randstr: 'randstr' })
@@ -134,6 +144,34 @@ describe('RegisterView', () => {
     const wrapper = mountRegister()
 
     expect(wrapper.find('#promo_code').exists()).toBe(true)
+  })
+
+  it('blocks implicit registration after expiry and submits only the replacement Turnstile proof', async () => {
+    const wrapper = mountRegister()
+    await flushPromises()
+    await wrapper.get('#email').setValue('user@example.com')
+    await wrapper.get('#password').setValue('secret-123')
+    await wrapper.get('#confirmPassword').setValue('secret-123')
+
+    await wrapper.get('form').trigger('submit.prevent')
+    expect(registerMock).not.toHaveBeenCalled()
+
+    const captcha = wrapper.getComponent(CaptchaChallengeStub)
+    captcha.vm.$emit('verify', 'expired-proof', '')
+    captcha.vm.$emit('expire')
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(registerMock).not.toHaveBeenCalled()
+
+    captcha.vm.$emit('verify', 'replacement-proof', '')
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(registerMock).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'user@example.com',
+      password: 'secret-123',
+      turnstile_token: 'replacement-proof'
+    }))
   })
 
   it.each([

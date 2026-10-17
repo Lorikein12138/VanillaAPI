@@ -1,11 +1,24 @@
+import { defineComponent, h } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import LoginView from '@/views/auth/LoginView.vue'
 
-const { getPublicSettingsMock, pushMock } = vi.hoisted(() => ({
+const { getPublicSettingsMock, pushMock, loginMock, showErrorMock, showSuccessMock } = vi.hoisted(() => ({
   getPublicSettingsMock: vi.fn(),
-  pushMock: vi.fn()
+  pushMock: vi.fn(),
+  loginMock: vi.fn(),
+  showErrorMock: vi.fn(),
+  showSuccessMock: vi.fn()
 }))
+
+const CaptchaChallengeStub = defineComponent({
+  name: 'TurnstileWidgetStub',
+  emits: ['verify', 'expire', 'error'],
+  setup(_, { expose }) {
+    expose({ reset: vi.fn(), verifyAction: vi.fn() })
+    return () => h('div', { 'data-testid': 'turnstile-widget' })
+  }
+})
 
 const publicSettings = {
   registration_enabled: true,
@@ -50,13 +63,13 @@ vi.mock('vue-i18n', () => ({
 
 vi.mock('@/stores', () => ({
   useAuthStore: () => ({
-    login: vi.fn(),
+    login: (...args: unknown[]) => loginMock(...args),
     loginWithPasskey: vi.fn(),
     login2FA: vi.fn()
   }),
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
+    showError: (...args: unknown[]) => showErrorMock(...args),
+    showSuccess: (...args: unknown[]) => showSuccessMock(...args),
     showWarning: vi.fn()
   })
 }))
@@ -82,7 +95,7 @@ function mountLogin() {
         OidcOAuthSection: true,
         RouterLink: { template: '<a><slot /></a>' },
         TotpLoginModal: true,
-        TurnstileWidget: true,
+        TurnstileWidget: CaptchaChallengeStub,
         WechatOAuthSection: true,
         transition: false
       }
@@ -94,7 +107,11 @@ describe('LoginView registration entry', () => {
   beforeEach(() => {
     getPublicSettingsMock.mockReset()
     pushMock.mockReset()
+    loginMock.mockReset()
+    showErrorMock.mockReset()
+    showSuccessMock.mockReset()
     getPublicSettingsMock.mockResolvedValue(publicSettings)
+    loginMock.mockResolvedValue({})
   })
 
   it('shows the registration entry when registration is enabled', async () => {
@@ -114,5 +131,38 @@ describe('LoginView registration entry', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('auth.signUp')
+  })
+
+  it('blocks login after the captcha expires and sends only the replacement token', async () => {
+    getPublicSettingsMock.mockResolvedValueOnce({
+      ...publicSettings,
+      turnstile_enabled: true,
+      turnstile_site_key: 'site-key'
+    })
+    const wrapper = mountLogin()
+    await flushPromises()
+    await wrapper.get('#email').setValue('user@example.com')
+    await wrapper.get('#password').setValue('secret-123')
+
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(loginMock).not.toHaveBeenCalled()
+
+    const captcha = wrapper.getComponent(CaptchaChallengeStub)
+    captcha.vm.$emit('verify', 'expired-proof', '')
+    captcha.vm.$emit('expire')
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(loginMock).not.toHaveBeenCalled()
+
+    captcha.vm.$emit('verify', 'replacement-proof', '')
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(loginMock).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'user@example.com',
+      password: 'secret-123',
+      turnstile_token: 'replacement-proof'
+    }))
   })
 })

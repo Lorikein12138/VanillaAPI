@@ -1,4 +1,4 @@
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
@@ -446,5 +446,70 @@ describe('PendingOAuthCreateAccountForm', () => {
     expect(wrapper.emitted('submit')?.[0]?.[0]).toMatchObject({
       turnstileToken: 'turnstile-token'
     })
+  })
+
+  it('clears expired OAuth proof, blocks implicit send and submit, and accepts only a fresh token', async () => {
+    getPublicSettings.mockResolvedValue({
+      email_verify_enabled: true,
+      turnstile_enabled: true,
+      turnstile_site_key: 'site-key'
+    })
+    sendPendingOAuthVerifyCode.mockResolvedValue({ countdown: 0 })
+    const CaptchaChallengeStub = defineComponent({
+      emits: ['verify', 'expire', 'error'],
+      setup(_, { expose }) {
+        expose({ verifyAction, reset: turnstileReset })
+        return () => h('div', { 'data-testid': 'turnstile-stub' })
+      }
+    })
+    const wrapper = mount(PendingOAuthCreateAccountForm, {
+      props: { testIdPrefix: 'oidc', initialEmail: 'user@example.com', isSubmitting: false },
+      global: { stubs: { TurnstileWidget: CaptchaChallengeStub } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="oidc-create-account-password"]').setValue('secret-123')
+    await wrapper.get('[data-testid="oidc-create-account-verify-code"]').setValue('246810')
+
+    const captcha = wrapper.getComponent(CaptchaChallengeStub)
+    await wrapper.get('form').trigger('submit.prevent')
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(wrapper.get('[data-testid="oidc-create-account-send-code"]').attributes('disabled')).toBeDefined()
+
+    captcha.vm.$emit('verify', 'expired-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="oidc-create-account-send-code"]').attributes('disabled')).toBeUndefined()
+    captcha.vm.$emit('expire')
+    await nextTick()
+    expect(wrapper.get('[data-testid="oidc-create-account-send-code"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="oidc-create-account-submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('form').trigger('submit.prevent')
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(sendPendingOAuthVerifyCode).not.toHaveBeenCalled()
+
+    captcha.vm.$emit('verify', 'send-code-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="oidc-create-account-send-code"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="oidc-create-account-send-code"]').trigger('click')
+    await flushPromises()
+    expect(sendPendingOAuthVerifyCode).toHaveBeenCalledWith({
+      email: 'user@example.com',
+      turnstile_token: 'send-code-proof',
+      tencent_captcha_ticket: undefined,
+      tencent_captcha_randstr: undefined
+    })
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(wrapper.get('[data-testid="oidc-create-account-submit"]').attributes('disabled')).toBeDefined()
+
+    captcha.vm.$emit('verify', 'replacement-submit-proof', '')
+    await nextTick()
+    expect(wrapper.get('[data-testid="oidc-create-account-submit"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="oidc-create-account-submit"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('submit')).toEqual([[expect.objectContaining({
+      email: 'user@example.com',
+      password: 'secret-123',
+      verifyCode: '246810',
+      turnstileToken: 'replacement-submit-proof'
+    })]])
   })
 })

@@ -1,18 +1,20 @@
 <template>
-  <div v-if="siteKey" class="turnstile-wrapper relative">
-    <div
-      v-if="loading"
-      role="status"
-      class="absolute inset-0 flex items-center justify-center rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-400"
-    >
-      {{ t('auth.captchaLoading') }}
+  <div v-if="siteKey" ref="wrapperRef" class="turnstile-wrapper">
+    <div class="turnstile-stage" :class="stageClass">
+      <div
+        v-if="loading"
+        role="status"
+        class="absolute inset-0 flex items-center justify-center rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-500 dark:border-dark-600 dark:bg-dark-700 dark:text-gray-400"
+      >
+        {{ t('auth.captchaLoading') }}
+      </div>
+      <div ref="containerRef" class="turnstile-container"></div>
     </div>
-    <div ref="containerRef" class="turnstile-container"></div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 interface TurnstileRenderOptions {
@@ -37,15 +39,18 @@ declare global {
   }
 }
 
+type PreferredWidgetSize = 'normal' | 'compact' | 'flexible'
+type EffectiveWidgetSize = PreferredWidgetSize | null
+
 const props = withDefaults(
   defineProps<{
     siteKey: string
     theme?: 'light' | 'dark' | 'auto'
-    size?: 'normal' | 'compact' | 'flexible'
+    size?: PreferredWidgetSize
   }>(),
   {
     theme: 'auto',
-    size: 'flexible'
+    size: 'normal'
   }
 )
 
@@ -57,9 +62,27 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const loading = ref(true)
+const wrapperRef = ref<HTMLElement | null>(null)
 const containerRef = ref<HTMLElement | null>(null)
 const widgetId = ref<string | null>(null)
+const availableWidth = ref<number | null>(null)
+const renderedSize = ref<EffectiveWidgetSize>(null)
 const scriptLoaded = ref(false)
+
+let resizeObserver: ResizeObserver | null = null
+let fallbackResizeListenerActive = false
+let initialization: Promise<void> | null = null
+let mounted = false
+let generation = 0
+
+function resolveWidgetSize(width: number | null, preferred: PreferredWidgetSize): EffectiveWidgetSize {
+  if (width === null || width <= 0) return null
+  if (preferred === 'compact' || width < 300) return 'compact'
+  return preferred
+}
+
+const effectiveSize = computed(() => resolveWidgetSize(availableWidth.value, props.size))
+const stageClass = computed(() => `turnstile-stage--${effectiveSize.value ?? 'unmeasured'}`)
 
 const loadScript = (): Promise<void> => {
   return new Promise((resolve, reject) => {
@@ -97,98 +120,206 @@ const loadScript = (): Promise<void> => {
   })
 }
 
-const renderWidget = () => {
-  if (!window.turnstile || !containerRef.value || !props.siteKey) {
-    return
-  }
-
-  // Remove existing widget if any
-  if (widgetId.value) {
-    try {
-      window.turnstile.remove(widgetId.value)
-    } catch {
-      // Ignore errors when removing
-    }
-    widgetId.value = null
-  }
-
-  // Clear container
-  containerRef.value.innerHTML = ''
-
-  widgetId.value = window.turnstile.render(containerRef.value, {
-    sitekey: props.siteKey,
-    callback: (token: string) => {
-      emit('verify', token)
-    },
-    'expired-callback': () => {
-      emit('expire')
-    },
-    'error-callback': () => {
-      emit('error')
-    },
-    theme: props.theme,
-    size: props.size
-  })
+function measureWrapper() {
+  const width = wrapperRef.value?.getBoundingClientRect().width ?? 0
+  updateAvailableWidth(width)
 }
 
-const reset = () => {
+function updateAvailableWidth(width: number) {
+  availableWidth.value = Number.isFinite(width) && width > 0 ? width : 0
+  reconcileWidget()
+}
+
+function removeWidget(id: string) {
+  try {
+    window.turnstile?.remove(id)
+  } catch {
+    // Ignore errors when removing a widget whose SDK instance has already expired.
+  }
+}
+
+function disposeWidget(notifyExpire: boolean) {
+  const previousId = widgetId.value
+  generation += 1
+  widgetId.value = null
+  renderedSize.value = null
+
+  if (!previousId) return
+  if (notifyExpire) emit('expire')
+  removeWidget(previousId)
+}
+
+function renderWidget(size: EffectiveWidgetSize) {
+  const sdk = window.turnstile
+  const container = containerRef.value
+  if (!sdk || !container || !props.siteKey || !size || !mounted) return
+
+  container.innerHTML = ''
+  const callbackGeneration = ++generation
+  const isCurrentGeneration = () => mounted && callbackGeneration === generation
+
+  try {
+    const nextWidgetId = sdk.render(container, {
+      sitekey: props.siteKey,
+      callback: (token: string) => {
+        if (isCurrentGeneration()) emit('verify', token)
+      },
+      'expired-callback': () => {
+        if (isCurrentGeneration()) emit('expire')
+      },
+      'error-callback': () => {
+        if (!isCurrentGeneration()) return
+        loading.value = false
+        emit('error')
+      },
+      theme: props.theme,
+      size
+    })
+    widgetId.value = nextWidgetId
+    renderedSize.value = size
+    loading.value = false
+  } catch {
+    generation += 1
+    widgetId.value = null
+    renderedSize.value = null
+    loading.value = false
+    emit('error')
+  }
+}
+
+function reconcileWidget(forceReplace = false) {
+  if (!mounted || !scriptLoaded.value || !window.turnstile) return
+  const nextSize = effectiveSize.value
+  if (!nextSize || !containerRef.value) return
+
+  if (widgetId.value && !forceReplace && renderedSize.value === nextSize) return
+
+  if (widgetId.value) {
+    const sizeChanged = renderedSize.value !== nextSize
+    disposeWidget(sizeChanged)
+  }
+
+  renderWidget(nextSize)
+}
+
+function reset() {
   if (window.turnstile && widgetId.value) {
     window.turnstile.reset(widgetId.value)
   }
 }
 
-// Expose reset method to parent
-defineExpose({ reset })
+async function initialize() {
+  if (!mounted || !props.siteKey) return
+  if (!initialization) {
+    initialization = loadScript()
+      .then(() => {
+        scriptLoaded.value = true
+      })
+      .catch((error: unknown) => {
+        if (mounted) {
+          console.error('Failed to initialize Turnstile:', error)
+          loading.value = false
+          emit('error')
+        }
+      })
+      .finally(() => {
+        initialization = null
+      })
+  }
+  await initialization
+  if (mounted) reconcileWidget()
+}
 
-onMounted(async () => {
-  if (!props.siteKey) {
+function startObserving() {
+  if (!props.siteKey || resizeObserver || fallbackResizeListenerActive) return
+  measureWrapper()
+  if (typeof ResizeObserver !== 'undefined' && wrapperRef.value) {
+    resizeObserver = new ResizeObserver(entries => {
+      const entry = entries.find(candidate => candidate.target === wrapperRef.value)
+      if (entry) updateAvailableWidth(entry.contentRect.width)
+    })
+    resizeObserver.observe(wrapperRef.value)
     return
   }
+  window.addEventListener('resize', measureWrapper)
+  fallbackResizeListenerActive = true
+}
 
-  try {
-    await loadScript()
-    renderWidget()
-  } catch (error) {
-    console.error('Failed to initialize Turnstile:', error)
-    emit('error')
-  } finally {
-    loading.value = false
-  }
+// Expose reset method to parent.
+defineExpose({ reset })
+
+onMounted(() => {
+  mounted = true
+  if (!props.siteKey) return
+  startObserving()
+  void initialize()
 })
 
 onUnmounted(() => {
-  if (window.turnstile && widgetId.value) {
-    try {
-      window.turnstile.remove(widgetId.value)
-    } catch {
-      // Ignore errors when removing
-    }
-  }
+  mounted = false
+  generation += 1
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  window.removeEventListener('resize', measureWrapper)
+  fallbackResizeListenerActive = false
+  disposeWidget(false)
 })
 
-// Re-render when siteKey changes
+watch(
+  () => props.size,
+  () => reconcileWidget()
+)
+
 watch(
   () => props.siteKey,
-  (newKey) => {
-    if (newKey && scriptLoaded.value) {
-      renderWidget()
-    }
-  }
+  (newKey, oldKey) => {
+    if (newKey !== oldKey && widgetId.value) disposeWidget(false)
+    if (!newKey) return
+    startObserving()
+    if (scriptLoaded.value) reconcileWidget(true)
+    else void initialize()
+  },
+  { flush: 'post' }
 )
 </script>
 
 <style scoped>
 .turnstile-wrapper {
+  display: flex;
+  justify-content: center;
   width: 100%;
+  min-width: 0;
+}
+
+.turnstile-stage {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.turnstile-stage--unmeasured {
+  width: 100%;
+  min-width: 0;
+  min-height: 65px;
+}
+
+.turnstile-stage--normal {
+  width: 300px;
+  min-height: 65px;
+}
+
+.turnstile-stage--compact {
+  width: 150px;
+  min-height: 140px;
+}
+
+.turnstile-stage--flexible {
+  width: 100%;
+  min-width: 0;
+  min-height: 65px;
 }
 
 .turnstile-container {
   width: 100%;
   min-height: 65px;
-}
-
-/* Make the Turnstile iframe fill the container width */
-.turnstile-container :deep(iframe) {
-  width: 100% !important;
 }
 </style>

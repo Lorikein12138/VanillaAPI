@@ -1,4 +1,4 @@
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import EmailVerifyView from '@/views/auth/EmailVerifyView.vue'
@@ -46,6 +46,15 @@ const {
     }
   },
 }))
+
+const CaptchaChallengeStub = defineComponent({
+  name: 'TurnstileWidgetStub',
+  emits: ['verify', 'expire', 'error'],
+  setup(_, { expose }) {
+    expose({ reset: createTurnstileResetMock, verifyAction: verifyActionMock })
+    return () => h('div', { 'data-testid': 'captcha-challenge-stub' })
+  }
+})
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({
@@ -677,6 +686,102 @@ describe('EmailVerifyView', () => {
       turnstile_token: 'create-token',
     })
     expect(setTokenMock).toHaveBeenCalledWith('oauth-access-token')
+  })
+
+  it('keeps resend and create-account proofs independent across expiry and replacement', async () => {
+    authStoreState.pendingAuthSession = {
+      token: 'pending-token-5',
+      token_field: 'pending_auth_token',
+      provider: 'oidc',
+      redirect: '/profile',
+    }
+    getPublicSettingsMock.mockResolvedValue({
+      turnstile_enabled: true,
+      turnstile_site_key: 'site-key',
+      site_name: 'Sub2API',
+      registration_email_suffix_whitelist: ['allowed.com'],
+    })
+    sendPendingOAuthVerifyCodeMock.mockResolvedValue({ countdown: 0 })
+    apiClientPostMock.mockResolvedValue({
+      data: {
+        access_token: 'oauth-access-token',
+        refresh_token: 'oauth-refresh-token',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      },
+    })
+    sessionStorage.setItem('register_data', JSON.stringify({
+      email: 'fresh@allowed.com',
+      password: 'secret-123',
+      turnstile_token: 'initial-send-token',
+    }))
+
+    const wrapper = mount(EmailVerifyView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /><slot name="footer" /></div>' },
+          Icon: true,
+          TurnstileWidget: CaptchaChallengeStub,
+          transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(sendPendingOAuthVerifyCodeMock).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'fresh@allowed.com',
+      turnstile_token: 'initial-send-token',
+    }))
+    expect(wrapper.findAllComponents(CaptchaChallengeStub)).toHaveLength(1)
+
+    const openResendButton = wrapper.findAll('button').find(button => button.text().includes('auth.clickToResend'))!
+    await openResendButton.trigger('click')
+    await flushPromises()
+    const challenges = wrapper.findAllComponents(CaptchaChallengeStub)
+    expect(challenges).toHaveLength(2)
+    const resendChallenge = challenges[0]!
+    const createChallenge = challenges[1]!
+    await wrapper.get('#code').setValue('123456')
+    resendChallenge.vm.$emit('verify', 'resend-old-token', '')
+    await nextTick()
+    createChallenge.vm.$emit('verify', 'create-account-token', '')
+    await nextTick()
+    const resendButton = wrapper.findAll('button').find(button => button.text().includes('auth.resendCode'))!
+    expect(resendButton.attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+
+    resendChallenge.vm.$emit('expire')
+    await nextTick()
+
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+    expect(resendButton.attributes('disabled')).toBeDefined()
+
+    resendChallenge.vm.$emit('verify', 'resend-replacement-token', '')
+    await nextTick()
+    expect(resendButton.attributes('disabled')).toBeUndefined()
+    await resendButton.trigger('click')
+    await flushPromises()
+    expect(sendPendingOAuthVerifyCodeMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      turnstile_token: 'resend-replacement-token',
+    }))
+    expect(createTurnstileResetMock).toHaveBeenCalled()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+
+    createChallenge.vm.$emit('expire')
+    await nextTick()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+
+    createChallenge.vm.$emit('verify', 'create-account-replacement-token', '')
+    await nextTick()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(apiClientPostMock).toHaveBeenCalledWith('/auth/oauth/pending/create-account', expect.objectContaining({
+      email: 'fresh@allowed.com',
+      password: 'secret-123',
+      verify_code: '123456',
+      turnstile_token: 'create-account-replacement-token',
+    }))
   })
 
   it('resets the pending oauth create-account turnstile after submit failure', async () => {
