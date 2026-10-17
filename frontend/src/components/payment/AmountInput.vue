@@ -1,68 +1,81 @@
 <template>
-  <div class="space-y-4">
-    <!-- Quick Amount Buttons -->
+  <div>
+    <!-- 快捷金额与「自定义金额」同处一个网格；自定义格内嵌输入框 -->
     <div v-if="filteredAmounts.length > 0">
-      <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300" data-testid="quick-amounts-label">
-        {{ t('payment.quickAmounts') }}
-      </label>
-      <div class="grid grid-cols-3 gap-x-4 gap-y-4 pt-2">
+      <p class="sr-only" data-testid="quick-amounts-label">{{ t('payment.quickAmounts') }}</p>
+      <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
         <button
           v-for="amt in filteredAmounts"
           :key="amt"
           type="button"
+          :aria-pressed="modelValue === amt"
           :class="[
-            'relative rounded-lg border-2 px-3 py-3 text-center font-medium transition-colors',
-            modelValue === amt
-              ? 'border-primary-500 bg-primary-50 text-primary-700 dark:border-primary-400 dark:bg-primary-900/40 dark:text-primary-300'
-              : quoteFor(amt).percent > 0
-                ? 'border-red-200 bg-white text-gray-700 hover:border-red-300 dark:border-red-500/40 dark:bg-dark-800 dark:text-gray-200 dark:hover:border-red-400/60'
-                : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-200 dark:hover:border-dark-500',
+            'flex min-h-[76px] min-w-0 flex-col justify-between gap-2 rounded-lg border px-3.5 pb-3 pt-3.5 text-left transition-colors',
+            modelValue === amt ? tileSelectedClass : tileIdleClass,
           ]"
           :data-testid="`quick-amount-${amt}`"
           @click="selectAmount(amt)"
         >
-          <!-- 促销价签（单行）：仅命中档位的金额显示；红底白字、内圈点线、右侧圆孔、整体旋转 -->
-          <span
-            v-if="quoteFor(amt).percent > 0"
-            class="pointer-events-none absolute -right-2 -top-3 z-10 rotate-12"
-            data-testid="quick-amount-bonus-badge"
-          >
-            <span
-              class="relative flex items-center gap-1 whitespace-nowrap rounded bg-red-600 py-0.5 pl-1.5 pr-1 text-[11px] font-semibold leading-tight tracking-tight text-white shadow-md ring-2 ring-white before:pointer-events-none before:absolute before:inset-[2px] before:rounded-sm before:border before:border-dotted before:border-white/70 dark:bg-red-500 dark:ring-dark-800"
-            >
-              <span>{{ badgeText(amt) }}</span>
-              <span class="h-1 w-1 shrink-0 rounded-full bg-white"></span>
+          <span class="flex w-full items-start justify-between gap-1.5">
+            <span class="font-serif text-2xl font-normal leading-none tabular-nums text-gray-950 dark:text-dark-50">
+              <span class="mr-0.5 text-sm text-gray-500 dark:text-dark-400">{{ symbol }}</span>{{ amt }}
             </span>
+            <!-- 优惠价签：仅命中档位的金额显示 -->
+            <span
+              v-if="quoteFor(amt).percent > 0"
+              class="shrink-0 whitespace-nowrap rounded-full bg-primary-600/10 px-1.5 py-px text-[11px] font-medium text-primary-600 dark:bg-primary-300/15 dark:text-primary-300"
+              data-testid="quick-amount-bonus-badge"
+            >{{ badgeText(amt) }}</span>
           </span>
-          <span class="block">{{ amt }}</span>
           <!-- 配置了优惠阶梯时，所有按钮都显示第二行，保持高度一致：赠金显示到账 USD，折扣显示折后实付 -->
           <span
             v-if="showSecondLine"
             :class="[
-              'mt-0.5 block text-[11px] font-normal leading-tight',
-              quoteFor(amt).percent > 0 ? 'text-red-600 dark:text-red-300' : 'text-gray-400 dark:text-gray-500',
+              'block truncate text-xs tabular-nums',
+              quoteFor(amt).percent > 0 ? 'text-primary-600 dark:text-primary-300' : 'text-gray-500 dark:text-dark-400',
             ]"
             data-testid="quick-amount-credited"
           >{{ secondLine(amt) }}</span>
         </button>
+        <label
+          :class="[
+            'flex min-h-[76px] min-w-0 cursor-text flex-col justify-between gap-2 rounded-lg border px-3.5 pb-3 pt-3.5 transition-colors',
+            isCustom ? tileSelectedClass : tileIdleClass,
+          ]"
+          data-testid="custom-amount"
+        >
+          <span class="text-xs text-gray-500 dark:text-dark-400">{{ t('payment.customAmount') }}</span>
+          <span class="flex items-baseline gap-0.5 border-b border-gray-200 focus-within:border-gray-950 dark:border-dark-600 dark:focus-within:border-dark-200">
+            <span class="text-sm text-gray-500 dark:text-dark-400">{{ symbol }}</span>
+            <input
+              type="text"
+              inputmode="decimal"
+              :value="customText"
+              :placeholder="placeholderText"
+              class="w-full min-w-0 border-0 bg-transparent p-0 pb-1 font-serif text-lg tabular-nums text-gray-950 placeholder:font-sans placeholder:text-sm placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-dark-50 dark:placeholder:text-dark-500"
+              @input="handleInput"
+            />
+          </span>
+        </label>
       </div>
     </div>
 
-    <!-- Custom Amount Input -->
-    <div>
-      <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+    <!-- 未配置快捷金额：只保留自定义金额输入 -->
+    <div v-else>
+      <label for="recharge-custom-amount" class="mb-2 block text-sm text-gray-600 dark:text-dark-300">
         {{ t('payment.customAmount') }}
       </label>
       <div class="relative">
-        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-dark-500">
-          $
+        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 dark:text-dark-400">
+          {{ symbol }}
         </span>
         <input
+          id="recharge-custom-amount"
           type="text"
           inputmode="decimal"
           :value="customText"
           :placeholder="placeholderText"
-          class="input w-full py-3 pl-8 pr-4"
+          class="input w-full py-3 pl-8 pr-4 font-serif text-lg tabular-nums"
           @input="handleInput"
         />
       </div>
@@ -76,7 +89,7 @@ import { useI18n } from 'vue-i18n'
 import type { RechargeBonusTier } from '@/types/payment'
 import { formatRechargeBonusNumber, quoteRechargeBonus, type RechargeBonusMode } from '@/utils/rechargeBonus'
 import { normalizePaymentQuickAmounts } from '@/utils/paymentQuickAmounts'
-import { formatPaymentAmount } from './currency'
+import { currencySymbol, formatPaymentAmount } from './currency'
 
 const props = withDefaults(defineProps<{
   amounts?: number[]
@@ -115,6 +128,15 @@ const filteredAmounts = computed(() =>
 )
 
 const showSecondLine = computed(() => props.bonusTiers.length > 0)
+
+// 金额按支付币种输入，前缀跟随币种（默认人民币）
+const symbol = computed(() => currencySymbol(props.currency))
+
+// 当前金额不是任何快捷金额时，高亮「自定义金额」格
+const isCustom = computed(() => props.modelValue !== null && !filteredAmounts.value.includes(props.modelValue))
+
+const tileSelectedClass = 'border-gray-950 bg-gray-100/70 dark:border-dark-50 dark:bg-dark-700'
+const tileIdleClass = 'border-gray-200 bg-white hover:border-gray-400 dark:border-dark-700 dark:bg-dark-800 dark:hover:border-dark-500'
 
 function currencyDigits(): number {
   if (!props.currency) return 2
