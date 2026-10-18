@@ -36,7 +36,7 @@
       class="grid gap-5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4"
     >
       <MonitorCard
-        v-for="item in items"
+        v-for="item in sortedItems"
         :key="item.id"
         :item="item"
         :window="window"
@@ -49,6 +49,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { UserMonitorView, UserMonitorDetail } from '@/api/channelMonitor'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -68,14 +69,33 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
+function normalizeAvailability(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
+    ? value
+    : null
+}
+
 function resolveAvailability(item: UserMonitorView): number | null {
   if (props.window === '7d') {
-    return item.availability_7d ?? null
+    return normalizeAvailability(item.availability_7d)
   }
   const detail = props.detailCache[item.id]
   if (!detail) return null
   const primary = detail.models.find(m => m.model === item.primary_model)
   if (!primary) return null
-  return props.window === '15d' ? primary.availability_15d ?? null : primary.availability_30d ?? null
+  return normalizeAvailability(
+    props.window === '15d' ? primary.availability_15d : primary.availability_30d,
+  )
 }
+
+const sortedItems = computed(() =>
+  props.items
+    .map((item, index) => ({ item, index, availability: resolveAvailability(item) }))
+    .sort((a, b) => {
+      if (a.availability === null) return b.availability === null ? a.index - b.index : 1
+      if (b.availability === null) return -1
+      return b.availability - a.availability || a.index - b.index
+    })
+    .map(({ item }) => item),
+)
 </script>
