@@ -661,7 +661,10 @@ func sanitizeErrorMessage(msg string) string {
 }
 
 // truncateMessage 把消息按 monitorMessageMaxBytes 截断，避免 DB 列溢出与日志过长。
+// 非法 UTF-8 字节先替换为 U+FFFD、截断落在完整字符边界：PostgreSQL 拒收非法 UTF-8，
+// 切断多字节字符（如上游中文错误）会让整批历史写入失败。
 func truncateMessage(msg string) string {
+	msg = strings.ToValidUTF8(msg, "�")
 	if len(msg) <= monitorMessageMaxBytes {
 		return msg
 	}
@@ -670,14 +673,14 @@ func truncateMessage(msg string) string {
 	if cutoff < 0 {
 		cutoff = 0
 	}
-	return msg[:cutoff] + ellipsis
+	return truncateUTF8(msg, cutoff) + ellipsis
 }
 
 // truncateForErrorBody 把上游错误响应 body 压到 monitorErrorBodySnippetMaxBytes 以内，
 // 并顺手把连续空白折成一个空格：上游 HTML 错误页常含大量缩进/换行，保留会浪费预算。
 // 被 truncateMessage 做最终总截断兜底，所以这里只负责 body 自身的精简。
 func truncateForErrorBody(body string) string {
-	body = strings.Join(strings.Fields(body), " ")
+	body = strings.Join(strings.Fields(strings.ToValidUTF8(body, "�")), " ")
 	if len(body) <= monitorErrorBodySnippetMaxBytes {
 		return body
 	}
@@ -686,5 +689,5 @@ func truncateForErrorBody(body string) string {
 	if cutoff < 0 {
 		cutoff = 0
 	}
-	return body[:cutoff] + ellipsis
+	return truncateUTF8(body, cutoff) + ellipsis
 }
