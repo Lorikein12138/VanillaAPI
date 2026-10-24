@@ -22,42 +22,48 @@
       </div>
     </div>
 
-    <!-- 二级:分组(按所属平台着色,当前组合下无结果的置灰) -->
+    <!-- 二级:分组(四类分区、类内按倍率升序,圆点标所属平台;当前组合下无结果的置灰) -->
     <div class="flex min-w-0 items-start gap-2">
       <span class="w-10 shrink-0 pt-2 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-dark-500">
         {{ t('modelPlaza.filters.groupLabel') }}
       </span>
-      <div class="flex min-w-0 flex-1 items-start gap-2">
+      <div class="min-w-0 flex-1">
         <button
           type="button"
-          class="shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium transition"
+          class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
           :class="chipClass(groupId === 'all')"
           @click="$emit('update:groupId', 'all')"
         >
           {{ t('modelPlaza.filters.all') }}
         </button>
-        <div class="flex min-w-0 flex-1 flex-col gap-2">
+        <div v-if="groupCategories.length > 0" class="mt-2.5">
           <div
             v-for="category in groupCategories"
             :key="category.id"
             role="group"
             :aria-label="t(category.labelKey)"
-            class="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:gap-2"
+            class="flex min-w-0 flex-col gap-2 border-t border-gray-200 py-2.5 dark:border-dark-700 sm:flex-row sm:items-start sm:gap-4"
           >
-            <span class="text-xs font-medium text-gray-500 dark:text-dark-400 sm:w-20 sm:shrink-0 sm:pt-2">
-              {{ t(category.labelKey) }}
-            </span>
+            <div class="flex items-baseline gap-1.5 sm:w-28 sm:shrink-0 sm:pt-1">
+              <span class="font-serif text-base font-normal text-gray-950 dark:text-dark-50">
+                {{ t(category.labelKey) }}
+              </span>
+              <span class="font-mono text-[11px] tracking-[0.05em] text-primary-500 dark:text-primary-400">
+                {{ String(category.groups.length).padStart(2, '0') }}
+              </span>
+            </div>
             <div class="flex min-w-0 flex-wrap items-center gap-2">
               <button
                 v-for="g in category.groups"
                 :key="`group-${g.id}`"
                 type="button"
-                class="min-w-0 max-w-full whitespace-normal break-words rounded-lg px-3 py-1.5 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
-                :class="groupId === g.id ? 'chip-tinted-active' : 'chip-tinted'"
+                class="inline-flex min-w-0 max-w-full items-center gap-1.5 whitespace-normal break-words rounded-lg px-3 py-1.5 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
+                :class="groupId === g.id ? 'chip-group-active' : 'chip-group'"
                 :style="{ '--chip-accent': platformAccentColor(g.platform) }"
                 :disabled="!groupEnabled(g)"
                 @click="$emit('update:groupId', g.id)"
               >
+                <span class="chip-dot h-1.5 w-1.5 shrink-0 rounded-full" aria-hidden="true"></span>
                 {{ g.name }}
               </button>
             </div>
@@ -187,7 +193,10 @@ const groupCategories = computed(() =>
   KEY_GROUP_PROVIDERS.map((id) => ({
     id,
     labelKey: `keys.providers.${id}`,
-    groups: props.groups.filter((group) => groupCategory(group.platform) === id)
+    // 类内按倍率从低到高;sort 稳定,同倍率保持原顺序。
+    groups: props.groups
+      .filter((group) => groupCategory(group.platform) === id)
+      .sort((a, b) => a.rate - b.rate)
   })).filter((category) => category.groups.length > 0)
 )
 
@@ -268,5 +277,34 @@ function chipClass(active: boolean): string {
 
 .dark .chip-tinted-active:not(:disabled):hover {
   background-color: var(--chip-accent);
+}
+
+/* 分组 chip:中性暖灰底,平台只体现在 --chip-accent 圆点上;选中为陶土色实底。 */
+.chip-group {
+  @apply bg-white text-gray-700 ring-1 ring-inset ring-gray-200;
+  @apply dark:bg-dark-800/60 dark:text-dark-200 dark:ring-dark-700;
+}
+
+.chip-group:not(:disabled):hover {
+  @apply bg-gray-50 text-gray-950 ring-gray-300;
+  @apply dark:bg-dark-800 dark:text-white dark:ring-dark-600;
+}
+
+.chip-group-active {
+  @apply bg-primary-500 text-white shadow-sm;
+  @apply dark:bg-primary-600;
+}
+
+.chip-group-active:not(:disabled):hover {
+  @apply bg-primary-600 dark:bg-primary-500;
+}
+
+.chip-dot {
+  background-color: var(--chip-accent);
+}
+
+.chip-group-active .chip-dot {
+  background-color: currentColor;
+  opacity: 0.75;
 }
 </style>
