@@ -248,7 +248,7 @@ describe('PlazaFilterBar group categories', () => {
     const firstCategory = groupRow.querySelector('[role="group"]')!
     expect(allGroupsButton.textContent?.trim()).toBe(filterLabels[locale].all)
     expect(allGroupsButton.compareDocumentPosition(firstCategory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(groupRow.querySelectorAll('[role="group"] button')[0]?.classList.contains('chip-tinted')).toBe(true)
+    expect(groupRow.querySelectorAll('[role="group"] button')[0]?.classList.contains('chip-group')).toBe(true)
     wrapper.unmount()
   })
 
@@ -306,6 +306,46 @@ describe('PlazaFilterBar group categories', () => {
     wrapper.unmount()
   })
 
+  it('orders groups by rate ascending within each category, keeping input order on ties', async () => {
+    const groups = [
+      group(1, 'Claude Max Ent', 'anthropic', 1.2),
+      group(2, 'Claude Kiro', 'anthropic', 0.1),
+      group(3, 'Claude Max', 'anthropic', 0.5),
+      group(4, 'Claude Max Sale', 'anthropic', 0.3),
+      group(5, 'Claude Antigravity', 'anthropic', 0.1),
+      group(6, 'ChatGPT Pro', 'openai', 0.4),
+      group(7, 'ChatGPT Sale', 'openai', 0.15),
+      group(8, 'GLM', 'zhipu', 1),
+      group(9, 'DeepSeek', 'deepseek', 0.25)
+    ]
+    const original = structuredClone(groups)
+    const { wrapper } = mountFilterBar({ groups }, 'zh')
+
+    expect(groupNames(wrapper, 'Anthropic')).toEqual([
+      'Claude Kiro', 'Claude Antigravity', 'Claude Max Sale', 'Claude Max', 'Claude Max Ent'
+    ])
+    expect(groupNames(wrapper, 'OpenAI')).toEqual(['ChatGPT Sale', 'ChatGPT Pro'])
+    expect(groupNames(wrapper, '国产模型')).toEqual(['DeepSeek', 'GLM'])
+    expect(groups).toEqual(original)
+
+    await wrapper.setProps({ groups: groups.map((item) => item.id === 1 ? { ...item, rate: 0.05 } : item) })
+    expect(groupNames(wrapper, 'Anthropic')[0]).toBe('Claude Max Ent')
+    wrapper.unmount()
+  })
+
+  it('shows each category name with its zero-padded group count outside the group buttons', () => {
+    const { wrapper } = mountFilterBar({ groups: productionGroups() }, 'zh')
+    const categories = Array.from(wrapper.element.querySelectorAll('[role="group"]'))
+
+    expect(categories.map((element) => element.querySelector('.font-serif')?.textContent?.trim())).toEqual([
+      'Anthropic', 'OpenAI', '国产模型', '其他'
+    ])
+    expect(categories.map((element) => element.querySelector('.font-mono')?.textContent?.trim())).toEqual([
+      '05', '07', '04', '02'
+    ])
+    wrapper.unmount()
+  })
+
   it('shows only the present category and keeps every filtered group visible when disabled', () => {
     const { wrapper } = mountFilterBar({
       groups: [group(1, 'DeepSeek', 'deepseek'), group(2, 'Kimi', 'kimi')],
@@ -347,7 +387,7 @@ describe('PlazaFilterBar existing filter contracts', () => {
     const groupDeepSeek = buttonInRow(wrapper, 'Group', 'DeepSeek group')
     const groupKimi = buttonInRow(wrapper, 'Group', 'Kimi group')
     const groupOpenAI = buttonInRow(wrapper, 'Group', 'OpenAI group')
-    expect(groupDeepSeek.classList.contains('chip-tinted-active')).toBe(true)
+    expect(groupDeepSeek.classList.contains('chip-group-active')).toBe(true)
     expect(groupDeepSeek.style.getPropertyValue('--chip-accent')).not.toBe('')
     expect(groupKimi.disabled).toBe(true)
     expect(groupOpenAI.disabled).toBe(true)
