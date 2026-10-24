@@ -36,13 +36,13 @@
         >
           {{ t('modelPlaza.filters.all') }}
         </button>
-        <div v-if="groupCategories.length > 0" class="mt-2.5">
+        <div v-if="groupCategories.length > 0" class="mt-2 space-y-2">
           <div
             v-for="category in groupCategories"
             :key="category.id"
             role="group"
             :aria-label="t(category.labelKey)"
-            class="flex min-w-0 flex-col gap-2 border-t border-gray-200 py-2.5 dark:border-dark-700 sm:flex-row sm:items-start sm:gap-4"
+            class="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-4"
           >
             <div class="flex items-baseline gap-1.5 sm:w-28 sm:shrink-0 sm:pt-1">
               <span class="font-serif text-base font-normal text-gray-950 dark:text-dark-50">
