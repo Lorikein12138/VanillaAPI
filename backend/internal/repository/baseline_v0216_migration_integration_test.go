@@ -4,9 +4,12 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -40,27 +43,26 @@ type baselineV0216SentinelSnapshot struct {
 
 func baselineV0216PreviousFS(t *testing.T) fs.FS {
 	t.Helper()
-	entries, err := fs.ReadDir(dbmigrations.FS, ".")
+	fixture, err := os.ReadFile("../../migrations/testdata/baseline_v0216_prior_migrations.sha256")
 	require.NoError(t, err)
-	newNames := make(map[string]struct{}, len(baselineV0216NewMigrationNames))
-	for _, name := range baselineV0216NewMigrationNames {
-		newNames[name] = struct{}{}
-	}
 	previous := make(fstest.MapFS)
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".sql") {
-			continue
-		}
-		if _, isNew := newNames[name]; isNew {
-			continue
-		}
+	for _, line := range strings.Split(strings.TrimSpace(string(fixture)), "\n") {
+		fields := strings.Fields(line)
+		require.Len(t, fields, 2)
+		name := fields[1]
 		content, readErr := dbmigrations.FS.ReadFile(name)
 		require.NoError(t, readErr)
+		sum := sha256.Sum256(content)
+		require.Equal(t, fields[0], hex.EncodeToString(sum[:]), "frozen v0.2.15 migration changed: %s", name)
 		previous[name] = &fstest.MapFile{Data: append([]byte(nil), content...)}
 	}
 	require.Len(t, previous, 297, "the previous database must see exactly H's 297 migration files")
 	return previous
+}
+
+func baselineV0216TargetFS(t *testing.T) fs.FS {
+	t.Helper()
+	return baselineV0217PreviousFS(t)
 }
 
 func TestBaselineV0216FreshInstall(t *testing.T) {
@@ -68,7 +70,7 @@ func TestBaselineV0216FreshInstall(t *testing.T) {
 	defer cancel()
 	harnessDatabase, harnessConfig := baselineV0216HarnessSnapshot(t, ctx)
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0216TargetFS(t)))
 	baselineV0216RequireNewSchema(t, ctx, fixture.db)
 
 	_, repo := baselineV0216GroupRepository(t, fixture.db)
@@ -164,7 +166,7 @@ func TestBaselineV0216UpgradePreservesHistory(t *testing.T) {
 	require.NoError(t, fixture.db.QueryRowContext(ctx, "SELECT current_database()").Scan(&connectedDatabase))
 	require.Equal(t, fixture.name, connectedDatabase)
 
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0216TargetFS(t)))
 	baselineV0216RequireNewSchema(t, ctx, fixture.db)
 	afterRecords, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 	require.NoError(t, err)
@@ -217,11 +219,12 @@ func TestBaselineV0216SecondStartup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	target := baselineV0216TargetFS(t)
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, target))
 	first, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 	require.NoError(t, err)
 	require.Len(t, first, 301)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, target))
 	second, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 	require.NoError(t, err)
 	require.Equal(t, first, second, "second startup must not rewrite checksums or applied_at")

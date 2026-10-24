@@ -4,7 +4,6 @@ package service
 import (
 	"encoding/json"
 	"errors"
-	"hash/fnv"
 	"log/slog"
 	"net/url"
 	"reflect"
@@ -72,6 +71,8 @@ type Account struct {
 	// model_mapping 热路径缓存（非持久化字段）；以不可变快照原子发布，允许并发读取同一账号。
 	// 使用 atomic.Value（无 noCopy），Account 仍可按值拷贝，副本共享同一不可变快照。
 	modelMappingCache atomic.Value // *accountModelMappingCache
+	// 共享调度母本单独持有只读快照；普通 atomic.Value 保持零值，避免 slab 浅拷贝已用原子值。
+	modelMappingSharedSnapshot *accountModelMappingCache
 
 	// header_overrides 热路径缓存（非持久化字段，同 model_mapping 缓存先例）
 	headerOverrideCache               map[string]string
@@ -202,7 +203,7 @@ func (a *Account) IsSchedulable() bool {
 	if a.TempUnschedulableUntil != nil && now.Before(*a.TempUnschedulableUntil) {
 		return false
 	}
-	if a.IsAPIKeyOrBedrock() && a.IsQuotaExceeded() {
+	if a.SupportsAccountQuota() && a.IsQuotaExceeded() {
 		return false
 	}
 	return true
@@ -626,6 +627,14 @@ func (a *Account) GetModelMapping() map[string]string {
 	rawSig := uint64(0)
 	rawSigReady := false
 
+	if shared := a.modelMappingSharedSnapshot; shared != nil &&
+		shared.credentialsPtr == credentialsPtr &&
+		shared.rawPtr == rawPtr &&
+		shared.rawLen == rawLen &&
+		shared.runtimeVersion == runtimeVersion {
+		return shared.mapping
+	}
+
 	if cached, _ := a.modelMappingCache.Load().(*accountModelMappingCache); cached != nil &&
 		cached.credentialsPtr == credentialsPtr &&
 		cached.rawPtr == rawPtr &&
@@ -662,6 +671,23 @@ type accountModelMappingCache struct {
 	rawLen         int
 	rawSig         uint64
 	runtimeVersion uint64
+}
+
+// PrepareSharedSnapshot 预解析并发布独立的只读共享映射快照。
+// 必须在账号发布给其他 goroutine、或进入可浅复制的调度 slab 之前独占调用。
+// 若普通缓存此前已使用，先取出当前有效映射，再把 atomic.Value 重置为零值；
+// 母本和后续浅拷贝均只共享不可变的 accountModelMappingCache 指针。
+func (a *Account) PrepareSharedSnapshot() {
+	if a == nil {
+		return
+	}
+	a.GetModelMapping()
+	snapshot, _ := a.modelMappingCache.Load().(*accountModelMappingCache)
+	if snapshot == nil {
+		return
+	}
+	a.modelMappingSharedSnapshot = snapshot
+	a.modelMappingCache = atomic.Value{}
 }
 
 func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]string {
@@ -728,24 +754,47 @@ func modelMappingSignature(rawMapping map[string]any) uint64 {
 	if len(rawMapping) == 0 {
 		return 0
 	}
-	keys := make([]string, 0, len(rawMapping))
-	for k := range rawMapping {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	h := fnv.New64a()
-	for _, k := range keys {
-		_, _ = h.Write([]byte(k))
-		_, _ = h.Write([]byte{0})
-		if v, ok := rawMapping[k].(string); ok {
-			_, _ = h.Write([]byte(v))
+	var sum uint64
+	for key, value := range rawMapping {
+		h := uint64(modelMappingSignatureFNVOffset)
+		h = fnv1aString(h, key)
+		h = fnv1aByte(h, 0)
+		if text, ok := value.(string); ok {
+			h = fnv1aString(h, text)
 		} else {
-			_, _ = h.Write([]byte{1})
+			h = fnv1aByte(h, 1)
 		}
-		_, _ = h.Write([]byte{0xff})
+		sum += fmix64(h)
 	}
-	return h.Sum64()
+	return sum
+}
+
+const (
+	modelMappingSignatureFNVOffset = 14695981039346656037
+	modelMappingSignatureFNVPrime  = 1099511628211
+)
+
+func fnv1aString(hash uint64, value string) uint64 {
+	for index := 0; index < len(value); index++ {
+		hash ^= uint64(value[index])
+		hash *= modelMappingSignatureFNVPrime
+	}
+	return hash
+}
+
+func fnv1aByte(hash uint64, value byte) uint64 {
+	hash ^= uint64(value)
+	hash *= modelMappingSignatureFNVPrime
+	return hash
+}
+
+func fmix64(hash uint64) uint64 {
+	hash ^= hash >> 33
+	hash *= 0xff51afd7ed558ccd
+	hash ^= hash >> 33
+	hash *= 0xc4ceb9fe1a85ec53
+	hash ^= hash >> 33
+	return hash
 }
 
 // antigravityDefaultPassthroughModels 是 Antigravity 显式 model_mapping 运行时补齐的默认透传条目：
@@ -1385,9 +1434,25 @@ func (a *Account) IsBedrockAPIKey() bool {
 	return a.IsBedrock() && a.GetCredential("auth_mode") == "apikey"
 }
 
-// IsAPIKeyOrBedrock 返回账号类型是否支持配额和池模式等特性
+// IsAPIKeyOrBedrock 返回账号类型是否支持池模式等特性（账号配额判定见 SupportsAccountQuota）。
 func (a *Account) IsAPIKeyOrBedrock() bool {
 	return a.Type == AccountTypeAPIKey || a.Type == AccountTypeBedrock
+}
+
+// AccountTypeSupportsQuota 返回账号类型是否支持账号配额。
+// Vertex service_account 支持账号配额，但不因此获得 APIKey/Bedrock 的池模式行为。
+func AccountTypeSupportsQuota(accountType string) bool {
+	switch strings.ToLower(accountType) {
+	case AccountTypeAPIKey, AccountTypeBedrock, AccountTypeServiceAccount:
+		return true
+	default:
+		return false
+	}
+}
+
+// SupportsAccountQuota 报告当前账号类型是否支持账号配额。
+func (a *Account) SupportsAccountQuota() bool {
+	return a != nil && AccountTypeSupportsQuota(a.Type)
 }
 
 func (a *Account) IsOpenAI() bool {

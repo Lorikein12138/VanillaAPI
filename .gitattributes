@@ -1,5 +1,7 @@
 # 确保所有 SQL 迁移文件使用 LF 换行符
 backend/migrations/*.sql text eol=lf
+backend/go.mod text eol=lf
+backend/resources/model-pricing/model_prices_and_context_window.json text eol=lf
 
 # Go 源代码文件
 *.go text eol=lf
