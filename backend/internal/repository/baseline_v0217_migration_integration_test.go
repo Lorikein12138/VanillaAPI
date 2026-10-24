@@ -54,7 +54,7 @@ func TestBaselineV0217FreshInstall(t *testing.T) {
 	defer cancel()
 	database, config := baselineV0216HarnessSnapshot(t, ctx)
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0217PreviousFS(t)))
 	baselineV0217RequireLedger(t, ctx, fixture.db)
 	baselineV0216RequireHarnessUnchanged(t, ctx, database, config)
 }
@@ -112,7 +112,7 @@ func baselineV0217Upgrade(t *testing.T, secondStartup bool) {
 		startups = 2
 	}
 	for i := 0; i < startups; i++ {
-		require.NoError(t, ApplyMigrations(ctx, fixture.db))
+		require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0217PreviousFS(t)))
 		baselineV0217RequireLedger(t, ctx, fixture.db)
 		after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 		require.NoError(t, err)

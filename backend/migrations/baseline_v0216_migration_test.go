@@ -29,14 +29,19 @@ func TestBaselineV0216MigrationIdentity(t *testing.T) {
 
 	entries, err := FS.ReadDir(".")
 	require.NoError(t, err)
-	var current []string
+	var current, historical []string
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
 			current = append(current, entry.Name())
+			if entry.Name() != "246_enable_gemini_image_generation_groups.sql" {
+				historical = append(historical, entry.Name())
+			}
 		}
 	}
 	sort.Strings(current)
-	require.Len(t, current, 301, "v0.2.16 target adds four SQL files to the frozen 297")
+	sort.Strings(historical)
+	require.Len(t, current, 302, "v0.2.18 adds one migration after the frozen v0.2.17 target")
+	require.Len(t, historical, 301, "v0.2.16 target plus later frozen migrations remains 301")
 
 	for name, wantHash := range prior {
 		content, readErr := FS.ReadFile(name)
@@ -47,10 +52,11 @@ func TestBaselineV0216MigrationIdentity(t *testing.T) {
 	}
 
 	for _, name := range baselineV0216NewMigrations {
-		require.Contains(t, current, name)
+		require.Contains(t, historical, name)
 		_, existed := prior[name]
 		require.False(t, existed, "new upstream migration filename must not replace a frozen file")
 	}
+	require.Equal(t, append([]string(nil), historical...), sortedMigrationNames(historical), "historical target must be sorted")
 	require.Equal(t, append([]string(nil), baselineV0216NewMigrations...), sortedMigrationNames(baselineV0216NewMigrations))
 	require.Equal(t, 3, countMigrationPrefix(current, "242_"), "both local 242 files and the upstream 242 must coexist")
 	require.Less(t, sort.SearchStrings(current, "242_channel_monitor_v2_typesafe.sql"), sort.SearchStrings(current, "242_group_i18n.sql"))

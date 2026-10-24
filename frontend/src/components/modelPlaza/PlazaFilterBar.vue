@@ -17,37 +17,52 @@
           @click="$emit('update:platform', p)"
         >
           <PlatformIcon v-if="p !== 'all'" :platform="p as GroupPlatform" size="xs" />
-          {{ p === 'all' ? t('modelPlaza.filters.all') : p }}
+          {{ p === 'all' ? t('modelPlaza.filters.all') : platformLabel(p) }}
         </button>
       </div>
     </div>
 
     <!-- 二级:分组(按所属平台着色,当前组合下无结果的置灰) -->
-    <div class="flex items-start gap-2">
+    <div class="flex min-w-0 items-start gap-2">
       <span class="w-10 shrink-0 pt-2 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-dark-500">
         {{ t('modelPlaza.filters.groupLabel') }}
       </span>
-      <div class="flex flex-wrap items-center gap-2">
+      <div class="flex min-w-0 flex-1 items-start gap-2">
         <button
           type="button"
-          class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
+          class="shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium transition"
           :class="chipClass(groupId === 'all')"
           @click="$emit('update:groupId', 'all')"
         >
           {{ t('modelPlaza.filters.all') }}
         </button>
-        <button
-          v-for="g in groups"
-          :key="`group-${g.id}`"
-          type="button"
-          class="rounded-lg px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
-          :class="groupId === g.id ? 'chip-tinted-active' : 'chip-tinted'"
-          :style="{ '--chip-accent': platformAccentColor(g.platform) }"
-          :disabled="!groupEnabled(g)"
-          @click="$emit('update:groupId', g.id)"
-        >
-          {{ g.name }}
-        </button>
+        <div class="flex min-w-0 flex-1 flex-col gap-2">
+          <div
+            v-for="category in groupCategories"
+            :key="category.id"
+            role="group"
+            :aria-label="t(category.labelKey)"
+            class="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:gap-2"
+          >
+            <span class="text-xs font-medium text-gray-500 dark:text-dark-400 sm:w-20 sm:shrink-0 sm:pt-2">
+              {{ t(category.labelKey) }}
+            </span>
+            <div class="flex min-w-0 flex-wrap items-center gap-2">
+              <button
+                v-for="g in category.groups"
+                :key="`group-${g.id}`"
+                type="button"
+                class="min-w-0 max-w-full whitespace-normal break-words rounded-lg px-3 py-1.5 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
+                :class="groupId === g.id ? 'chip-tinted-active' : 'chip-tinted'"
+                :style="{ '--chip-accent': platformAccentColor(g.platform) }"
+                :disabled="!groupEnabled(g)"
+                @click="$emit('update:groupId', g.id)"
+              >
+                {{ g.name }}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -111,11 +126,14 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import { platformAccentColor } from '@/utils/platformColors'
 import type { GroupPlatform } from '@/types'
+import { platformDisplayName } from '@/constants/platformCatalog'
+import { getKeyGroupProvider, KEY_GROUP_PROVIDERS } from '@/utils/keyGroupProviders'
 
 const props = defineProps<{
   /** 数据中出现的平台(去重排序后)。 */
@@ -139,6 +157,39 @@ defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+const platformNameKeys: Partial<Record<string, string>> = {
+  anthropic: 'modelPlaza.filters.platformNames.anthropic',
+  deepseek: 'modelPlaza.filters.platformNames.deepseek',
+  openai: 'modelPlaza.filters.platformNames.openai',
+  minimax: 'modelPlaza.filters.platformNames.minimax',
+  gemini: 'modelPlaza.filters.platformNames.gemini',
+  grok: 'modelPlaza.filters.platformNames.grok',
+  kimi: 'modelPlaza.filters.platformNames.kimi',
+  zhipu: 'modelPlaza.filters.platformNames.zhipu'
+}
+
+// 只认自有键：constructor、__proto__ 等原型键不得命中继承成员。
+function platformLabel(platform: string): string {
+  const key = Object.prototype.hasOwnProperty.call(platformNameKeys, platform)
+    ? platformNameKeys[platform]
+    : undefined
+  return key ? t(key) : platformDisplayName(platform)
+}
+
+// 分类结果不在四类之内（如原型键取到继承成员）时归入 other，保证每个分组恰好出现一次。
+function groupCategory(platform: string): (typeof KEY_GROUP_PROVIDERS)[number] {
+  const provider = getKeyGroupProvider(platform as GroupPlatform)
+  return (KEY_GROUP_PROVIDERS as readonly unknown[]).includes(provider) ? provider : 'other'
+}
+
+const groupCategories = computed(() =>
+  KEY_GROUP_PROVIDERS.map((id) => ({
+    id,
+    labelKey: `keys.providers.${id}`,
+    groups: props.groups.filter((group) => groupCategory(group.platform) === id)
+  })).filter((category) => category.groups.length > 0)
+)
 
 /**
  * 三个维度互为约束(faceted):某选项可点 ⟺ 在「其他两维」当前选择下仍有分组命中。
