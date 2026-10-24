@@ -33,18 +33,24 @@ func TestBaselineV0217MigrationIdentity(t *testing.T) {
 	require.True(t, sort.StringsAreSorted(names))
 	entries, err := FS.ReadDir(".")
 	require.NoError(t, err)
-	var actual, sameNumber []string
+	var actual, historical, sameNumber []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() && strings.HasSuffix(name, ".sql") {
 			actual = append(actual, name)
+			if name != "246_enable_gemini_image_generation_groups.sql" {
+				historical = append(historical, name)
+			}
 			if name >= "241_" && name < "246_" {
 				sameNumber = append(sameNumber, name)
 			}
 		}
 	}
 	sort.Strings(actual)
-	require.Equal(t, names, actual, "v0.2.17 adds no migration")
+	sort.Strings(historical)
+	require.Len(t, actual, 302, "v0.2.18 adds exactly one migration after the frozen v0.2.17 target")
+	require.Equal(t, names, historical, "the frozen v0.2.17 target remains byte-identical")
+	require.Contains(t, actual, "246_enable_gemini_image_generation_groups.sql")
 	require.Equal(t, []string{
 		"241_add_payment_order_bonus_amount.sql", "241_add_typesafe_platform.sql", "241_channel_monitor_v2_passive_coverage.sql",
 		"242_channel_monitor_v2_typesafe.sql", "242_drop_platform_check_constraints.sql", "242_group_i18n.sql",

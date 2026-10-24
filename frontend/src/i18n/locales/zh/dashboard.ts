@@ -668,6 +668,16 @@ export default {
       rateLabel: '倍率',
       modelLabel: '模型',
       searchPlaceholder: '搜索模型名称',
+      platformNames: {
+        anthropic: 'Anthropic',
+        deepseek: 'DeepSeek',
+        openai: 'OpenAI',
+        minimax: 'MiniMax',
+        gemini: 'Gemini',
+        grok: 'Grok',
+        kimi: 'Kimi',
+        zhipu: 'Zhipu'
+      },
       all: '全部'
     },
     badges: {

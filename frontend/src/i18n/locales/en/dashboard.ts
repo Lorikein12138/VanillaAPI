@@ -663,6 +663,16 @@ export default {
       rateLabel: 'Rate',
       modelLabel: 'Model',
       searchPlaceholder: 'Search models',
+      platformNames: {
+        anthropic: 'Anthropic',
+        deepseek: 'DeepSeek',
+        openai: 'OpenAI',
+        minimax: 'MiniMax',
+        gemini: 'Gemini',
+        grok: 'Grok',
+        kimi: 'Kimi',
+        zhipu: 'Zhipu'
+      },
       all: 'All'
     },
     badges: {
