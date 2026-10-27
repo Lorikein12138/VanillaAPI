@@ -31,7 +31,11 @@ const PREFETCH_ADJACENCY: Record<string, string[]> = {
   '/keys': ['/dashboard', '/usage'],
   '/usage': ['/keys', '/redeem'],
   '/redeem': ['/usage', '/profile'],
-  '/profile': ['/dashboard', '/keys']
+  '/profile': ['/dashboard', '/keys'],
+  // Auth routes - 互跳不等分包加载
+  '/login': ['/register', '/forgot-password'],
+  '/register': ['/login'],
+  '/forgot-password': ['/login']
 }
 
 /**
