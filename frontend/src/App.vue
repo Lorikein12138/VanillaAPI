@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RouterView, useRouter, useRoute } from 'vue-router'
-import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, watch } from 'vue'
 import Toast from '@/components/common/Toast.vue'
 import NavigationProgress from '@/components/common/NavigationProgress.vue'
 import AdminComplianceDialog from '@/components/admin/AdminComplianceDialog.vue'
@@ -11,6 +11,9 @@ import { getSetupStatus } from '@/api/setup'
 import { updateFavicon } from '@/utils/branding'
 import { FeatureFlags, isFeatureFlagEnabled } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
+
+// 认证外壳单独分包，不进入口
+const AuthShell = defineAsyncComponent(() => import('@/components/layout/AuthShell.vue'))
 
 const router = useRouter()
 const route = useRoute()
@@ -163,7 +166,11 @@ onMounted(async () => {
 
 <template>
   <NavigationProgress />
-  <RouterView />
+  <!-- 认证页共用常驻外壳：互跳时只换卡片，丝绸动画不重建 -->
+  <AuthShell v-if="route.meta.authShell">
+    <RouterView />
+  </AuthShell>
+  <RouterView v-else />
   <Toast />
   <AnnouncementPopup />
   <AdminComplianceDialog />

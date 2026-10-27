@@ -20,6 +20,12 @@ declare module 'vue-router' {
     requiresAdmin?: boolean
 
     /**
+     * 是否挂在常驻认证外壳（AuthShell）下：同组页面互跳时丝绸动画与左屏不重建
+     * @default false
+     */
+    authShell?: boolean
+
+    /**
      * Page title for this route
      */
     title?: string

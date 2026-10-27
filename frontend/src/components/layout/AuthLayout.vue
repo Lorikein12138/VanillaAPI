@@ -1,83 +1,54 @@
 <template>
-  <div class="flex min-h-screen flex-col bg-gray-50 sm:h-[100dvh] sm:min-h-0 text-gray-950 dark:bg-dark-950 dark:text-dark-50">
-    <!-- Top bar -->
-    <header class="flex-none border-b border-gray-200 dark:border-dark-700">
-      <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4 sm:px-8">
-        <router-link to="/" class="flex min-w-0 items-center gap-2.5">
-          <template v-if="settingsLoaded">
-            <span class="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-md">
-              <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
-            </span>
-            <span class="truncate text-[1.0625rem] font-medium">{{ siteName }}</span>
-          </template>
-        </router-link>
-        <button
-          type="button"
-          class="inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border border-gray-300 text-gray-600 transition-colors hover:bg-gray-500/10 hover:text-gray-950 dark:border-dark-600 dark:text-dark-300 dark:hover:bg-white/5 dark:hover:text-dark-50"
-          :aria-label="isDark ? t('home.switchToLight') : t('home.switchToDark')"
-          :title="isDark ? t('home.switchToLight') : t('home.switchToDark')"
-          @click="toggleTheme"
-        >
-          <Icon v-if="isDark" name="sun" size="md" />
-          <Icon v-else name="moon" size="md" />
-        </button>
+  <component :is="inShell ? Passthrough : AuthShell">
+    <div class="auth-panel flex min-h-0 flex-col">
+      <div class="auth-card min-h-0 overflow-y-auto overscroll-contain rounded-2xl border border-gray-200/90 bg-white p-6 sm:p-10 dark:border-dark-700 dark:bg-dark-800">
+        <slot />
       </div>
-    </header>
 
-    <!-- Content -->
-    <main class="mx-auto flex w-full max-w-6xl flex-1 flex-wrap items-center justify-center gap-x-20 gap-y-10 px-4 py-10 sm:min-h-0 sm:px-8 sm:py-8">
-      <!-- Editorial intro -->
-      <section v-if="settingsLoaded" class="hidden min-w-0 max-w-md flex-[1_1_360px] flex-col gap-6 lg:flex">
-        <h1 class="font-serif text-[2.75rem] font-normal leading-[1.2] tracking-tight">
-          {{ siteName }}
-        </h1>
-        <p class="text-[1.0625rem] leading-relaxed text-gray-600 dark:text-dark-300">
-          {{ siteSubtitle }}
-        </p>
-        <div class="h-px w-24 bg-primary-500/60"></div>
-      </section>
-
-      <!-- Card Container -->
-      <!-- 卡片高度受视口约束（sm 及以上），内容过长时卡片内滚动，页面不出现滚动条 -->
-      <div class="flex w-full min-w-0 max-w-[26rem] flex-[1_1_360px] flex-col sm:max-h-full">
-        <div class="auth-card min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-gray-200 bg-white p-6 sm:p-9 dark:border-dark-700 dark:bg-dark-800">
-          <slot />
-        </div>
-
-        <!-- Footer Links -->
-        <div class="mt-5 flex-none text-center text-sm">
-          <slot name="footer" />
-        </div>
+      <!-- Footer Links -->
+      <div class="mt-6 flex-none text-center text-sm">
+        <slot name="footer" />
       </div>
-    </main>
-
-    <!-- Copyright -->
-    <footer class="flex-none px-4 pb-6 text-center text-xs text-gray-500 dark:text-dark-400">
-      &copy; {{ currentYear }} {{ siteName }}. All rights reserved.
-    </footer>
-  </div>
+    </div>
+  </component>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
-import { useI18n } from 'vue-i18n'
-import Icon from '@/components/icons/Icon.vue'
-import { useAppStore } from '@/stores'
-import { useThemeToggle } from '@/composables/useThemeToggle'
-import { sanitizeUrl } from '@/utils/url'
+import { inject, type FunctionalComponent } from 'vue'
+import AuthShell from './AuthShell.vue'
+import { AUTH_SHELL_KEY } from './authShellKey'
 
-const { t } = useI18n()
-const appStore = useAppStore()
-const { isDark, toggleTheme } = useThemeToggle()
-
-const siteName = computed(() => appStore.siteName || 'Sub2API')
-const siteLogo = computed(() => sanitizeUrl(appStore.siteLogo || '', { allowRelative: true, allowDataUrl: true }))
-const siteSubtitle = computed(() => appStore.cachedPublicSettings?.site_subtitle || 'Subscription to API Conversion Platform')
-const settingsLoaded = computed(() => appStore.publicSettingsLoaded)
-
-const currentYear = computed(() => new Date().getFullYear())
-
-onMounted(() => {
-  appStore.fetchPublicSettings()
-})
+// 路由带 meta.authShell 时外壳由 App 常驻提供，这里只出卡片；否则自带外壳独立成页。
+const inShell = inject(AUTH_SHELL_KEY, false)
+const Passthrough: FunctionalComponent = (_, { slots }) => slots.default?.()
 </script>
+
+<style scoped>
+.auth-card {
+  box-shadow:
+    0 1px 2px rgba(20, 20, 19, 0.03),
+    0 18px 40px -18px rgba(20, 20, 19, 0.12);
+}
+
+:global(.dark) .auth-card {
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.45);
+}
+
+/* 换页时只有卡片轻淡入，外壳与动画不动 */
+.auth-panel {
+  animation: auth-panel-in 0.36s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes auth-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-panel {
+    animation: none;
+  }
+}
+</style>
