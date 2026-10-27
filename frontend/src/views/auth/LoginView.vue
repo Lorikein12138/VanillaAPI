@@ -381,7 +381,8 @@ onMounted(async () => {
   }
 
   try {
-    const settings = await getPublicSettings()
+    // 认证页互跳时直接用页面加载时注入/缓存的公共设置，不再等一次请求才渲染
+    const settings = appStore.cachedPublicSettings ?? (await getPublicSettings())
     registrationEnabled.value = settings.registration_enabled === true
     turnstileEnabled.value = settings.turnstile_enabled
     turnstileSiteKey.value = settings.turnstile_site_key || ''

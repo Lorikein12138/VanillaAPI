@@ -562,7 +562,8 @@ onMounted(async () => {
   syncAffiliateReferralCode()
 
   try {
-    const settings = await getPublicSettings()
+    // 认证页互跳时直接用页面加载时注入/缓存的公共设置，不再等一次请求才渲染
+    const settings = appStore.cachedPublicSettings ?? (await getPublicSettings())
     registrationEnabled.value = settings.registration_enabled
     emailVerifyEnabled.value = settings.email_verify_enabled
     promoCodeEnabled.value = settings.promo_code_enabled

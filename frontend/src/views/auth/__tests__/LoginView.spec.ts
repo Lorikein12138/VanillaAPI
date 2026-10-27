@@ -3,7 +3,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import LoginView from '@/views/auth/LoginView.vue'
 
-const { getPublicSettingsMock, pushMock, loginMock, showErrorMock, showSuccessMock } = vi.hoisted(() => ({
+const { appStoreState, getPublicSettingsMock, pushMock, loginMock, showErrorMock, showSuccessMock } = vi.hoisted(() => ({
+  appStoreState: { cachedPublicSettings: null as Record<string, unknown> | null },
   getPublicSettingsMock: vi.fn(),
   pushMock: vi.fn(),
   loginMock: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock('@/stores', () => ({
     login2FA: vi.fn()
   }),
   useAppStore: () => ({
+    cachedPublicSettings: appStoreState.cachedPublicSettings,
     showError: (...args: unknown[]) => showErrorMock(...args),
     showSuccess: (...args: unknown[]) => showSuccessMock(...args),
     showWarning: vi.fn()
@@ -105,6 +107,7 @@ function mountLogin() {
 
 describe('LoginView registration entry', () => {
   beforeEach(() => {
+    appStoreState.cachedPublicSettings = null
     getPublicSettingsMock.mockReset()
     pushMock.mockReset()
     loginMock.mockReset()
@@ -131,6 +134,16 @@ describe('LoginView registration entry', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('auth.signUp')
+  })
+
+  it('renders the registration entry from cached settings without refetching', async () => {
+    appStoreState.cachedPublicSettings = publicSettings
+
+    const wrapper = mountLogin()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('auth.signUp')
+    expect(getPublicSettingsMock).not.toHaveBeenCalled()
   })
 
   it('blocks login after the captcha expires and sends only the replacement token', async () => {
