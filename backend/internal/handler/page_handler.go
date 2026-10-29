@@ -141,15 +141,15 @@ func resolvePageImagePath(pagesDir, imagesDir, filename string) (string, bool) {
 		return "", false
 	}
 
-	realPagesDir, err := filepath.EvalSymlinks(cleanedPagesDir)
+	realPagesDir, err := resolvePageImagePhysicalPath(cleanedPagesDir)
 	if err != nil {
 		return "", false
 	}
-	realImagesDir, err := filepath.EvalSymlinks(cleanedImagesDir)
+	realImagesDir, err := resolvePageImagePhysicalPath(cleanedImagesDir)
 	if err != nil || !isPathWithinBase(realImagesDir, realPagesDir) {
 		return "", false
 	}
-	realTarget, err := filepath.EvalSymlinks(cleanedTarget)
+	realTarget, err := resolvePageImagePhysicalPath(cleanedTarget)
 	if err != nil || !isPathWithinBase(realTarget, realImagesDir) {
 		return "", false
 	}

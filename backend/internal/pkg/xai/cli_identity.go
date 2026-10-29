@@ -57,10 +57,14 @@ func IsSupportedCLIVersion(version string) bool {
 
 // CLIUserAgent 对齐官方交互式 CLI 的 UA，平台名称使用 Rust 的格式。
 func CLIUserAgent(version string) string {
+	return cliUserAgentForPlatform(version, runtime.GOOS, runtime.GOARCH)
+}
+
+func cliUserAgentForPlatform(version, goos, goarch string) string {
 	if strings.TrimSpace(version) == "" {
 		version = CLIClientVersion
 	}
-	platform, arch := runtime.GOOS, runtime.GOARCH
+	platform, arch := goos, goarch
 	if platform == "darwin" {
 		platform = "macos"
 	}
