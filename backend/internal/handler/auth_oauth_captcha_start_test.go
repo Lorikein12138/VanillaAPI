@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -175,4 +176,26 @@ func TestOAuthStartGetRemainsCompatibleWhenTencentDisabled(t *testing.T) {
 	require.Equal(t, http.StatusFound, recorder.Code)
 	require.Equal(t, "https://provider.example/authorize", recorder.Header().Get("Location"))
 	require.Zero(t, verifier.calls)
+}
+
+func TestDingTalkOAuthStart_Disabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, verifier := newOAuthCaptchaTestHandler(false)
+	handler.cfg.DingTalk.Enabled = false
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/oauth/dingtalk/start?redirect=%2Fdashboard&intent=login", nil)
+	handler.DingTalkOAuthStart(ctx)
+
+	require.Equal(t, http.StatusFound, response.Code)
+	location := response.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	require.NoError(t, err)
+	require.Equal(t, dingTalkOAuthDefaultFrontendCB, parsed.Path)
+	fragment, err := url.ParseQuery(parsed.Fragment)
+	require.NoError(t, err)
+	require.Equal(t, "dingtalk_not_enabled", fragment.Get("error"))
+	require.NotContains(t, location, "dingtalk.com")
+	require.Empty(t, response.Result().Cookies(), "disabled OAuth must not create state or redirect cookies")
+	require.Zero(t, verifier.calls, "captcha is disabled and the provider flow must not make a verification call")
 }
