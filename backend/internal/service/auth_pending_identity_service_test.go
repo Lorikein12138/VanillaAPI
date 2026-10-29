@@ -361,9 +361,7 @@ func TestAuthPendingIdentityService_UpsertAdoptionDecision_IsIdempotentUnderConc
 	require.Equal(t, identity.ID, *loaded.IdentityID)
 }
 
-func TestAuthPendingIdentityService_UpsertAdoptionDecision_ClearsLegacyNullSessionReference(t *testing.T) {
-	t.Skip("legacy NULL pending_auth_session_id rows only exist in production PostgreSQL history; sqlite unit schema rejects NULL")
-
+func TestAuthPendingIdentityService_UpsertAdoptionDecision_SchemaRejectsLegacyNullSessionReference(t *testing.T) {
 	svc, client := newAuthPendingIdentityServiceTestClient(t)
 	ctx := context.Background()
 
@@ -384,6 +382,8 @@ func TestAuthPendingIdentityService_UpsertAdoptionDecision_ClearsLegacyNullSessi
 		Save(ctx)
 	require.NoError(t, err)
 
+	// pending_auth_session_id is NOT NULL in both the Ent schema and migration 108,
+	// so a decision without a pending session can never be stored.
 	_, err = client.ExecContext(
 		ctx,
 		`INSERT INTO identity_adoption_decisions
@@ -396,12 +396,12 @@ func TestAuthPendingIdentityService_UpsertAdoptionDecision_ClearsLegacyNullSessi
 		time.Now().UTC(),
 		time.Now().UTC(),
 	)
-	require.NoError(t, err)
-	legacyDecision, err := client.IdentityAdoptionDecision.Query().
+	require.Error(t, err)
+	legacyCount, err := client.IdentityAdoptionDecision.Query().
 		Where(identityadoptiondecision.IdentityIDEQ(identity.ID)).
-		Only(ctx)
+		Count(ctx)
 	require.NoError(t, err)
-	require.NotNil(t, legacyDecision.IdentityID)
+	require.Zero(t, legacyCount)
 
 	session, err := svc.CreatePendingSession(ctx, CreatePendingAuthSessionInput{
 		Intent: "bind_current_user",
@@ -422,10 +422,13 @@ func TestAuthPendingIdentityService_UpsertAdoptionDecision_ClearsLegacyNullSessi
 	require.NoError(t, err)
 	require.NotNil(t, decision.IdentityID)
 	require.Equal(t, identity.ID, *decision.IdentityID)
+	require.Equal(t, session.ID, decision.PendingAuthSessionID)
 
-	reloadedLegacy, err := client.IdentityAdoptionDecision.Get(ctx, legacyDecision.ID)
+	decisions, err := client.IdentityAdoptionDecision.Query().
+		Where(identityadoptiondecision.IdentityIDEQ(identity.ID)).
+		All(ctx)
 	require.NoError(t, err)
-	require.Nil(t, reloadedLegacy.IdentityID)
+	require.Len(t, decisions, 1)
 }
 
 func TestAuthPendingIdentityService_ConsumeBrowserSession(t *testing.T) {

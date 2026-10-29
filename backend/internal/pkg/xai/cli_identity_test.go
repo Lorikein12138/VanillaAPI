@@ -30,10 +30,27 @@ func TestApplyCLIProxyHeadersMeetsUpstreamMinimumVersion(t *testing.T) {
 
 func TestCLIUserAgentMatchesOfficialInteractiveCapture(t *testing.T) {
 	// 来源：官方 CLI 1.0.46 交互式界面在 Linux x86_64 的主 Responses 请求抓包。
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skip("该抓包样本来自 Linux x86_64")
+	require.Equal(t, "grok-pager/1.0.46 grok-shell/1.0.46 (linux; x86_64)", cliUserAgentForPlatform("1.0.46", "linux", "amd64"))
+
+	tests := []struct {
+		name    string
+		goos    string
+		goarch  string
+		version string
+		want    string
+	}{
+		{name: "windows amd64", goos: "windows", goarch: "amd64", version: "1.2.3", want: "grok-pager/1.2.3 grok-shell/1.2.3 (windows; x86_64)"},
+		{name: "darwin arm64", goos: "darwin", goarch: "arm64", version: "1.2.3", want: "grok-pager/1.2.3 grok-shell/1.2.3 (macos; aarch64)"},
+		{name: "linux 386", goos: "linux", goarch: "386", version: "1.2.3", want: "grok-pager/1.2.3 grok-shell/1.2.3 (linux; x86)"},
+		{name: "unknown values", goos: "plan9", goarch: "mips64le", version: "1.2.3", want: "grok-pager/1.2.3 grok-shell/1.2.3 (plan9; mips64le)"},
+		{name: "empty version", goos: "linux", goarch: "amd64", want: "grok-pager/" + CLIClientVersion + " grok-shell/" + CLIClientVersion + " (linux; x86_64)"},
 	}
-	require.Equal(t, "grok-pager/1.0.46 grok-shell/1.0.46 (linux; x86_64)", CLIUserAgent("1.0.46"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, cliUserAgentForPlatform(tt.version, tt.goos, tt.goarch))
+		})
+	}
+	require.Equal(t, cliUserAgentForPlatform("1.0.46", runtime.GOOS, runtime.GOARCH), CLIUserAgent("1.0.46"))
 }
 
 func TestResolveCLIVersionDefaultsToPinnedClientVersion(t *testing.T) {

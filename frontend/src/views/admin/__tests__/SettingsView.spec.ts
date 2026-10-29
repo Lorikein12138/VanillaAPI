@@ -8,6 +8,15 @@ import zhCommon from "@/i18n/locales/zh/common";
 import zhSettings from "@/i18n/locales/zh/admin/settings";
 import SettingsView from "../SettingsView.vue";
 
+vi.mock("@/api/admin/adminAccessKeys", () => ({
+  list: vi.fn().mockResolvedValue({ items: [], permissions: [] }),
+  create: vi.fn(), update: vi.fn(), rotate: vi.fn(), revoke: vi.fn(), deleteRecord: vi.fn(),
+}));
+vi.mock("@/api/admin/groups", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/admin/groups")>();
+  return { ...actual, getAllIncludingInactive: vi.fn().mockResolvedValue([]) };
+});
+
 const {
   getSettings,
   updateSettings,
@@ -154,6 +163,7 @@ vi.mock("@/composables/useClipboard", () => ({
 
 vi.mock("@/utils/apiError", () => ({
   extractApiErrorMessage: () => "error",
+  extractI18nErrorMessage: () => "error",
 }));
 
 vi.mock("vue-i18n", async () => {
@@ -598,6 +608,35 @@ async function openSecurityTab(wrapper: ReturnType<typeof mountView>) {
   await securityTabButton?.trigger("click");
   await flushPromises();
 }
+
+describe("admin SettingsView scoped admin key placement", () => {
+  it("keeps admin key management and existing security/payment settings reachable", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      payment_quick_amounts: [10, 25, 50],
+    });
+    getProviders.mockResolvedValueOnce({ data: [] });
+    const wrapper = mountView();
+    await flushPromises();
+
+    await openPaymentTab(wrapper);
+    expect(wrapper.findAll('[data-testid="payment-quick-amount-row"]').length).toBeGreaterThan(0);
+
+    await openSecurityTab(wrapper);
+    expect(wrapper.find('[aria-label="adminAccessKeys.title"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("admin.settings.security.passkeyHint");
+
+    await openUsersTab(wrapper);
+    expect(wrapper.find('[data-testid="auth-source-email-enabled"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="auth-source-email-panel"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="auth-source-email-enabled"]').setValue(true);
+    expect(wrapper.find('[data-testid="auth-source-email-panel"]').exists()).toBe(true);
+
+    await openPaymentTab(wrapper);
+    expect(wrapper.findAll('[data-testid="payment-quick-amount-row"]').length).toBeGreaterThan(0);
+    wrapper.unmount();
+  });
+});
 
 async function openGatewayTab(wrapper: ReturnType<typeof mountView>) {
   const gatewayTabButton = wrapper

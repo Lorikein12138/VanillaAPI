@@ -18,12 +18,14 @@ func TestGetByKeyForAuthComputesCurrentAccountModelAllowlistUnion(t *testing.T) 
 	suffix := time.Now().UnixNano()
 	group := mustCreateGroup(t, integrationEntClient, &service.Group{
 		Name: fmt.Sprintf("model-allowlist-proj-group-%d", suffix), Platform: service.PlatformOpenAI,
-		RateMultiplier: 1,
+		RateMultiplier:       1,
+		AllowImageGeneration: true, ImageCountBilling: true,
 		ModelAllowlist: service.GroupModelAllowlist{
 			Enabled: true,
 			Models:  []string{"legacy-manual-model"},
 		},
 	})
+	groupRepo := NewGroupRepository(integrationEntClient, integrationDB)
 	accountRepo := newAccountRepositoryWithSQL(integrationEntClient, integrationDB, nil)
 	memberA := mustCreateAccount(t, integrationEntClient, &service.Account{
 		Name: "model-allowlist-proj-a", Platform: service.PlatformOpenAI, Status: service.StatusDisabled,
@@ -61,7 +63,27 @@ func TestGetByKeyForAuthComputesCurrentAccountModelAllowlistUnion(t *testing.T) 
 	got, err := apiKeyRepo.GetByKeyForAuth(ctx, keyValue)
 	require.NoError(t, err)
 	require.NotNil(t, got.Group)
+	require.True(t, got.Group.AllowImageGeneration)
+	require.True(t, got.Group.ImageCountBilling)
 	require.True(t, got.Group.ModelAllowlist.Enabled)
+	require.Equal(t, []string{"gpt-5.4", "gpt-5.5-*", "gpt-5.6", "renamed"}, got.Group.ModelAllowlist.Models)
+	gotGroup, err := groupRepo.GetByID(ctx, group.ID)
+	require.NoError(t, err)
+	require.True(t, gotGroup.AllowImageGeneration)
+	require.True(t, gotGroup.ImageCountBilling)
+
+	// The new field can be disabled independently while the historical
+	// allow_image_generation flag remains true in both repository projections.
+	gotGroup.ImageCountBilling = false
+	require.NoError(t, groupRepo.Update(ctx, gotGroup))
+	gotGroup, err = groupRepo.GetByID(ctx, group.ID)
+	require.NoError(t, err)
+	require.True(t, gotGroup.AllowImageGeneration)
+	require.False(t, gotGroup.ImageCountBilling)
+	got, err = apiKeyRepo.GetByKeyForAuth(ctx, keyValue)
+	require.NoError(t, err)
+	require.True(t, got.Group.AllowImageGeneration)
+	require.False(t, got.Group.ImageCountBilling)
 	require.Equal(t, []string{"gpt-5.4", "gpt-5.5-*", "gpt-5.6", "renamed"}, got.Group.ModelAllowlist.Models)
 
 	require.NoError(t, accountRepo.UpdateCredentials(ctx, memberA.ID, map[string]any{
@@ -69,15 +91,21 @@ func TestGetByKeyForAuthComputesCurrentAccountModelAllowlistUnion(t *testing.T) 
 	}))
 	got, err = apiKeyRepo.GetByKeyForAuth(ctx, keyValue)
 	require.NoError(t, err)
+	require.True(t, got.Group.AllowImageGeneration)
+	require.False(t, got.Group.ImageCountBilling)
 	require.Equal(t, []string{"gpt-5.5-*", "gpt-5.6", "gpt-5.7"}, got.Group.ModelAllowlist.Models)
 
 	require.NoError(t, accountRepo.BindGroups(ctx, memberA.ID, nil))
 	got, err = apiKeyRepo.GetByKeyForAuth(ctx, keyValue)
 	require.NoError(t, err)
+	require.True(t, got.Group.AllowImageGeneration)
+	require.False(t, got.Group.ImageCountBilling)
 	require.Equal(t, []string{"gpt-5.5-*", "gpt-5.6"}, got.Group.ModelAllowlist.Models)
 
 	require.NoError(t, accountRepo.Delete(ctx, memberB.ID))
 	got, err = apiKeyRepo.GetByKeyForAuth(ctx, keyValue)
 	require.NoError(t, err)
+	require.True(t, got.Group.AllowImageGeneration)
+	require.False(t, got.Group.ImageCountBilling)
 	require.Empty(t, got.Group.ModelAllowlist.Models)
 }

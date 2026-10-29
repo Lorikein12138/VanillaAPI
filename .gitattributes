@@ -1,3 +1,8 @@
+# 本轮修复的三个关键文件固定使用 LF。
+/.gitattributes text eol=lf
+/backend/cmd/server/VERSION text eol=lf
+/backend/migrations/testdata/baseline_v0219_prior_migrations.sha256 text eol=lf
+
 # 确保所有 SQL 迁移文件使用 LF 换行符
 backend/migrations/*.sql text eol=lf
 backend/go.mod text eol=lf

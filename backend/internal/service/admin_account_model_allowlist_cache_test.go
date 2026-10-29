@@ -4,8 +4,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/DATA-DOG/go-sqlmock"
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -214,4 +219,78 @@ func TestAdminService_SetAccountSchedulableInvalidatesBoundGroups(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, updated)
 	require.Equal(t, []int64{7, 8}, cache.groupIDs)
+}
+
+type txAwareAuthCacheInvalidator struct {
+	groupIDs      []int64
+	groupHasTxCtx []bool
+}
+
+func (s *txAwareAuthCacheInvalidator) InvalidateAuthCacheByKey(context.Context, string)   {}
+func (s *txAwareAuthCacheInvalidator) InvalidateAuthCacheByUserID(context.Context, int64) {}
+func (s *txAwareAuthCacheInvalidator) InvalidateAuthCacheByGroupID(ctx context.Context, groupID int64) {
+	s.groupIDs = append(s.groupIDs, groupID)
+	s.groupHasTxCtx = append(s.groupHasTxCtx, dbent.TxFromContext(ctx) != nil)
+}
+
+func newAllowlistCacheCommitTestClient(t *testing.T) (*dbent.Client, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+	return client, mock
+}
+
+func TestAdminService_InvalidateAuthCacheWaitsForAccountCommit(t *testing.T) {
+	client, mock := newAllowlistCacheCommitTestClient(t)
+	mock.ExpectBegin()
+	tx, err := client.Tx(context.Background())
+	require.NoError(t, err)
+
+	cache := &txAwareAuthCacheInvalidator{}
+	svc := &adminServiceImpl{authCacheInvalidator: cache}
+	svc.invalidateAuthCacheByGroupIDs(dbent.NewTxContext(context.Background(), tx), []int64{7, 8, 7, 0, -1})
+	require.Empty(t, cache.groupIDs, "cache invalidation must wait until the account transaction commits")
+
+	mock.ExpectCommit()
+	require.NoError(t, tx.Commit())
+	require.Equal(t, []int64{7, 8}, cache.groupIDs)
+	require.Equal(t, []bool{false, false}, cache.groupHasTxCtx, "the commit callback must not retain the completed transaction")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAdminService_InvalidateAuthCacheDoesNotRunAfterAccountRollback(t *testing.T) {
+	client, mock := newAllowlistCacheCommitTestClient(t)
+	mock.ExpectBegin()
+	tx, err := client.Tx(context.Background())
+	require.NoError(t, err)
+
+	cache := &txAwareAuthCacheInvalidator{}
+	svc := &adminServiceImpl{authCacheInvalidator: cache}
+	svc.invalidateAuthCacheByGroupIDs(dbent.NewTxContext(context.Background(), tx), []int64{7, 8, 7})
+	require.Empty(t, cache.groupIDs)
+
+	mock.ExpectRollback()
+	require.NoError(t, tx.Rollback())
+	require.Empty(t, cache.groupIDs, "rolled-back account changes must not invalidate caches")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAdminService_InvalidateAuthCacheDoesNotRunAfterCommitFailure(t *testing.T) {
+	client, mock := newAllowlistCacheCommitTestClient(t)
+	mock.ExpectBegin()
+	tx, err := client.Tx(context.Background())
+	require.NoError(t, err)
+
+	cache := &txAwareAuthCacheInvalidator{}
+	svc := &adminServiceImpl{authCacheInvalidator: cache}
+	svc.invalidateAuthCacheByGroupIDs(dbent.NewTxContext(context.Background(), tx), []int64{7, 8, 7})
+	require.Empty(t, cache.groupIDs)
+
+	mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+	require.ErrorContains(t, tx.Commit(), "commit failed")
+	require.Empty(t, cache.groupIDs, "failed commits must not invalidate caches")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

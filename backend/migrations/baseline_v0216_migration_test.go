@@ -33,14 +33,16 @@ func TestBaselineV0216MigrationIdentity(t *testing.T) {
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
 			current = append(current, entry.Name())
-			if entry.Name() != "246_enable_gemini_image_generation_groups.sql" {
+			if entry.Name() != "246_enable_gemini_image_generation_groups.sql" &&
+				entry.Name() != "247_scoped_admin_api_keys.sql" &&
+				entry.Name() != "248_group_image_count_billing.sql" {
 				historical = append(historical, entry.Name())
 			}
 		}
 	}
 	sort.Strings(current)
 	sort.Strings(historical)
-	require.Len(t, current, 302, "v0.2.18 adds one migration after the frozen v0.2.17 target")
+	require.Len(t, current, 304, "the current tree adds exactly 247 and 248 after the frozen v0.2.18 target")
 	require.Len(t, historical, 301, "v0.2.16 target plus later frozen migrations remains 301")
 
 	for name, wantHash := range prior {

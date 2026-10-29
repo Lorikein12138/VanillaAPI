@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -85,6 +86,25 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return
 	}
 
+	// 分组内 Gemini 账号都声明了 model_mapping 时，列表与 /v1/models 同源（含白名单口径），不透传单个账号的上游列表。
+	if declared, err := h.geminiCompatService.DeclaredModelIDs(c.Request.Context(), apiKey.GroupID); err == nil && len(declared) > 0 {
+		ids := append([]string{}, declared...)
+		for _, id := range agModelIDs {
+			if !slices.Contains(declared, id) {
+				ids = append(ids, id)
+			}
+		}
+		if apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
+			ids = filterDeclaredGeminiModelIDs(apiKey.Group.ModelAllowlist, ids)
+		}
+		declaredModels := make([]gemini.Model, 0, len(ids))
+		for _, id := range ids {
+			declaredModels = append(declaredModels, gemini.FallbackModel(id))
+		}
+		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: declaredModels})
+		return
+	}
+
 	account, err := h.geminiCompatService.SelectAccountForModelsEndpoints(c.Request.Context(), apiKey.GroupID)
 	if err != nil {
 		if len(additionalModels) > 0 {
@@ -119,6 +139,53 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		}
 	}
 	writeUpstreamResponse(c, res)
+}
+
+// filterDeclaredGeminiModelIDs applies the existing admission and listing rules
+// to declared mapping keys. Native Gemini model names include the "models/"
+// prefix, while mapping keys do not; evaluate both forms so the declared fast
+// path preserves the same allowlist semantics as the upstream response path.
+func filterDeclaredGeminiModelIDs(allowlist service.GroupModelAllowlist, ids []string) []string {
+	if !allowlist.Enabled {
+		return ids
+	}
+	withPrefix := make([]string, 0, len(ids))
+	for _, id := range ids {
+		withPrefix = append(withPrefix, "models/"+id)
+	}
+	listed := append(allowlist.FilterForListing(ids), allowlist.FilterForListing(withPrefix)...)
+	listedSet := make(map[string]struct{}, len(listed))
+	for _, id := range listed {
+		listedSet[strings.TrimPrefix(id, "models/")] = struct{}{}
+	}
+
+	result := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	add := func(id string) {
+		id = strings.TrimPrefix(strings.TrimSpace(id), "models/")
+		key := strings.ToLower(id)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, id)
+	}
+	for _, id := range ids {
+		if allowlist.Allows("models/" + id) {
+			add(id)
+			continue
+		}
+		if _, ok := listedSet[id]; ok {
+			add(id)
+		}
+	}
+	for _, id := range listed {
+		add(id)
+	}
+	return result
 }
 
 // mergeGeminiModelLists keeps native metadata when both sources advertise a model.
@@ -266,6 +333,18 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 	if forcePlatform == service.PlatformAntigravity || effectivePlatform == service.PlatformAntigravity {
 		c.JSON(http.StatusOK, antigravity.FallbackGeminiModel(modelName))
 		return
+	}
+
+	// 分组内 Gemini 账号都声明了 model_mapping 时，按列表接口的同一来源判断模型是否存在。
+	if declared, err := h.geminiCompatService.DeclaredModelIDs(c.Request.Context(), apiKey.GroupID); err == nil && len(declared) > 0 {
+		if agModelIDs, agErr := h.geminiCompatService.AntigravityGeminiModelIDs(c.Request.Context(), apiKey.GroupID, true); agErr == nil {
+			if service.DeclaredModelsCover(declared, modelName) || service.DeclaredModelsCover(agModelIDs, modelName) {
+				c.JSON(http.StatusOK, gemini.FallbackModel(modelName))
+				return
+			}
+			googleError(c, http.StatusNotFound, "models/"+modelName+" is not found")
+			return
+		}
 	}
 
 	account, err := h.geminiCompatService.SelectAccountForModelsEndpoints(c.Request.Context(), apiKey.GroupID)

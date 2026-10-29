@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/adminaccess"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -190,6 +191,45 @@ func TestAccountHandlerGetAvailableModels_ExplicitMappingShortCircuitsUpstream(t
 	require.NotContains(t, rec.Body.String(), "upstream-image-model")
 	require.NotContains(t, rec.Body.String(), "upstream-only")
 	require.Equal(t, 0, upstream.callCount())
+}
+
+type availableModelsScopedAdminService struct {
+	*availableModelsAdminService
+	service.ScopedAdminAccounts
+}
+
+func TestAccountHandlerGetAvailableModels_ScopedAndJWTUseSameExplicitMappingPicker(t *testing.T) {
+	account := service.Account{
+		ID: 53, Name: "mapped", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
+		Status: service.StatusActive, GroupIDs: []int64{7},
+		Credentials: map[string]any{"model_mapping": map[string]any{"client-key": "upstream-value"}},
+	}
+	serviceStub := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: account}
+	upstream := &syncUpstreamHTTPUpstream{}
+	jwtRouter := setupAvailableModelsRouterWithOpenAIModelDiscovery(serviceStub, account, upstream)
+	scopedService := &availableModelsScopedAdminService{availableModelsAdminService: serviceStub}
+	gin.SetMode(gin.TestMode)
+	scopedRouter := gin.New()
+	handler := NewAccountHandler(scopedService, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	scopedRouter.GET("/api/v1/admin/accounts/:id/models", func(c *gin.Context) {
+		principal := &adminaccess.Principal{Policy: adminaccess.Policy{Rules: []adminaccess.Rule{{
+			Permissions: []string{"accounts.read"}, AllGroups: true, AccountTypes: []string{service.AccountTypeAPIKey},
+		}}}}
+		c.Request = c.Request.WithContext(adminaccess.WithPrincipal(c.Request.Context(), principal))
+		handler.ScopedAdminKeyAccounts(c)
+	})
+
+	var responseBodies []string
+	for _, router := range []*gin.Engine{jwtRouter, scopedRouter} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/53/models", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		responseBodies = append(responseBodies, rec.Body.String())
+	}
+	require.JSONEq(t, responseBodies[0], responseBodies[1])
+	require.Contains(t, responseBodies[0], "client-key")
+	require.NotContains(t, responseBodies[0], "upstream-value")
+	require.Equal(t, 0, upstream.callCount(), "explicit mappings must avoid upstream calls in both JWT and scoped handlers")
 }
 
 func TestAntigravityAccountTestModelsFallbackContract(t *testing.T) {
@@ -372,7 +412,8 @@ func TestAccountHandlerGetAvailableModels_ExplicitMappingInvalidFallsBack(t *tes
 			models := decodeAvailableModelOptions(t, rec.Body.Bytes())
 			require.NotEmpty(t, models)
 			if tt.defaultCatalog {
-				require.Contains(t, rec.Body.String(), "gemini-2.5-pro")
+				require.Contains(t, rec.Body.String(), "gemini-3.5-flash")
+				require.NotContains(t, rec.Body.String(), "gemini-2.5-pro")
 				return
 			}
 			ids := make([]string, 0, len(models))

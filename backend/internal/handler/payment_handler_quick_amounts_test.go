@@ -180,11 +180,11 @@ func TestPaymentQuickAmountsCheckoutKeepsProviderRangeSeparateFromGlobalRange(t 
 
 func TestPaymentQuickAmountsCheckoutIncludesGlobalBoundariesAndSupportsOneSidedLimits(t *testing.T) {
 	tests := []struct {
-		name       string
-		min        string
-		max        string
-		stored     string
-		want       []any
+		name   string
+		min    string
+		max    string
+		stored string
+		want   []any
 	}{
 		{name: "inclusive boundaries", min: "10", max: "50", stored: "[5,10,25.5,50,100]", want: []any{float64(10), 25.5, float64(50)}},
 		{name: "minimum only", min: "10", max: "0", stored: "[5,10,100]", want: []any{float64(10), float64(100)}},

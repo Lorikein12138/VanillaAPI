@@ -31,6 +31,12 @@ var baselineV0216NewMigrationNames = []string{
 	"245_gemini_cached_contents_mutation_lease.sql",
 }
 
+var baselineV0216CurrentMigrationNames = []string{
+	"246_enable_gemini_image_generation_groups.sql",
+	"247_scoped_admin_api_keys.sql",
+	"248_group_image_count_billing.sql",
+}
+
 type baselineV0216MigrationRecord struct {
 	checksum string
 	applied  time.Time
@@ -65,13 +71,60 @@ func baselineV0216TargetFS(t *testing.T) fs.FS {
 	return baselineV0217PreviousFS(t)
 }
 
+func baselineV0216RequireCurrentMigrationHistory(t *testing.T, ctx context.Context, db *sql.DB, historical map[string]baselineV0216MigrationRecord) map[string]baselineV0216MigrationRecord {
+	t.Helper()
+	current, err := baselineV0216ReadMigrationRecords(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, current, 304, "current baseline must be at the 304-migration projection")
+	for name, before := range historical {
+		require.Equal(t, before, current[name], "historical checksum/applied_at must remain unchanged for %s", name)
+	}
+	for _, name := range baselineV0216CurrentMigrationNames {
+		require.Contains(t, current, name, "current startup must apply %s", name)
+	}
+	return current
+}
+
+func baselineV0216SeedBackfillGroups(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	for _, seed := range []struct{ name, platform string }{
+		{name: "baseline-v0216-backfill-gemini", platform: service.PlatformGemini},
+		{name: "baseline-v0216-backfill-openai-control", platform: service.PlatformOpenAI},
+	} {
+		_, err := db.ExecContext(ctx, `INSERT INTO groups(name,platform,status,rate_multiplier,model_pricing) VALUES($1,$2,'active',1,'[]'::jsonb)`, seed.name, seed.platform)
+		require.NoError(t, err)
+	}
+}
+
+func baselineV0216RequireBackfillGroups(t *testing.T, ctx context.Context, db *sql.DB, wantGemini bool) {
+	t.Helper()
+	var gemini, openAI bool
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT allow_image_generation FROM groups WHERE name='baseline-v0216-backfill-gemini'`).Scan(&gemini))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT allow_image_generation FROM groups WHERE name='baseline-v0216-backfill-openai-control'`).Scan(&openAI))
+	require.Equal(t, wantGemini, gemini, "migration 246 must apply only its documented Gemini backfill")
+	require.False(t, openAI, "migration 246 must not enable the OpenAI control group")
+}
+
 func TestBaselineV0216FreshInstall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	harnessDatabase, harnessConfig := baselineV0216HarnessSnapshot(t, ctx)
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
+	// Keep the v0.2.16 history projection frozen at 301 before applying the
+	// current migrations. The production group repository is exercised only
+	// after this isolated database reaches the current 304-column schema.
 	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0216TargetFS(t)))
 	baselineV0216RequireNewSchema(t, ctx, fixture.db)
+	baselineV0217RequireLedger(t, ctx, fixture.db)
+	historicalRecords, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
+	require.NoError(t, err)
+	require.Len(t, historicalRecords, 301)
+	baselineV0216SeedBackfillGroups(t, ctx, fixture.db)
+	baselineV0216RequireBackfillGroups(t, ctx, fixture.db, false)
+	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	baselineV0216RequireCurrentMigrationHistory(t, ctx, fixture.db, historicalRecords)
+	baselineV0216RequireNewSchema(t, ctx, fixture.db)
+	baselineV0216RequireBackfillGroups(t, ctx, fixture.db, true)
 
 	_, repo := baselineV0216GroupRepository(t, fixture.db)
 	group := &service.Group{
@@ -154,6 +207,8 @@ func TestBaselineV0216UpgradePreservesHistory(t *testing.T) {
 			VALUES ($1, 300, 'gemini', $2, 'sentinel-model', 3, 510)`, bucket, groupID)
 		require.NoError(t, err)
 	})
+	_, err = fixture.db.ExecContext(ctx, `INSERT INTO groups(name,platform,status,rate_multiplier,model_pricing) VALUES('baseline-v0216-backfill-openai-control','openai','active',1,'[]'::jsonb)`)
+	require.NoError(t, err)
 
 	beforeModelPricingJSON := baselineV0216ReadJSON(t, ctx, fixture.db,
 		`SELECT model_pricing::text FROM groups WHERE id = $1`, groupID)
@@ -166,40 +221,75 @@ func TestBaselineV0216UpgradePreservesHistory(t *testing.T) {
 	require.NoError(t, fixture.db.QueryRowContext(ctx, "SELECT current_database()").Scan(&connectedDatabase))
 	require.Equal(t, fixture.name, connectedDatabase)
 
-	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0216TargetFS(t)))
-	baselineV0216RequireNewSchema(t, ctx, fixture.db)
-	afterRecords, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
-	require.NoError(t, err)
-	require.Len(t, afterRecords, 301)
-	for name, before := range beforeRecords {
-		require.Equal(t, before, afterRecords[name], "old checksum/applied_at must remain exact for %s", name)
+	// requirePreserved checks the business rows seeded on the 297-file schema;
+	// both stages must leave them byte-for-byte unchanged.
+	requirePreserved := func(t *testing.T, stage string) {
+		t.Helper()
+		afterSideEffects, err := readChannelMonitorV2V0215SideEffectSnapshot(ctx, fixture.db)
+		require.NoError(t, err)
+		requireChannelMonitorV2V0215SideEffectSnapshotEqual(t, beforeSideEffects, afterSideEffects)
+		afterSentinels, err := baselineV0216ReadSentinels(ctx, fixture.db, userID)
+		require.NoError(t, err)
+		require.Equal(t, beforeSentinels, afterSentinels, "%s: price/balance/usage sentinels must not change", stage)
+		afterModelPricingJSON := baselineV0216ReadJSON(t, ctx, fixture.db,
+			`SELECT model_pricing::text FROM groups WHERE id = $1`, groupID)
+		require.JSONEq(t, beforeModelPricingJSON, afterModelPricingJSON, "%s: raw JSONB model pricing must survive unchanged", stage)
+		require.Equal(t, "{}", baselineV0216ReadJSON(t, ctx, fixture.db,
+			`SELECT i18n::text FROM groups WHERE id = $1`, groupID), "%s: existing groups receive the empty i18n default", stage)
 	}
-	for _, name := range baselineV0216NewMigrationNames {
-		require.Contains(t, afterRecords, name)
+	requireImageGeneration := func(t *testing.T, wantGemini bool, stage string) {
+		t.Helper()
+		var gemini, openAIControl bool
+		require.NoError(t, fixture.db.QueryRowContext(ctx, `SELECT allow_image_generation FROM groups WHERE id=$1`, groupID).Scan(&gemini))
+		require.Equal(t, wantGemini, gemini, "%s: migration 246 Gemini backfill state", stage)
+		require.NoError(t, fixture.db.QueryRowContext(ctx, `SELECT allow_image_generation FROM groups WHERE name='baseline-v0216-backfill-openai-control'`).Scan(&openAIControl))
+		require.False(t, openAIControl, "%s: migration 246 must not enable the OpenAI control group", stage)
 	}
-	afterSideEffects, err := readChannelMonitorV2V0215SideEffectSnapshot(ctx, fixture.db)
-	require.NoError(t, err)
-	requireChannelMonitorV2V0215SideEffectSnapshotEqual(t, beforeSideEffects, afterSideEffects)
-	afterSentinels, err := baselineV0216ReadSentinels(ctx, fixture.db, userID)
-	require.NoError(t, err)
-	require.Equal(t, beforeSentinels, afterSentinels, "price/balance/usage sentinels must not change")
-	afterModelPricingJSON := baselineV0216ReadJSON(t, ctx, fixture.db,
-		`SELECT model_pricing::text FROM groups WHERE id = $1`, groupID)
-	require.JSONEq(t, beforeModelPricingJSON, afterModelPricingJSON, "raw JSONB model pricing must survive the upgrade unchanged")
 
-	_, repo := baselineV0216GroupRepository(t, fixture.db)
-	got, err := repo.GetByID(ctx, groupID)
-	require.NoError(t, err)
-	require.Equal(t, service.GroupI18n{}, got.I18n, "existing groups receive the new empty i18n default")
-	require.Equal(t, modelPricing, got.ModelPricing, "the real repository must retain the typed pricing values")
-	require.Equal(t, service.PlatformGemini, got.ModelPricing[0].Platform)
-	require.Equal(t, []string{"sentinel-model"}, got.ModelPricing[0].Models)
-	require.Equal(t, service.BillingModeToken, got.ModelPricing[0].BillingMode)
-	require.InDelta(t, 0.000001, *got.ModelPricing[0].InputPrice, 1e-15)
-	require.InDelta(t, 0.000002, *got.ModelPricing[0].OutputPrice, 1e-15)
-	require.Equal(t, 1.375, got.RateMultiplier)
-	require.Equal(t, "{}", baselineV0216ReadJSON(t, ctx, fixture.db,
-		`SELECT i18n::text FROM groups WHERE id = $1`, groupID))
+	// Complete and verify the historical 301-file stage first: old schema,
+	// ledger, group pricing/i18n and business rows. Only then apply 246-248.
+	var historicalRecords map[string]baselineV0216MigrationRecord
+	require.True(t, t.Run("historical-301", func(t *testing.T) {
+		require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0216TargetFS(t)))
+		baselineV0216RequireNewSchema(t, ctx, fixture.db)
+		baselineV0217RequireLedger(t, ctx, fixture.db)
+		records, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
+		require.NoError(t, err)
+		require.Len(t, records, 301)
+		for name, before := range beforeRecords {
+			require.Equal(t, before, records[name], "old checksum/applied_at must remain exact through the historical 301 projection for %s", name)
+		}
+		requireImageGeneration(t, false, "historical-301")
+		requirePreserved(t, "historical-301")
+		historicalRecords = records
+	}))
+
+	require.True(t, t.Run("current-repository-after-upgrade-304", func(t *testing.T) {
+		require.NoError(t, ApplyMigrations(ctx, fixture.db))
+		afterRecords := baselineV0216RequireCurrentMigrationHistory(t, ctx, fixture.db, historicalRecords)
+		baselineV0216RequireNewSchema(t, ctx, fixture.db)
+		requireImageGeneration(t, true, "current-304")
+		requirePreserved(t, "current-304")
+
+		_, repo := baselineV0216GroupRepository(t, fixture.db)
+		got, err := repo.GetByID(ctx, groupID)
+		require.NoError(t, err)
+		require.Equal(t, service.GroupI18n{}, got.I18n, "existing groups receive the new empty i18n default")
+		require.Equal(t, modelPricing, got.ModelPricing, "the real repository must retain the typed pricing values")
+		require.Equal(t, service.PlatformGemini, got.ModelPricing[0].Platform)
+		require.Equal(t, []string{"sentinel-model"}, got.ModelPricing[0].Models)
+		require.Equal(t, service.BillingModeToken, got.ModelPricing[0].BillingMode)
+		require.InDelta(t, 0.000001, *got.ModelPricing[0].InputPrice, 1e-15)
+		require.InDelta(t, 0.000002, *got.ModelPricing[0].OutputPrice, 1e-15)
+		require.Equal(t, 1.375, got.RateMultiplier)
+
+		// A second startup on the current 304 projection must not rewrite the ledger.
+		require.NoError(t, ApplyMigrations(ctx, fixture.db))
+		restartRecords, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
+		require.NoError(t, err)
+		require.Equal(t, afterRecords, restartRecords, "restart must not rewrite checksums or applied_at")
+		requirePreserved(t, "current-304-restart")
+	}))
 
 	baselineV0216RequireHarnessUnchanged(t, ctx, harnessDatabase, harnessConfig)
 }

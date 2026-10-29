@@ -522,17 +522,28 @@ func (s *ConcurrencyCacheSuite) TestGetUserConcurrency_Missing() {
 }
 
 func (s *ConcurrencyCacheSuite) TestGetAccountsLoadBatch() {
-	s.T().Skip("TODO: Fix this test - CurrentConcurrency returns 0 instead of expected value in CI")
-	// Setup: Create accounts with different load states
-	account1 := int64(100)
-	account2 := int64(101)
-	account3 := int64(102)
+	baseID := time.Now().UnixNano()
+	account1, account2, account3 := baseID, baseID+1, baseID+2
+	request1, request2, request3 := fmt.Sprintf("load-%d-a", baseID), fmt.Sprintf("load-%d-b", baseID), fmt.Sprintf("load-%d-c", baseID)
+	defer func() {
+		for _, item := range []struct {
+			accountID int64
+			requests  []string
+		}{{account1, []string{request1, request2}}, {account2, []string{request3}}} {
+			for _, requestID := range item.requests {
+				_ = s.cache.ReleaseAccountSlot(s.ctx, item.accountID, requestID)
+			}
+			_ = s.rdb.Del(s.ctx, accountWaitKey(item.accountID)).Err()
+			_ = s.rdb.ZRem(s.ctx, accountActiveIndexKey, strconv.FormatInt(item.accountID, 10)).Err()
+		}
+		_ = s.rdb.Del(s.ctx, accountSlotKey(account3), accountWaitKey(account3)).Err()
+	}()
 
-	// Account 1: 2/3 slots used, 1 waiting
-	ok, err := s.cache.AcquireAccountSlot(s.ctx, account1, 3, "req1")
+	// Account 1: 2/3 slots used, 1 waiting.
+	ok, err := s.cache.AcquireAccountSlot(s.ctx, account1, 3, request1)
 	require.NoError(s.T(), err)
 	require.True(s.T(), ok)
-	ok, err = s.cache.AcquireAccountSlot(s.ctx, account1, 3, "req2")
+	ok, err = s.cache.AcquireAccountSlot(s.ctx, account1, 3, request2)
 	require.NoError(s.T(), err)
 	require.True(s.T(), ok)
 	ok, err = s.cache.IncrementAccountWaitCount(s.ctx, account1, 5)
@@ -540,11 +551,34 @@ func (s *ConcurrencyCacheSuite) TestGetAccountsLoadBatch() {
 	require.True(s.T(), ok)
 
 	// Account 2: 1/2 slots used, 0 waiting
-	ok, err = s.cache.AcquireAccountSlot(s.ctx, account2, 2, "req3")
+	ok, err = s.cache.AcquireAccountSlot(s.ctx, account2, 2, request3)
 	require.NoError(s.T(), err)
 	require.True(s.T(), ok)
 
-	// Account 3: 0/1 slots used, 0 waiting (idle)
+	// Redis TIME, score, cardinality, and the cache's own count path prove the
+	// occupied slots are fresh before exercising the batch aggregation path.
+	now, err := s.rawCache.redisUnixSeconds(s.ctx)
+	require.NoError(s.T(), err)
+	for _, item := range []struct {
+		accountID int64
+		requests  []string
+		wantCount int64
+	}{{account1, []string{request1, request2}, 2}, {account2, []string{request3}, 1}} {
+		count, err := s.rdb.ZCard(s.ctx, accountSlotKey(item.accountID)).Result()
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), item.wantCount, count)
+		for _, requestID := range item.requests {
+			score, err := s.rdb.ZScore(s.ctx, accountSlotKey(item.accountID), requestID).Result()
+			require.NoError(s.T(), err)
+			require.GreaterOrEqual(s.T(), int64(score), now-int64(testSlotTTL.Seconds()))
+		}
+		countByCache, err := s.cache.GetAccountConcurrency(s.ctx, item.accountID)
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), int(item.wantCount), countByCache)
+	}
+	idleCount, err := s.cache.GetAccountConcurrency(s.ctx, account3)
+	require.NoError(s.T(), err)
+	require.Zero(s.T(), idleCount)
 
 	// Query batch load
 	accounts := []service.AccountWithConcurrency{
@@ -580,6 +614,65 @@ func (s *ConcurrencyCacheSuite) TestGetAccountsLoadBatch() {
 	require.Equal(s.T(), 0, load3.CurrentConcurrency)
 	require.Equal(s.T(), 0, load3.WaitingCount)
 	require.Equal(s.T(), 0, load3.LoadRate)
+
+	s.Run("过期regular和live槽被排除", func() {
+		accountID := baseID + 10
+		defer func() {
+			_ = s.rdb.Del(s.ctx, accountSlotKey(accountID), liveAccountSlotKey(accountID), accountWaitKey(accountID)).Err()
+			_ = s.rdb.ZRem(s.ctx, accountActiveIndexKey, strconv.FormatInt(accountID, 10)).Err()
+		}()
+		serverNow, err := s.rawCache.redisUnixSeconds(s.ctx)
+		require.NoError(s.T(), err)
+		regularCutoff := serverNow - int64(testSlotTTL.Seconds()) - 1
+		liveCutoff := serverNow - liveLeaseTTLSeconds - 1
+		require.NoError(s.T(), s.rdb.ZAdd(s.ctx, accountSlotKey(accountID), redis.Z{Score: float64(regularCutoff), Member: "expired-regular"}).Err())
+		require.NoError(s.T(), s.rdb.ZAdd(s.ctx, liveAccountSlotKey(accountID), redis.Z{Score: float64(liveCutoff), Member: "expired-live"}).Err())
+		regularBefore, err := s.rdb.ZCard(s.ctx, accountSlotKey(accountID)).Result()
+		require.NoError(s.T(), err)
+		liveBefore, err := s.rdb.ZCard(s.ctx, liveAccountSlotKey(accountID)).Result()
+		require.NoError(s.T(), err)
+		require.EqualValues(s.T(), 1, regularBefore)
+		require.EqualValues(s.T(), 1, liveBefore)
+		loads, err := s.cache.GetAccountsLoadBatch(s.ctx, []service.AccountWithConcurrency{{ID: accountID, MaxConcurrency: 4}})
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), 0, loads[accountID].CurrentConcurrency)
+		require.Equal(s.T(), 0, loads[accountID].LoadRate)
+		regularAfter, err := s.rdb.ZCard(s.ctx, accountSlotKey(accountID)).Result()
+		require.NoError(s.T(), err)
+		liveAfter, err := s.rdb.ZCard(s.ctx, liveAccountSlotKey(accountID)).Result()
+		require.NoError(s.T(), err)
+		require.Zero(s.T(), regularAfter)
+		require.Zero(s.T(), liveAfter)
+	})
+
+	s.Run("有效live槽与regular槽合计", func() {
+		accountID, userID, apiKeyID := baseID+20, baseID+21, baseID+22
+		regularRequest := fmt.Sprintf("load-%d-regular", baseID)
+		leaseID := fmt.Sprintf("load-%d-live", baseID)
+		defer func() {
+			_ = s.cache.ReleaseAccountSlot(s.ctx, accountID, regularRequest)
+			_ = s.rawCache.ReleaseLiveLease(s.ctx, accountID, userID, apiKeyID, leaseID)
+			_ = s.rdb.ZRem(s.ctx, accountActiveIndexKey, strconv.FormatInt(accountID, 10)).Err()
+		}()
+		acquired, err := s.cache.AcquireAccountSlot(s.ctx, accountID, 4, regularRequest)
+		require.NoError(s.T(), err)
+		require.True(s.T(), acquired)
+		acquired, err = s.rawCache.AcquireLiveLease(s.ctx, accountID, 4, userID, 4, apiKeyID, leaseID, false)
+		require.NoError(s.T(), err)
+		require.True(s.T(), acquired)
+		serverNow, err := s.rawCache.redisUnixSeconds(s.ctx)
+		require.NoError(s.T(), err)
+		liveScore, err := s.rdb.ZScore(s.ctx, liveAccountSlotKey(accountID), leaseID).Result()
+		require.NoError(s.T(), err)
+		require.GreaterOrEqual(s.T(), int64(liveScore), serverNow-liveLeaseTTLSeconds)
+		count, err := s.cache.GetAccountConcurrency(s.ctx, accountID)
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), 2, count)
+		loads, err := s.cache.GetAccountsLoadBatch(s.ctx, []service.AccountWithConcurrency{{ID: accountID, MaxConcurrency: 4}})
+		require.NoError(s.T(), err)
+		require.Equal(s.T(), 2, loads[accountID].CurrentConcurrency)
+		require.Equal(s.T(), 50, loads[accountID].LoadRate)
+	})
 }
 
 func (s *ConcurrencyCacheSuite) TestGetAccountsLoadBatch_Empty() {

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	dbmigrations "github.com/Wei-Shaw/sub2api/migrations"
@@ -16,6 +17,22 @@ import (
 )
 
 const baselineV0218ImageMigrationName = "246_enable_gemini_image_generation_groups.sql"
+
+const baselineV0218ImageMigrationSHA256 = "f49b458cfbd52bd17f5bb02e30e3813c8e192e4ae38bce6358713ef65f3874b5"
+
+// baselineV0218PreviousFS freezes the exact 302-file v0.2.18 input projection.
+// Later migrations 247 and 248 must not change how this historical version is tested.
+func baselineV0218PreviousFS(t *testing.T) fstest.MapFS {
+	t.Helper()
+	previous := baselineV0217PreviousFS(t)
+	data, err := dbmigrations.FS.ReadFile(baselineV0218ImageMigrationName)
+	require.NoError(t, err)
+	sum := sha256.Sum256(data)
+	require.Equal(t, baselineV0218ImageMigrationSHA256, hex.EncodeToString(sum[:]))
+	previous[baselineV0218ImageMigrationName] = &fstest.MapFile{Data: append([]byte(nil), data...)}
+	require.Len(t, previous, 302)
+	return previous
+}
 
 func baselineV0218RequireLedger(t *testing.T, ctx context.Context, db *sql.DB) map[string]baselineV0216MigrationRecord {
 	t.Helper()
@@ -91,7 +108,7 @@ func TestBaselineV0218FreshInstallAndSecondStartup(t *testing.T) {
 	defer cancel()
 	database, config := baselineV0216HarnessSnapshot(t, ctx)
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0218PreviousFS(t)))
 	first := baselineV0218RequireLedger(t, ctx, fixture.db)
 
 	// A newly created group can be edited after the initial install; a later startup
@@ -104,7 +121,7 @@ func TestBaselineV0218FreshInstallAndSecondStartup(t *testing.T) {
 		"baseline-v0218-fresh-composite":   false,
 		"baseline-v0218-fresh-openai":      false,
 	}, flags)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0218PreviousFS(t)))
 	second := baselineV0218RequireLedger(t, ctx, fixture.db)
 	require.Equal(t, first, second, "second startup must keep every checksum and applied_at unchanged")
 	require.Equal(t, flags, baselineV0218ReadFreshImageFlags(t, ctx, fixture.db))
@@ -164,7 +181,7 @@ func TestBaselineV0218UpgradeChangesOnlyTargetFlagsAndRunsOnce(t *testing.T) {
 	require.False(t, flagsBefore["baseline-v0218-openai"])
 	sentinels := baselineV0218BusinessSentinels(t, ctx, fixture.db)
 
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0218PreviousFS(t)))
 	after := baselineV0218RequireLedger(t, ctx, fixture.db)
 	for name, record := range before {
 		require.Equal(t, record, after[name], "historical checksum/applied_at changed for %s", name)
@@ -184,7 +201,7 @@ func TestBaselineV0218UpgradeChangesOnlyTargetFlagsAndRunsOnce(t *testing.T) {
 	afterAdminChange, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 	require.NoError(t, err)
 	require.Equal(t, after, afterAdminChange)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0218PreviousFS(t)))
 	require.Equal(t, afterAdminChange, baselineV0218RequireLedger(t, ctx, fixture.db), "second startup must not reapply the migration")
 	require.Equal(t, map[string]bool{
 		"baseline v0217":             false,

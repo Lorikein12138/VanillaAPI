@@ -15,12 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDingTalkOAuthStart_Disabled は sentinel テスト。
-// TODO(task-1.10): newTestAuthHandlerWithDingTalk helper が追加されたら t.Skip を外す。
-func TestDingTalkOAuthStart_Disabled(t *testing.T) {
-	t.Skip("helper newTestAuthHandlerWithDingTalk added in Task 1.10; sentinel only")
-}
-
 // TestBuildDingTalkSyntheticEmail_UsesUnionID 验证合成邮箱种子使用 unionID。
 func TestBuildDingTalkSyntheticEmail_UsesUnionID(t *testing.T) {
 	unionID := "union_AbCdEf123"

@@ -98,3 +98,39 @@ func TestAPIKeyService_RejectsV24AuthSnapshotWithLegacyManualModelAllowlist(t *t
 		t.Fatalf("expected no API key from stale snapshot, got %#v", apiKey)
 	}
 }
+
+func TestAPIKeyService_RejectsV25AndRoundTripsV26ImageBillingAndAutomaticAllowlist(t *testing.T) {
+	groupID := int64(29)
+	accounts := []Account{
+		{Platform: PlatformGemini, Status: StatusError, Credentials: map[string]any{"model_mapping": map[string]any{"client-gemini": "upstream-gemini"}}},
+		{Platform: PlatformGemini, Status: StatusDisabled, Credentials: map[string]any{"model_mapping": map[string]any{"client-disabled": "upstream-disabled"}}},
+	}
+	allowlist := GroupModelAllowlist{Enabled: true, Models: BuildAccountModelAllowlistUnion(accounts)}
+	key := &APIKey{
+		ID: 4, UserID: 8, GroupID: &groupID, Status: StatusActive,
+		User:  &User{ID: 8, Status: StatusActive, Role: RoleUser},
+		Group: &Group{ID: groupID, Status: StatusActive, ImageCountBilling: true, ModelAllowlist: allowlist},
+	}
+
+	svc := &APIKeyService{}
+	snapshot := svc.snapshotFromAPIKey(t.Context(), key)
+	if snapshot == nil || snapshot.Version != 26 {
+		t.Fatalf("expected v26 snapshot, got %#v", snapshot)
+	}
+	if got := svc.snapshotToAPIKey("round-trip", snapshot); got.Group == nil || !got.Group.ImageCountBilling {
+		t.Fatalf("image_count_billing did not survive the auth snapshot: %#v", got)
+	}
+	got := svc.snapshotToAPIKey("round-trip", snapshot)
+	if !got.Group.ModelAllowlist.Enabled || len(got.Group.ModelAllowlist.Models) != 2 {
+		t.Fatalf("automatic allowlist did not survive the auth snapshot: %#v", got.Group.ModelAllowlist)
+	}
+
+	apiKey, ok, err := svc.applyAuthCacheEntry("stale-v25", &APIKeyAuthCacheEntry{Snapshot: &APIKeyAuthSnapshot{Version: 25}})
+	if err != nil || ok || apiKey != nil {
+		t.Fatalf("expected v25 snapshot rejection, got key=%#v ok=%v err=%v", apiKey, ok, err)
+	}
+	apiKey, ok, err = svc.applyAuthCacheEntry("current-v26", &APIKeyAuthCacheEntry{Snapshot: snapshot})
+	if err != nil || !ok || apiKey == nil || apiKey.Group == nil || !apiKey.Group.ImageCountBilling {
+		t.Fatalf("expected v26 snapshot acceptance, got key=%#v ok=%v err=%v", apiKey, ok, err)
+	}
+}
