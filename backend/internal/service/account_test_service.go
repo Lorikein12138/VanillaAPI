@@ -3094,10 +3094,12 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
-	// Parse {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
+	// Parse {"data": [{"b64_json": "...", "url": "...", "revised_prompt": "..."}]}
+	// 部分上游忽略 response_format 只回 url，两种都要能预览。
 	var result struct {
 		Data []struct {
 			B64JSON       string `json:"b64_json"`
+			URL           string `json:"url"`
 			RevisedPrompt string `json:"revised_prompt"`
 		} `json:"data"`
 	}
@@ -3109,17 +3111,26 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		return s.sendErrorAndEnd(c, "No images returned from API")
 	}
 
+	images := 0
 	for _, item := range result.Data {
 		if item.RevisedPrompt != "" {
 			s.sendEvent(c, TestEvent{Type: "content", Text: item.RevisedPrompt})
 		}
-		if item.B64JSON != "" {
+		switch {
+		case strings.TrimSpace(item.B64JSON) != "":
 			s.sendEvent(c, TestEvent{
 				Type:     "image",
 				ImageURL: "data:image/png;base64," + item.B64JSON,
 				MimeType: "image/png",
 			})
+			images++
+		case strings.TrimSpace(item.URL) != "":
+			s.sendEvent(c, TestEvent{Type: "image", ImageURL: strings.TrimSpace(item.URL), MimeType: "image/png"})
+			images++
 		}
+	}
+	if images == 0 {
+		return s.sendErrorAndEnd(c, "No image data (b64_json or url) returned from API")
 	}
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})

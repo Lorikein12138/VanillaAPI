@@ -89,3 +89,48 @@ func TestAccountTestService_OpenAIImageAPIKeyUsesConfiguredV1BaseURL(t *testing.
 	require.Contains(t, rec.Body.String(), "data:image/png;base64,aGVsbG8=")
 	require.Contains(t, rec.Body.String(), "\"success\":true")
 }
+
+func runOpenAIImageAPIKeyTest(t *testing.T, responseBody string) (string, error) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/1/test", nil)
+	upstream := &httpUpstreamRecorder{
+		resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+		},
+	}
+	svc := &AccountTestService{httpUpstream: upstream, cfg: &config.Config{}}
+	account := &Account{
+		ID:       56,
+		Name:     "openai-apikey-url",
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"api_key":  "test-api-key",
+			"base_url": "https://image-upstream.example",
+		},
+	}
+	err := svc.testOpenAIImageAPIKey(c, context.Background(), account, "gpt-image-2", "draw a cat")
+	return rec.Body.String(), err
+}
+
+// ChatGPT Image 类上游忽略 response_format，只返回 url；测试弹窗也要能预览。
+func TestAccountTestService_OpenAIImageAPIKeyPreviewsURLOnlyResponse(t *testing.T) {
+	body, err := runOpenAIImageAPIKeyTest(t, `{"data":[{"url":"https://cdn.example/img.png?X-Amz-Expires=86400&sig=abc"}]}`)
+	require.NoError(t, err)
+	require.Contains(t, body, `"type":"image"`)
+	require.Contains(t, body, `https://cdn.example/img.png?X-Amz-Expires=86400`)
+	require.Contains(t, body, "\"success\":true")
+}
+
+// 既无 b64_json 也无 url 时不能报测试成功。
+func TestAccountTestService_OpenAIImageAPIKeyFailsWhenNoImageData(t *testing.T) {
+	body, err := runOpenAIImageAPIKeyTest(t, `{"data":[{"revised_prompt":"draw a cat"}]}`)
+	require.Error(t, err)
+	require.NotContains(t, body, `"type":"image"`)
+	require.NotContains(t, body, "\"success\":true")
+	require.Contains(t, body, "No image data")
+}
