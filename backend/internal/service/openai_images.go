@@ -667,6 +667,16 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	if err != nil {
 		return nil, err
 	}
+	// 账号开关（默认关闭）开启时：图生图的文件 / data URL 先经上游 upload-url 上传，再以 JSON 转发。
+	if parsed.IsEdits() && account.IsOpenAIImagesUploadURLEnabled() {
+		forwardBody, err = s.prepareOpenAIImagesUploadURLBody(upstreamCtx, c, account, token, parsed, forwardBody, forwardContentType, upstreamModel)
+		if err != nil {
+			return nil, err
+		}
+		if parsed.Multipart {
+			forwardContentType = "application/json"
+		}
+	}
 	upstreamReq, err := s.buildOpenAIImagesRequest(upstreamCtx, c, account, forwardBody, forwardContentType, token, parsed.Endpoint)
 	if err != nil {
 		return nil, err
@@ -680,68 +690,10 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
-		safeErr := sanitizeUpstreamErrorMessage(err.Error())
-		setOpsUpstreamError(c, 0, safeErr, "")
-		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-			ProxyID:            opsUpstreamProxyID(account),
-			ProxyName:          opsUpstreamProxyName(account),
-			Platform:           account.Platform,
-			AccountID:          account.ID,
-			AccountName:        account.Name,
-			UpstreamStatusCode: 0,
-			UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-			Kind:               "request_error",
-			Message:            safeErr,
-		})
-		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+		return nil, s.openAIImagesAPIKeyTransportError(c, account, upstreamReq.URL.String(), err)
 	}
 	if resp.StatusCode >= 400 {
-		respBody := s.readUpstreamErrorBody(resp)
-		_ = resp.Body.Close()
-		respBody = s.redactAgentIdentitySensitiveBody(upstreamCtx, account, respBody)
-		resp.Body = io.NopCloser(bytes.NewReader(respBody))
-		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
-		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
-		if isOpenAIImagesInsufficientBalance(respBody) {
-			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-				ProxyID:            opsUpstreamProxyID(account),
-				ProxyName:          opsUpstreamProxyName(account),
-				Platform:           account.Platform,
-				AccountID:          account.ID,
-				AccountName:        account.Name,
-				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  resp.Header.Get("x-request-id"),
-				UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-				Kind:               "failover",
-				Message:            OpenAIImagesInsufficientBalanceMessage,
-			})
-			s.coolOpenAIImagesInsufficientBalance(upstreamCtx, account)
-			return nil, newOpenAIImagesInsufficientBalanceFailoverError(resp.StatusCode, resp.Header, respBody)
-		}
-		if s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody) {
-			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
-				ProxyID:            opsUpstreamProxyID(account),
-				ProxyName:          opsUpstreamProxyName(account),
-				Platform:           account.Platform,
-				AccountID:          account.ID,
-				AccountName:        account.Name,
-				UpstreamStatusCode: resp.StatusCode,
-				UpstreamRequestID:  resp.Header.Get("x-request-id"),
-				UpstreamURL:        safeUpstreamURL(upstreamReq.URL.String()),
-				Kind:               "failover",
-				Message:            upstreamMsg,
-			})
-			shouldDisable := s.handleFailoverSideEffects(upstreamCtx, resp, account, respBody, upstreamModel)
-			retryableOnSameAccount := !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)
-			if account.IsOpenAIOAuthLike() && resp.StatusCode == http.StatusTooManyRequests {
-				return nil, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, shouldDisable, retryableOnSameAccount)
-			}
-			if isOpenAIHTTPUpstreamAccessStateError(resp.StatusCode, upstreamMsg, respBody) {
-				return nil, newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, retryableOnSameAccount)
-			}
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, RetryableOnSameAccount: retryableOnSameAccount}
-		}
-		return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, upstreamModel)
+		return s.handleOpenAIImagesAPIKeyErrorStatus(upstreamCtx, c, account, resp, upstreamReq.URL.String(), upstreamModel)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -817,6 +769,81 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	}
 }
 
+// openAIImagesAPIKeyTransportError 记录 API Key 生图上游请求的传输层失败，返回不含敏感信息的错误。
+func (s *OpenAIGatewayService) openAIImagesAPIKeyTransportError(c *gin.Context, account *Account, upstreamURL string, err error) error {
+	safeErr := sanitizeUpstreamErrorMessage(err.Error())
+	setOpsUpstreamError(c, 0, safeErr, "")
+	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
+		Platform:           account.Platform,
+		AccountID:          account.ID,
+		AccountName:        account.Name,
+		UpstreamStatusCode: 0,
+		UpstreamURL:        safeUpstreamURL(upstreamURL),
+		Kind:               "request_error",
+		Message:            safeErr,
+	})
+	return fmt.Errorf("upstream request failed: %s", safeErr)
+}
+
+// handleOpenAIImagesAPIKeyErrorStatus 处理 API Key 生图上游的 HTTP 错误：余额不足冷却、failover 或透传给客户端。
+func (s *OpenAIGatewayService) handleOpenAIImagesAPIKeyErrorStatus(
+	upstreamCtx context.Context,
+	c *gin.Context,
+	account *Account,
+	resp *http.Response,
+	upstreamURL string,
+	upstreamModel string,
+) (*OpenAIForwardResult, error) {
+	respBody := s.readUpstreamErrorBody(resp)
+	_ = resp.Body.Close()
+	respBody = s.redactAgentIdentitySensitiveBody(upstreamCtx, account, respBody)
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+	if isOpenAIImagesInsufficientBalance(respBody) {
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			ProxyID:            opsUpstreamProxyID(account),
+			ProxyName:          opsUpstreamProxyName(account),
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: resp.StatusCode,
+			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamURL:        safeUpstreamURL(upstreamURL),
+			Kind:               "failover",
+			Message:            OpenAIImagesInsufficientBalanceMessage,
+		})
+		s.coolOpenAIImagesInsufficientBalance(upstreamCtx, account)
+		return nil, newOpenAIImagesInsufficientBalanceFailoverError(resp.StatusCode, resp.Header, respBody)
+	}
+	if s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody) {
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			ProxyID:            opsUpstreamProxyID(account),
+			ProxyName:          opsUpstreamProxyName(account),
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: resp.StatusCode,
+			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamURL:        safeUpstreamURL(upstreamURL),
+			Kind:               "failover",
+			Message:            upstreamMsg,
+		})
+		shouldDisable := s.handleFailoverSideEffects(upstreamCtx, resp, account, respBody, upstreamModel)
+		retryableOnSameAccount := !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)
+		if account.IsOpenAIOAuthLike() && resp.StatusCode == http.StatusTooManyRequests {
+			return nil, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, shouldDisable, retryableOnSameAccount)
+		}
+		if isOpenAIHTTPUpstreamAccessStateError(resp.StatusCode, upstreamMsg, respBody) {
+			return nil, newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, retryableOnSameAccount)
+		}
+		return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, RetryableOnSameAccount: retryableOnSameAccount}
+	}
+	return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, upstreamModel)
+}
+
 func (s *OpenAIGatewayService) buildOpenAIImagesRequest(
 	ctx context.Context,
 	c *gin.Context,
@@ -827,8 +854,11 @@ func (s *OpenAIGatewayService) buildOpenAIImagesRequest(
 	endpoint string,
 ) (*http.Request, error) {
 	targetURL := openAIImagesGenerationsURL
-	if endpoint == openAIImagesEditsEndpoint {
+	switch endpoint {
+	case openAIImagesEditsEndpoint:
 		targetURL = openAIImagesEditsURL
+	case openAIImagesUploadURLEndpoint:
+		targetURL = openAIImagesUploadURLDefaultURL
 	}
 	baseURL := account.GetOpenAIBaseURL()
 	if baseURL != "" {
