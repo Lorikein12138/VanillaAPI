@@ -799,6 +799,9 @@ export default {
         imagesUrlToB64Json: '生图结果 URL 转 base64',
         imagesUrlToB64JsonDesc:
           '仅对 OpenAI API Key 的 Images 非流式响应生效。上游返回的图片缺少 b64_json 但带 url 时，网关下载该 url 并以 base64 回填 b64_json（url 保留），兼容按官方接口实现的客户端；下载失败则原样返回。',
+        imagesUploadUrl: '图生图参考图走上游上传',
+        imagesUploadUrlDesc:
+          '仅对 OpenAI API Key 的图生图（/v1/images/edits）生效，默认关闭。适用于不接受文件上传和 base64 参考图的上游：网关先调用上游 /v1/images/upload-url 上传参考图与遮罩，再改写为图片链接以 JSON 转发；公网图片链接原样保留。上游无此接口时不要开启。',
         endpointCapabilities: '端点能力',
         endpointCapabilitiesDesc:
           '用于调度筛选。文本端点会跟随上方 Responses API 支持显示为 Responses、Chat Completions 或自动模式；Embeddings 独立控制 /v1/embeddings。',

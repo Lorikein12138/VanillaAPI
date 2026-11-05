@@ -687,6 +687,9 @@ export default {
         imagesUrlToB64Json: 'Image result URL to base64',
         imagesUrlToB64JsonDesc:
           'Only applies to non-streaming Images responses of OpenAI API Key accounts. When an upstream image item has a url but no b64_json, the gateway downloads the url and fills b64_json with its base64 content (url is kept) for clients built on the official API; the response is returned unchanged if the download fails.',
+        imagesUploadUrl: 'Upload image-edit references upstream',
+        imagesUploadUrlDesc:
+          'Only applies to image edits (/v1/images/edits) of OpenAI API Key accounts; off by default. For upstreams that reject multipart files and base64 references: the gateway first uploads reference images and masks via the upstream /v1/images/upload-url, then forwards JSON with image URLs; public image URLs are kept as-is. Do not enable it if the upstream lacks this endpoint.',
         endpointCapabilities: 'Endpoint capabilities',
         endpointCapabilitiesDesc:
           'Used by account routing. The text endpoint follows the Responses API support setting above and is shown as Responses, Chat Completions, or auto mode; Embeddings independently controls /v1/embeddings.',
