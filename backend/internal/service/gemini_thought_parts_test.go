@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +33,7 @@ func newGeminiSSEResponse(body string) *http.Response {
 }
 
 func TestCollectGeminiSSE_KeepsThoughtSeparateFromText(t *testing.T) {
-	collected, _, err := collectGeminiSSE(strings.NewReader(geminiThoughtSSE), false)
+	collected, _, err := collectGeminiSSE(nil, strings.NewReader(geminiThoughtSSE), false)
 	require.NoError(t, err)
 
 	parts := extractGeminiParts(collected)
@@ -42,6 +43,107 @@ func TestCollectGeminiSSE_KeepsThoughtSeparateFromText(t *testing.T) {
 	require.Equal(t, "Hello world", parts[1]["text"])
 	require.Nil(t, parts[1]["thought"])
 	require.Equal(t, "sig", parts[1]["thoughtSignature"])
+}
+
+func TestCollectGeminiSSE_MultipleFinalTextPartsAppearOnce(t *testing.T) {
+	const stream = `data: {"candidates":[{"content":{"parts":[{"text":"plan ","thought":true},{"text":"start "}]}}]}
+data: {"candidates":[{"content":{"parts":[{"text":"one","thought":true},{"text":"A"},{"text":" two","thought":true},{"functionCall":{"name":"lookup","args":{}},"thoughtSignature":"tool-signature"},{"text":"B","thoughtSignature":"text-signature"},{"text":"C"}]},"finishReason":"STOP"}]}
+data: [DONE]
+`
+	collected, _, err := collectGeminiSSE(nil, strings.NewReader(stream), false)
+	require.NoError(t, err)
+	require.Equal(t, "STOP", extractGeminiFinishReason(collected))
+	require.Equal(t, []map[string]any{
+		{"text": "plan one two", "thought": true},
+		{"text": "start ABC"},
+		{"functionCall": map[string]any{"name": "lookup", "args": map[string]any{}}, "thoughtSignature": "tool-signature"},
+		{"thoughtSignature": "text-signature"},
+	}, extractGeminiParts(collected))
+}
+
+const geminiRepeatedThoughtAndToolSSE = `data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"Plan"},{"functionCall":{"name":"lookup","args":"{\"city\":"}}]}}]}
+data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"Plan"},{"functionCall":{"name":"lookup","args":"{\"city\":\"Paris\"}"}}]}}]}
+data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"Plan"},{"functionCall":{"name":"lookup","args":"{\"city\":\"Paris\"}"}}]},"finishReason":"STOP"}]}
+data: [DONE]
+`
+
+func TestGeminiChatStream_RepeatedThoughtKeepsOneToolCall(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	svc := &GeminiMessagesCompatService{}
+	_, err := svc.handleChatCompletionsStreamingResponseFromGemini(c, newGeminiSSEResponse(geminiRepeatedThoughtAndToolSSE), time.Now(), "gemini-3-pro", false, false)
+	require.NoError(t, err)
+
+	var reasoning, args strings.Builder
+	var ids, names []string
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var chunk apicompat.ChatCompletionsChunk
+		require.NoError(t, json.Unmarshal([]byte(payload), &chunk))
+		for _, choice := range chunk.Choices {
+			if choice.Delta.ReasoningContent != nil {
+				reasoning.WriteString(*choice.Delta.ReasoningContent)
+			}
+			for _, call := range choice.Delta.ToolCalls {
+				require.NotNil(t, call.Index)
+				require.Zero(t, *call.Index)
+				if call.ID != "" {
+					ids = append(ids, call.ID)
+				}
+				if call.Function.Name != "" {
+					names = append(names, call.Function.Name)
+				}
+				args.WriteString(call.Function.Arguments)
+			}
+		}
+	}
+	require.Len(t, ids, 1)
+	require.Equal(t, []string{"lookup"}, names)
+	require.Equal(t, "Plan", reasoning.String())
+	require.Equal(t, `{"city":"Paris"}`, args.String())
+}
+
+func TestGeminiMessagesStream_RepeatedThoughtKeepsOneToolCall(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	svc := &GeminiMessagesCompatService{}
+	_, err := svc.handleStreamingResponse(c, newGeminiSSEResponse(geminiRepeatedThoughtAndToolSSE), time.Now(), "claude-sonnet-4-5")
+	require.NoError(t, err)
+
+	var toolStarts, toolStops int
+	var thinking, args strings.Builder
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var event apicompat.AnthropicStreamEvent
+		require.NoError(t, json.Unmarshal([]byte(payload), &event))
+		switch {
+		case event.ContentBlock != nil && event.ContentBlock.Type == "tool_use":
+			toolStarts++
+			require.NotEmpty(t, event.ContentBlock.ID)
+			require.Equal(t, "lookup", event.ContentBlock.Name)
+			require.NotNil(t, event.Index)
+			require.Equal(t, 1, *event.Index)
+		case event.Type == "content_block_stop" && event.Index != nil && *event.Index == 1:
+			toolStops++
+		case event.Delta != nil && event.Delta.Type == "input_json_delta":
+			require.NotNil(t, event.Index)
+			require.Equal(t, 1, *event.Index)
+			args.WriteString(event.Delta.PartialJSON)
+		case event.Delta != nil && event.Delta.Type == "thinking_delta":
+			thinking.WriteString(event.Delta.Thinking)
+		}
+	}
+	require.Equal(t, 1, toolStarts)
+	require.Equal(t, 1, toolStops)
+	require.Equal(t, "Plan", thinking.String())
+	require.Equal(t, `{"city":"Paris"}`, args.String())
 }
 
 func TestMergeCollectedTextParts_ThoughtOnly(t *testing.T) {
@@ -56,7 +158,7 @@ func TestMergeCollectedTextParts_ThoughtOnly(t *testing.T) {
 }
 
 func TestGeminiResponseToChatCompletions_ThoughtBecomesReasoningContent(t *testing.T) {
-	collected, _, err := collectGeminiSSE(strings.NewReader(geminiThoughtSSE), false)
+	collected, _, err := collectGeminiSSE(nil, strings.NewReader(geminiThoughtSSE), false)
 	require.NoError(t, err)
 	raw, err := json.Marshal(collected)
 	require.NoError(t, err)
@@ -164,7 +266,7 @@ func TestConvertClaudeMessagesToGeminiContents_SkipsThinkingBlocks(t *testing.T)
 	raw, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	contents, err := convertClaudeMessagesToGeminiContents(messages, map[string]string{})
+	contents, err := convertClaudeMessagesToGeminiContents(messages, map[string]string{}, false)
 	require.NoError(t, err, string(raw))
 	out, err := json.Marshal(contents)
 	require.NoError(t, err)

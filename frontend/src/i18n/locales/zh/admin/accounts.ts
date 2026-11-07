@@ -519,6 +519,12 @@ export default {
         gemini3Pro: 'G3P',
         gemini3Flash: 'G3F',
         gemini3Image: 'G31FI',
+        antigravityGemini5h: 'G·5h',
+        antigravityGeminiWeekly: 'G·周',
+        antigravityArgon5h: 'A·5h',
+        antigravityArgonWeekly: 'A·周',
+        antigravityOther5h: 'C·5h',
+        antigravityOtherWeekly: 'C·周',
         claude: 'Claude',
         grokRequests: '请求',
         grokTokens: 'Token',
@@ -802,6 +808,10 @@ export default {
         imagesUploadUrl: '图生图参考图走上游上传',
         imagesUploadUrlDesc:
           '仅对 OpenAI API Key 的图生图（/v1/images/edits）生效，默认关闭。适用于不接受文件上传和 base64 参考图的上游：网关先调用上游 /v1/images/upload-url 上传参考图与遮罩，再改写为图片链接以 JSON 转发；公网图片链接原样保留。上游无此接口时不要开启。',
+        imageSizeTiers: '生图尺寸档位',
+        imageSizeTiersDesc:
+          '限制本账号承接的生图尺寸档位，档位与计费一致：最长边 ≤1024 为 1K，≤2048 为 2K，更大为 4K（2560x1440 属于 4K）。指定了尺寸的请求只会调度到允许该档位的账号；未传尺寸或 auto 的请求优先调度到不限档位的账号，没有时依次选允许 4K、2K、1K 的账号。全选即不限，对 Images 接口与 Responses 生图工具生效。',
+        imageSizeTiersAtLeastOne: '至少保留一个档位',
         endpointCapabilities: '端点能力',
         endpointCapabilitiesDesc:
           '用于调度筛选。文本端点会跟随上方 Responses API 支持显示为 Responses、Chat Completions 或自动模式；Embeddings 独立控制 /v1/embeddings。',

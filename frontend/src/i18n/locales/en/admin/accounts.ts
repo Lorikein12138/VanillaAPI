@@ -690,6 +690,10 @@ export default {
         imagesUploadUrl: 'Upload image-edit references upstream',
         imagesUploadUrlDesc:
           'Only applies to image edits (/v1/images/edits) of OpenAI API Key accounts; off by default. For upstreams that reject multipart files and base64 references: the gateway first uploads reference images and masks via the upstream /v1/images/upload-url, then forwards JSON with image URLs; public image URLs are kept as-is. Do not enable it if the upstream lacks this endpoint.',
+        imageSizeTiers: 'Image size tiers',
+        imageSizeTiersDesc:
+          'Limits the image size tiers this account serves, using the billing tiers: longest edge ≤1024 is 1K, ≤2048 is 2K, larger is 4K (2560x1440 is 4K). Requests with an explicit size are only scheduled to accounts allowing that tier; requests without a size or with auto prefer accounts without a tier limit, then accounts allowing 4K, 2K and 1K in that order. Selecting all tiers means no limit. Applies to the Images API and the Responses image generation tool.',
+        imageSizeTiersAtLeastOne: 'Keep at least one tier',
         endpointCapabilities: 'Endpoint capabilities',
         endpointCapabilitiesDesc:
           'Used by account routing. The text endpoint follows the Responses API support setting above and is shown as Responses, Chat Completions, or auto mode; Embeddings independently controls /v1/embeddings.',
@@ -1717,6 +1721,12 @@ export default {
         gemini3Pro: 'G3P',
         gemini3Flash: 'G3F',
         gemini3Image: 'G31FI',
+        antigravityGemini5h: 'G·5h',
+        antigravityGeminiWeekly: 'G·wk',
+        antigravityArgon5h: 'A·5h',
+        antigravityArgonWeekly: 'A·wk',
+        antigravityOther5h: 'C·5h',
+        antigravityOtherWeekly: 'C·wk',
         claude: 'Claude',
         grokRequests: 'Req',
         grokTokens: 'Tok',

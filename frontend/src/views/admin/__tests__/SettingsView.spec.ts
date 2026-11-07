@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComponent, h } from "vue";
+import { defineComponent, h, ref } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 
 import enCommon from "@/i18n/locales/en/common";
@@ -90,7 +90,7 @@ const {
   showSuccess: vi.fn(),
 }));
 
-const localeRef = vi.hoisted(() => ({ value: "zh-CN" }));
+const localeRef = ref("zh-CN");
 
 vi.mock("@/api", () => ({
   adminAPI: {
@@ -108,6 +108,7 @@ vi.mock("@/api", () => ({
       getStreamTimeoutSettings,
       getRectifierSettings,
       getBetaPolicySettings,
+      getRegistrationEmailBlacklist: vi.fn().mockResolvedValue({ emails: [], max: 20000 }),
     },
     accounts: {
       getUpstreamBillingProbeSettings,

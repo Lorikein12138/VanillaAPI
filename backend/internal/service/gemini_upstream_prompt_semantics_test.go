@@ -138,7 +138,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_PreservesUpstreamTurns(t *
 				},
 			}},
 		}}
-		converted, err := convertClaudeMessagesToGeminiGenerateContent(geminiPromptJSON(t, body))
+		converted, err := convertClaudeMessagesToGeminiGenerateContent(geminiPromptJSON(t, body), "gemini-2.5-flash")
 		require.NoError(t, err)
 		require.NotContains(t, string(converted), "toolu_lookup_1")
 		var request map[string]any
@@ -165,7 +165,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_PreservesUpstreamTurns(t *
 				map[string]any{"type": "tool_result", "tool_use_id": "toolu_lookup_2", "content": []any{map[string]any{"type": "text", "text": "found"}}},
 			}},
 		}}
-		converted, err := convertClaudeMessagesToGeminiGenerateContent(geminiPromptJSON(t, body))
+		converted, err := convertClaudeMessagesToGeminiGenerateContent(geminiPromptJSON(t, body), "gemini-2.5-flash")
 		require.NoError(t, err)
 		require.NotContains(t, string(converted), "toolu_lookup_2")
 		var request map[string]any
@@ -434,7 +434,7 @@ func geminiPromptJSON(t *testing.T, value any) []byte {
 
 func convertPromptSemanticsClaudeBody(t *testing.T, messages []any) map[string]any {
 	t.Helper()
-	converted, err := convertClaudeMessagesToGeminiGenerateContent(geminiPromptJSON(t, map[string]any{"messages": messages}))
+	converted, err := convertClaudeMessagesToGeminiGenerateContent(geminiPromptJSON(t, map[string]any{"messages": messages}), "gemini-2.5-flash")
 	require.NoError(t, err)
 	var request map[string]any
 	require.NoError(t, json.Unmarshal(converted, &request))
