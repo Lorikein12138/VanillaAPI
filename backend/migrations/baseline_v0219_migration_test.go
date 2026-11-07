@@ -43,17 +43,17 @@ func TestBaselineV0219MigrationIdentity(t *testing.T) {
 
 	entries, err := FS.ReadDir(".")
 	require.NoError(t, err)
-	actual := make([]string, 0, 304)
+	actual := make([]string, 0, 305)
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
 			actual = append(actual, entry.Name())
 		}
 	}
 	sort.Strings(actual)
-	require.Len(t, actual, 304, "the exact candidate set is fixed-H 302 plus upstream 247 and 248")
+	require.Len(t, actual, 305, "the exact candidate set is fixed-H 302 plus upstream 247–249")
 
 	expected := append([]string(nil), priorNames...)
-	expected = append(expected, "247_scoped_admin_api_keys.sql", "248_group_image_count_billing.sql")
+	expected = append(expected, "247_scoped_admin_api_keys.sql", "248_group_image_count_billing.sql", baselineV0220MCPOAuthMigration)
 	sort.Strings(expected)
 	require.Equal(t, expected, actual, "unknown additions, missing migrations, and renamed files are not permitted")
 

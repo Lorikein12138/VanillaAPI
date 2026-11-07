@@ -2274,6 +2274,14 @@
         </button>
       </div>
 
+      <!-- OpenAI images: size tier routing -->
+      <div
+        v-if="account?.platform === 'openai'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <OpenAIImageSizeTiersField v-model="openAIImageSizeTiers" />
+      </div>
+
       <div
         v-if="account?.type === 'apikey'"
         class="flex items-center justify-between gap-4 border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -3438,6 +3446,13 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
+import OpenAIImageSizeTiersField from '@/components/account/OpenAIImageSizeTiersField.vue'
+import {
+  OPENAI_IMAGE_SIZE_TIERS,
+  applyOpenAIImageSizeTiersToExtra,
+  readOpenAIImageSizeTiers,
+  type OpenAIImageSizeTier
+} from '@/components/account/openaiImageSizeTiers'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
@@ -4187,6 +4202,7 @@ const openAIResponsesMode = ref<OpenAIResponsesMode>('auto')
 const openAIImagesUrlToB64JsonEnabled = ref(false)
 // /v1/images/edits 先经上游 upload-url 上传参考图再改写为 image_url（仅 OpenAI API Key，默认关闭）。
 const openAIImagesUploadUrlEnabled = ref(false)
+const openAIImageSizeTiers = ref<OpenAIImageSizeTier[]>([...OPENAI_IMAGE_SIZE_TIERS])
 const openAIEndpointCapabilities = ref<OpenAIEndpointCapability[]>(['chat_completions', 'embeddings'])
 const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
@@ -4664,6 +4680,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
 	openAIImagesUploadUrlEnabled.value = extra?.openai_images_upload_url_enabled === true
+	openAIImageSizeTiers.value = readOpenAIImageSizeTiers(extra)
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
 	autoPause5hDisabled.value = extra?.auto_pause_5h_disabled === true
@@ -6281,6 +6298,7 @@ const handleSubmit = async () => {
           newExtra.web_search_emulation = webSearchEmulationMode.value
         }
 		}
+		applyOpenAIImageSizeTiersToExtra(newExtra, openAIImageSizeTiers.value)
 		if (autoPause5hThreshold.value != null && autoPause5hThreshold.value > 0) {
 			newExtra.auto_pause_5h_threshold = autoPause5hThreshold.value / 100
 		} else {

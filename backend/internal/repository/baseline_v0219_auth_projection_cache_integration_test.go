@@ -213,7 +213,7 @@ func TestBaselineV0219AuthProjectionCacheColdHotAndInvalidation(t *testing.T) {
 	require.Equal(t, redisReadsBeforeV25+1, countingCache.authReads.Load(), "v25 Redis payload must be inspected once")
 	refreshedEntry, err := rawAPIKeyCache.GetAuthCache(ctx, cacheKey)
 	require.NoError(t, err)
-	require.Equal(t, 26, refreshedEntry.Snapshot.Version)
+	require.Equal(t, 27, refreshedEntry.Snapshot.Version)
 	require.True(t, refreshedEntry.Snapshot.Group.AllowImageGeneration)
 	require.False(t, refreshedEntry.Snapshot.Group.ImageCountBilling)
 	require.Contains(t, refreshedEntry.Snapshot.Group.ModelAllowlist.Models, "new-model")

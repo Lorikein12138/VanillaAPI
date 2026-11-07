@@ -48,12 +48,13 @@ func TestBaselineV0218MigrationIdentity(t *testing.T) {
 			continue
 		}
 		actual = append(actual, name)
-		if name != "247_scoped_admin_api_keys.sql" && name != "248_group_image_count_billing.sql" {
+		if name != "247_scoped_admin_api_keys.sql" && name != "248_group_image_count_billing.sql" && name != baselineV0220MCPOAuthMigration {
 			v0218Projection = append(v0218Projection, name)
 		}
 		if name != "246_enable_gemini_image_generation_groups.sql" &&
 			name != "247_scoped_admin_api_keys.sql" &&
-			name != "248_group_image_count_billing.sql" {
+			name != "248_group_image_count_billing.sql" &&
+			name != baselineV0220MCPOAuthMigration {
 			historical = append(historical, name)
 		}
 		if name >= "241_" && name < "246_" {
@@ -63,8 +64,8 @@ func TestBaselineV0218MigrationIdentity(t *testing.T) {
 	sort.Strings(actual)
 	sort.Strings(v0218Projection)
 	sort.Strings(historical)
-	require.Len(t, actual, 304, "the current migration directory must contain the v0.2.18 projection plus 247 and 248")
-	require.Len(t, v0218Projection, 302, "the fixed v0.2.18 projection must omit later 247 and 248")
+	require.Len(t, actual, 305, "the current tree includes migrations through 249")
+	require.Len(t, v0218Projection, 302, "the fixed v0.2.18 projection must omit later migrations")
 	require.Equal(t, names, historical, "the current historical projection must match the frozen H set exactly")
 	require.Contains(t, actual, "246_enable_gemini_image_generation_groups.sql")
 	require.Equal(t, []string{

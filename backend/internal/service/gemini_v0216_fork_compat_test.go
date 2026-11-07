@@ -18,7 +18,7 @@ func TestGeminiToolResultImagesPreserveUserTurnAndPartOrder(t *testing.T) {
 			{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"d29ybGQ="}}
 		]}]}
 	]}`)
-	converted, err := convertClaudeMessagesToGeminiGenerateContent(request)
+	converted, err := convertClaudeMessagesToGeminiGenerateContent(request, "gemini-2.5-flash")
 	require.NoError(t, err)
 	var got struct {
 		Contents []struct {
