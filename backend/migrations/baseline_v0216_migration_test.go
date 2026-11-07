@@ -35,14 +35,15 @@ func TestBaselineV0216MigrationIdentity(t *testing.T) {
 			current = append(current, entry.Name())
 			if entry.Name() != "246_enable_gemini_image_generation_groups.sql" &&
 				entry.Name() != "247_scoped_admin_api_keys.sql" &&
-				entry.Name() != "248_group_image_count_billing.sql" {
+				entry.Name() != "248_group_image_count_billing.sql" &&
+				entry.Name() != baselineV0220MCPOAuthMigration {
 				historical = append(historical, entry.Name())
 			}
 		}
 	}
 	sort.Strings(current)
 	sort.Strings(historical)
-	require.Len(t, current, 304, "the current tree adds exactly 247 and 248 after the frozen v0.2.18 target")
+	require.Len(t, current, 305, "the current tree includes migrations through 249")
 	require.Len(t, historical, 301, "v0.2.16 target plus later frozen migrations remains 301")
 
 	for name, wantHash := range prior {

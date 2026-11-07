@@ -145,6 +145,13 @@ type SettingService struct {
 	panelRateLimitCache atomic.Value
 	panelRateLimitSF    singleflight.Group
 
+	// registrationEmailBlacklistCache 精确邮箱黑名单进程内缓存（*registrationEmailBlacklistIndex，60s TTL）。
+	// 公开的注册与发码接口每次请求都会读取，禁止在热路径上直接访问 DB。
+	// registrationEmailBlacklistMu 串行化缓存刷新和名单保存的读库、写库及缓存发布。
+	registrationEmailBlacklistMu    sync.Mutex
+	registrationEmailBlacklistCache atomic.Value
+	registrationEmailBlacklistSF    singleflight.Group
+
 	// openAIQuotaAutoPauseSettingsCache holds the most recently observed quota auto-pause
 	// settings. GetOpenAIQuotaAutoPauseSettings reads this atomic.Value on the request hot
 	// path without ever blocking on the DB; when the cached entry expires, a background

@@ -115,7 +115,7 @@ func TestBaselineV0219FreshInstallSecondStartupAndMigrationReplay(t *testing.T) 
 	defer cancel()
 	harnessDatabase, harnessConfig := baselineV0216HarnessSnapshot(t, ctx)
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0219FS(t)))
 	first := baselineV0219RequireLedger(t, ctx, fixture.db)
 
 	baselineV0219SeedDefaultGroup(t, ctx, fixture.db, "baseline-v0219-fresh-default")
@@ -125,7 +125,7 @@ func TestBaselineV0219FreshInstallSecondStartupAndMigrationReplay(t *testing.T) 
 	second := baselineV0219RequireLedger(t, ctx, fixture.db)
 	require.Equal(t, first, second, "direct SQL replay must not add or alter migration ledger entries")
 
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0219FS(t)))
 	third := baselineV0219RequireLedger(t, ctx, fixture.db)
 	require.Equal(t, first, third, "second startup must keep every checksum and applied_at unchanged")
 	var enabled bool
@@ -161,7 +161,7 @@ func TestBaselineV0219UpgradeFrom302PreservesBusinessRowsAndAppliesOnce(t *testi
 	}
 	sentinels := baselineV0219BusinessSentinels(t, ctx, fixture.db)
 
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0219FS(t)))
 	after := baselineV0219RequireLedger(t, ctx, fixture.db)
 	for name, record := range before {
 		require.Equal(t, record, after[name], "historical checksum/applied_at changed for %s", name)
@@ -179,7 +179,7 @@ func TestBaselineV0219UpgradeFrom302PreservesBusinessRowsAndAppliesOnce(t *testi
 	baselineV0219ReplayNewMigrations(t, ctx, fixture.db)
 	baselineV0219RequireScopedKeyAuditRow(t, ctx, fixture.db, keyHash)
 
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0219FS(t)))
 	second := baselineV0219RequireLedger(t, ctx, fixture.db)
 	require.Equal(t, after, second, "second startup must not reapply either new migration")
 	baselineV0219RequireScopedKeyAuditRow(t, ctx, fixture.db, keyHash)
