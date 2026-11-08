@@ -22158,6 +22158,7 @@ type GroupMutation struct {
 	appendsupported_model_scopes            []string
 	sort_order                              *int
 	addsort_order                           *int
+	display_category                        *string
 	allow_messages_dispatch                 *bool
 	allow_live                              *bool
 	force_openai_fast                       *bool
@@ -24950,6 +24951,42 @@ func (m *GroupMutation) ResetSortOrder() {
 	m.addsort_order = nil
 }
 
+// SetDisplayCategory sets the "display_category" field.
+func (m *GroupMutation) SetDisplayCategory(s string) {
+	m.display_category = &s
+}
+
+// DisplayCategory returns the value of the "display_category" field in the mutation.
+func (m *GroupMutation) DisplayCategory() (r string, exists bool) {
+	v := m.display_category
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDisplayCategory returns the old "display_category" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldDisplayCategory(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDisplayCategory is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDisplayCategory requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDisplayCategory: %w", err)
+	}
+	return oldValue.DisplayCategory, nil
+}
+
+// ResetDisplayCategory resets all changes to the "display_category" field.
+func (m *GroupMutation) ResetDisplayCategory() {
+	m.display_category = nil
+}
+
 // SetAllowMessagesDispatch sets the "allow_messages_dispatch" field.
 func (m *GroupMutation) SetAllowMessagesDispatch(b bool) {
 	m.allow_messages_dispatch = &b
@@ -25995,7 +26032,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 68)
+	fields := make([]string, 0, 69)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26148,6 +26185,9 @@ func (m *GroupMutation) Fields() []string {
 	}
 	if m.sort_order != nil {
 		fields = append(fields, group.FieldSortOrder)
+	}
+	if m.display_category != nil {
+		fields = append(fields, group.FieldDisplayCategory)
 	}
 	if m.allow_messages_dispatch != nil {
 		fields = append(fields, group.FieldAllowMessagesDispatch)
@@ -26310,6 +26350,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.SupportedModelScopes()
 	case group.FieldSortOrder:
 		return m.SortOrder()
+	case group.FieldDisplayCategory:
+		return m.DisplayCategory()
 	case group.FieldAllowMessagesDispatch:
 		return m.AllowMessagesDispatch()
 	case group.FieldAllowLive:
@@ -26455,6 +26497,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldSupportedModelScopes(ctx)
 	case group.FieldSortOrder:
 		return m.OldSortOrder(ctx)
+	case group.FieldDisplayCategory:
+		return m.OldDisplayCategory(ctx)
 	case group.FieldAllowMessagesDispatch:
 		return m.OldAllowMessagesDispatch(ctx)
 	case group.FieldAllowLive:
@@ -26854,6 +26898,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSortOrder(v)
+		return nil
+	case group.FieldDisplayCategory:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDisplayCategory(v)
 		return nil
 	case group.FieldAllowMessagesDispatch:
 		v, ok := value.(bool)
@@ -27637,6 +27688,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldSortOrder:
 		m.ResetSortOrder()
+		return nil
+	case group.FieldDisplayCategory:
+		m.ResetDisplayCategory()
 		return nil
 	case group.FieldAllowMessagesDispatch:
 		m.ResetAllowMessagesDispatch()

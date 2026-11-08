@@ -242,6 +242,11 @@ func (Group) Fields() []ent.Field {
 		field.Int("sort_order").
 			Default(0).
 			Comment("分组显示排序，数值越小越靠前"),
+		// 展示分类（二开）：模型广场与创建密钥按它归类；空字符串表示按平台自动归类。
+		field.String("display_category").
+			MaxLen(20).
+			Default("").
+			Comment("展示分类：空=按平台自动，anthropic/openai/domestic/other"),
 
 		// OpenAI Messages 调度配置 (added by migration 069)
 		field.Bool("allow_messages_dispatch").

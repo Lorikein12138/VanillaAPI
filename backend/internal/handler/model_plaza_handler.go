@@ -76,10 +76,12 @@ type modelPlazaModel struct {
 
 // modelPlazaGroup 广场分组条目（白名单字段）。
 type modelPlazaGroup struct {
-	ID                 int64    `json:"id"`
-	Name               string   `json:"name"`
-	Description        string   `json:"description"`
-	Platform           string   `json:"platform"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Platform    string `json:"platform"`
+	// DisplayCategory 展示分类（二开），空字符串表示按平台自动归类。
+	DisplayCategory    string   `json:"display_category"`
 	SubscriptionType   string   `json:"subscription_type"`
 	RateMultiplier     float64  `json:"rate_multiplier"`
 	UserRateMultiplier *float64 `json:"user_rate_multiplier,omitempty"`
@@ -217,6 +219,7 @@ func toModelPlazaGroupDTO(g *service.PlazaGroup, userRates map[int64]float64) mo
 		Name:                      g.Name,
 		Description:               g.Description,
 		Platform:                  g.Platform,
+		DisplayCategory:           g.DisplayCategory,
 		SubscriptionType:          g.SubscriptionType,
 		RateMultiplier:            g.RateMultiplier,
 		PeakRateEnabled:           g.PeakRateEnabled,

@@ -112,6 +112,7 @@ const groupOptions = computed(() =>
     id: g.id,
     name: g.name,
     platform: g.platform,
+    display_category: g.display_category,
     rate: effectiveRate(g)
   }))
 )
