@@ -596,6 +596,18 @@ describe('user KeysView column settings', () => {
       expect(wrapper.findAllComponents({ name: 'Select' })[0].props('options')).toHaveLength(14)
     })
 
+    it('puts an openai-platform group with display_category domestic under the domestic provider', async () => {
+      getAvailableGroups.mockResolvedValue([
+        ...availableGroups,
+        { id: 99, name: 'Doubao', platform: 'openai', display_category: 'domestic', rate_multiplier: 1, subscription_type: 'standard' },
+      ])
+      const wrapper = await openCreate()
+      await chooseProvider(wrapper, 'openai')
+      expect(optionIds(wrapper)).toEqual([2])
+      await chooseProvider(wrapper, 'domestic')
+      expect(optionIds(wrapper)).toEqual([3, 4, 5, 6, 99])
+    })
+
     it('clears the previous group on provider change and submits only the newly selected group', async () => {
       const wrapper = await openCreate()
       await wrapper.get('[data-tour="key-form-name"]').setValue('My key')

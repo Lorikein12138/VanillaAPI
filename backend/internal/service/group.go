@@ -98,6 +98,8 @@ type Group struct {
 
 	// 分组排序
 	SortOrder int
+	// DisplayCategory 展示分类（二开）：模型广场与创建密钥的分组归类，空字符串表示按平台自动归类。
+	DisplayCategory string
 
 	// OpenAI Messages 调度配置（仅 openai 平台使用）
 	AllowMessagesDispatch       bool
@@ -480,4 +482,26 @@ func (g *Group) GetSearchPricePer1k() *float64 {
 		return nil
 	}
 	return g.SearchPricePer1k
+}
+
+// 分组展示分类（二开）：模型广场与创建密钥按它归类；空字符串表示按平台自动归类。
+const (
+	GroupDisplayCategoryAuto      = ""
+	GroupDisplayCategoryAnthropic = "anthropic"
+	GroupDisplayCategoryOpenAI    = "openai"
+	GroupDisplayCategoryDomestic  = "domestic"
+	GroupDisplayCategoryOther     = "other"
+)
+
+// NormalizeGroupDisplayCategory 校验并归一化分组展示分类；auto 与空字符串都视为自动。
+func NormalizeGroupDisplayCategory(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case GroupDisplayCategoryAuto, "auto":
+		return GroupDisplayCategoryAuto, nil
+	case GroupDisplayCategoryAnthropic, GroupDisplayCategoryOpenAI, GroupDisplayCategoryDomestic, GroupDisplayCategoryOther:
+		return value, nil
+	default:
+		return "", fmt.Errorf("display_category must be one of anthropic/openai/domestic/other or empty, got %q", raw)
+	}
 }
