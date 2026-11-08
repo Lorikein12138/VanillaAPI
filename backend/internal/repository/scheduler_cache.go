@@ -1252,7 +1252,11 @@ func filterSchedulerCredentials(credentials map[string]any) map[string]any {
 		// Gemini 显式缓存的候选过滤（GeminiExplicitCacheExclusions）读本投影判定账号是否支持显式缓存：
 		// 官方地址、Vertex 认证方式与上游网关的显式缓存声明。缺这几个键时只能按类型粗筛，
 		// 不支持的账号要逐个选中后才被剔除。
-		"base_url", "auth_mode", service.GeminiExplicitCacheUpstreamCredentialKey, service.GeminiExplicitCacheUpstreamMaxTTLCredentialKey}
+		"base_url", "auth_mode", service.GeminiExplicitCacheUpstreamCredentialKey, service.GeminiExplicitCacheUpstreamMaxTTLCredentialKey,
+		// 端点能力白名单：SupportsOpenAIEndpointCapability 在候选过滤阶段读本投影。缺了它，
+		// 须显式声明的 seedance 永远判不支持（503 seedance_no_eligible_account），
+		// 显式限定了能力的账号又会被当成不限能力放进候选。
+		service.OpenAIEndpointCapabilitiesCredentialKey}
 	filtered := make(map[string]any)
 	for _, key := range keys {
 		if value, ok := credentials[key]; ok && value != nil {
@@ -1310,6 +1314,10 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"openai_ws_force_http",
 		"openai_responses_mode",
 		"openai_responses_supported",
+		// compact 能力：compact_unsupported 过滤与 openAICompactSupportTier 排序都读本投影。
+		// 缺了这两个键，强制关闭 compact 的账号会进候选，已探测支持的账号也失去优先档。
+		"openai_compact_mode",
+		"openai_compact_supported",
 		// 透传开关必须进投影：候选过滤(ListSchedulableAccounts)读的是本投影，
 		// 而 Account.IsModelSupported 靠 extra 上的这两个键短路 model_mapping 白名单。
 		// 裁掉它们，透传账号在选号阶段会退回按(常为过期的)白名单判定并被误判为
@@ -1343,6 +1351,8 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		service.UpstreamBillingProbeExtraKey,
 		service.GrokMediaEligibleExtraKey,
 		"grok_billing_snapshot",
+		// Grok 配额自动暂停（shouldAutoPauseGrokAccountByQuota）在候选过滤阶段读本投影。
+		"grok_usage_snapshot",
 	}
 	filtered := make(map[string]any)
 	for _, key := range keys {

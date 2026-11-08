@@ -105,7 +105,12 @@ const (
 	OpenAIEndpointCapabilityResponses OpenAIEndpointCapability = "responses"
 )
 
-const openAIEndpointCapabilitiesCredentialKey = "openai_capabilities"
+// OpenAIEndpointCapabilitiesCredentialKey 是 credentials 里的端点能力白名单键。
+// 调度快照投影（repository.filterSchedulerCredentials）必须保留它：候选过滤读的是投影，
+// 缺了它 Seedance 这类须显式声明的能力会被判 capability_mismatch。
+const OpenAIEndpointCapabilitiesCredentialKey = "openai_capabilities"
+
+const openAIEndpointCapabilitiesCredentialKey = OpenAIEndpointCapabilitiesCredentialKey
 
 // GrokMediaEligibleExtraKey is an optional per-account override stored in
 // accounts.extra. true forces media routing on, false disables it, and an
