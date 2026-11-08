@@ -55,7 +55,8 @@ func TestBaselineV0220Migrations(t *testing.T) {
 			require.NoError(t, ApplyMigrations(ctx, fixture.db))
 			after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 			require.NoError(t, err)
-			require.Len(t, after, 305)
+			// 305 = v0.2.20 上游全量；+1 为二开 249_group_display_category.sql。
+			require.Len(t, after, 306)
 			for name, entry := range before {
 				require.Equal(t, entry, after[name], name)
 			}
@@ -77,6 +78,10 @@ func TestBaselineV0220Migrations(t *testing.T) {
 			require.Equal(t, after, restarted)
 			if mode == "upgrade-from-304" {
 				require.Equal(t, sentinels, baselineV0219BusinessSentinels(t, ctx, fixture.db))
+				// 249 新增展示分类：已有分组默认空串，保持按平台归类。
+				var displayCategory string
+				require.NoError(t, fixture.db.QueryRowContext(ctx, `SELECT display_category FROM groups WHERE name='baseline v0217'`).Scan(&displayCategory))
+				require.Empty(t, displayCategory)
 			}
 		})
 	}

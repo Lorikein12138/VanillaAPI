@@ -484,6 +484,10 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadRequest, "INVALID_REASONING_EFFORT_MAPPING", "%v", err)
 	}
+	displayCategory, err := NormalizeGroupDisplayCategory(input.DisplayCategory)
+	if err != nil {
+		return nil, infraerrors.Newf(http.StatusBadRequest, "INVALID_GROUP_DISPLAY_CATEGORY", "%v", err)
+	}
 
 	subscriptionType := input.SubscriptionType
 	if subscriptionType == "" {
@@ -692,6 +696,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		// 成员关系无从校验（前端创建对话框也不展示）。
 		CodexModelsManifestConfig:   normalizeCodexModelsManifestConfig(platform, input.CodexModelsManifestConfig),
 		RPMLimit:                    input.RPMLimit,
+		DisplayCategory:             displayCategory,
 		MaxReasoningEffort:          maxReasoningEffort,
 		MaxReasoningEffortOverLimit: maxReasoningEffortOverLimit,
 		ReasoningEffortMappings:     reasoningEffortMappings,
@@ -1105,6 +1110,13 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.RPMLimit != nil {
 		group.RPMLimit = *input.RPMLimit
+	}
+	if input.DisplayCategory != nil {
+		displayCategory, err := NormalizeGroupDisplayCategory(*input.DisplayCategory)
+		if err != nil {
+			return nil, infraerrors.Newf(http.StatusBadRequest, "INVALID_GROUP_DISPLAY_CATEGORY", "%v", err)
+		}
+		group.DisplayCategory = displayCategory
 	}
 	if input.MaxReasoningEffort != nil {
 		maxReasoningEffort, err := normalizeMaxReasoningEffortForPlatform(group.Platform, *input.MaxReasoningEffort)

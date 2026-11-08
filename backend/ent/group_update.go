@@ -981,6 +981,20 @@ func (_u *GroupUpdate) AddSortOrder(v int) *GroupUpdate {
 	return _u
 }
 
+// SetDisplayCategory sets the "display_category" field.
+func (_u *GroupUpdate) SetDisplayCategory(v string) *GroupUpdate {
+	_u.mutation.SetDisplayCategory(v)
+	return _u
+}
+
+// SetNillableDisplayCategory sets the "display_category" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableDisplayCategory(v *string) *GroupUpdate {
+	if v != nil {
+		_u.SetDisplayCategory(*v)
+	}
+	return _u
+}
+
 // SetAllowMessagesDispatch sets the "allow_messages_dispatch" field.
 func (_u *GroupUpdate) SetAllowMessagesDispatch(v bool) *GroupUpdate {
 	_u.mutation.SetAllowMessagesDispatch(v)
@@ -1553,6 +1567,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "audio_stt_price_per_hour", err: fmt.Errorf(`ent: validator failed for field "Group.audio_stt_price_per_hour": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DisplayCategory(); ok {
+		if err := group.DisplayCategoryValidator(v); err != nil {
+			return &ValidationError{Name: "display_category", err: fmt.Errorf(`ent: validator failed for field "Group.display_category": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.DefaultMappedModel(); ok {
 		if err := group.DefaultMappedModelValidator(v); err != nil {
 			return &ValidationError{Name: "default_mapped_model", err: fmt.Errorf(`ent: validator failed for field "Group.default_mapped_model": %w`, err)}
@@ -1877,6 +1896,9 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedSortOrder(); ok {
 		_spec.AddField(group.FieldSortOrder, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.DisplayCategory(); ok {
+		_spec.SetField(group.FieldDisplayCategory, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.AllowMessagesDispatch(); ok {
 		_spec.SetField(group.FieldAllowMessagesDispatch, field.TypeBool, value)
@@ -3201,6 +3223,20 @@ func (_u *GroupUpdateOne) AddSortOrder(v int) *GroupUpdateOne {
 	return _u
 }
 
+// SetDisplayCategory sets the "display_category" field.
+func (_u *GroupUpdateOne) SetDisplayCategory(v string) *GroupUpdateOne {
+	_u.mutation.SetDisplayCategory(v)
+	return _u
+}
+
+// SetNillableDisplayCategory sets the "display_category" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableDisplayCategory(v *string) *GroupUpdateOne {
+	if v != nil {
+		_u.SetDisplayCategory(*v)
+	}
+	return _u
+}
+
 // SetAllowMessagesDispatch sets the "allow_messages_dispatch" field.
 func (_u *GroupUpdateOne) SetAllowMessagesDispatch(v bool) *GroupUpdateOne {
 	_u.mutation.SetAllowMessagesDispatch(v)
@@ -3786,6 +3822,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "audio_stt_price_per_hour", err: fmt.Errorf(`ent: validator failed for field "Group.audio_stt_price_per_hour": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DisplayCategory(); ok {
+		if err := group.DisplayCategoryValidator(v); err != nil {
+			return &ValidationError{Name: "display_category", err: fmt.Errorf(`ent: validator failed for field "Group.display_category": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.DefaultMappedModel(); ok {
 		if err := group.DefaultMappedModelValidator(v); err != nil {
 			return &ValidationError{Name: "default_mapped_model", err: fmt.Errorf(`ent: validator failed for field "Group.default_mapped_model": %w`, err)}
@@ -4127,6 +4168,9 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.AddedSortOrder(); ok {
 		_spec.AddField(group.FieldSortOrder, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.DisplayCategory(); ok {
+		_spec.SetField(group.FieldDisplayCategory, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.AllowMessagesDispatch(); ok {
 		_spec.SetField(group.FieldAllowMessagesDispatch, field.TypeBool, value)

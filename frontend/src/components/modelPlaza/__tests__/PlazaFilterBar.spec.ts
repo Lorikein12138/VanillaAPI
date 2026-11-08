@@ -8,7 +8,7 @@ import { platformDisplayName } from '@/constants/platformCatalog'
 import PlazaFilterBar from '../PlazaFilterBar.vue'
 
 type Locale = 'zh' | 'en'
-type PlazaGroupOption = { id: number; name: string; platform: string; rate: number }
+type PlazaGroupOption = { id: number; name: string; platform: string; rate: number; display_category?: string }
 
 const messages = { en: enMessages, zh: zhMessages }
 
@@ -286,6 +286,24 @@ describe('PlazaFilterBar group categories', () => {
     expect(groupNames(wrapper, 'Chinese AI')).toEqual([
       'Renamed without provider hint', 'Arbitrary one', 'Arbitrary two', 'Arbitrary three'
     ])
+    wrapper.unmount()
+  })
+
+  it('uses the admin display category before the platform, and falls back to platform when empty or invalid', () => {
+    const groups = [
+      group(40, 'GPT', 'openai'),
+      { ...group(41, 'Doubao', 'openai'), display_category: 'domestic' },
+      { ...group(42, 'Auto', 'openai'), display_category: '' },
+      { ...group(43, 'Bogus', 'deepseek'), display_category: 'doubao' },
+      { ...group(44, 'Moved Claude', 'anthropic'), display_category: 'other' }
+    ]
+    const { wrapper } = mountFilterBar({ groups }, 'zh')
+
+    expect(groupNames(wrapper, 'OpenAI')).toEqual(['GPT', 'Auto'])
+    expect(groupNames(wrapper, '国产模型')).toEqual(['Doubao', 'Bogus'])
+    expect(groupNames(wrapper, '其他')).toEqual(['Moved Claude'])
+    expect(mountedCategories(wrapper)).not.toContain('Anthropic')
+    expect(wrapper.findAll('[role="group"] button')).toHaveLength(groups.length)
     wrapper.unmount()
   })
 

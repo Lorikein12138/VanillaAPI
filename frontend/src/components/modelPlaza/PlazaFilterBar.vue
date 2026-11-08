@@ -139,13 +139,20 @@ import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import { platformAccentColor } from '@/utils/platformColors'
 import type { GroupPlatform } from '@/types'
 import { platformDisplayName } from '@/constants/platformCatalog'
-import { getKeyGroupProvider, KEY_GROUP_PROVIDERS } from '@/utils/keyGroupProviders'
+import { getGroupProvider, KEY_GROUP_PROVIDERS } from '@/utils/keyGroupProviders'
 
 const props = defineProps<{
   /** 数据中出现的平台(去重排序后)。 */
   platforms: string[]
   /** 全量分组(含平台与生效倍率),三个维度的置灰联动由此推导。 */
-  groups: Array<{ id: number; name: string; platform: string; rate: number }>
+  groups: Array<{
+    id: number
+    name: string
+    platform: string
+    rate: number
+    /** 管理员设置的展示分类,空则按平台归类。 */
+    display_category?: string
+  }>
   /** 全量生效倍率去重升序。 */
   rates: number[]
   platform: string
@@ -184,8 +191,11 @@ function platformLabel(platform: string): string {
 }
 
 // 分类结果不在四类之内（如原型键取到继承成员）时归入 other，保证每个分组恰好出现一次。
-function groupCategory(platform: string): (typeof KEY_GROUP_PROVIDERS)[number] {
-  const provider = getKeyGroupProvider(platform as GroupPlatform)
+function groupCategory(group: {
+  platform: string
+  display_category?: string
+}): (typeof KEY_GROUP_PROVIDERS)[number] {
+  const provider = getGroupProvider(group)
   return (KEY_GROUP_PROVIDERS as readonly unknown[]).includes(provider) ? provider : 'other'
 }
 
@@ -195,7 +205,7 @@ const groupCategories = computed(() =>
     labelKey: `keys.providers.${id}`,
     // 类内按倍率从低到高;sort 稳定,同倍率保持原顺序。
     groups: props.groups
-      .filter((group) => groupCategory(group.platform) === id)
+      .filter((group) => groupCategory(group) === id)
       .sort((a, b) => a.rate - b.rate)
   })).filter((category) => category.groups.length > 0)
 )

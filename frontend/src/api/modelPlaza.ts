@@ -60,6 +60,8 @@ export interface ModelPlazaGroup {
   name: string
   description: string
   platform: string
+  /** 展示分类（二开）：空字符串 = 按平台自动归类。 */
+  display_category?: string
   /** 'standard' | 'subscription' */
   subscription_type: string
   rate_multiplier: number

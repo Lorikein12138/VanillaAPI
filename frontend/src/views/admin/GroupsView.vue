@@ -638,6 +638,15 @@
           />
           <p class="input-hint">{{ t("admin.groups.form.rpmLimitHint") }}</p>
         </div>
+        <div>
+          <label class="input-label">{{ t("admin.groups.form.displayCategory") }}</label>
+          <Select
+            v-model="createForm.display_category"
+            :options="displayCategoryOptions"
+            data-testid="create-group-display-category"
+          />
+          <p class="input-hint">{{ t("admin.groups.form.displayCategoryHint") }}</p>
+        </div>
         <ReasoningEffortPolicyFields
           v-if="supportsReasoningEffortPolicyPlatform(createForm.platform)"
           ref="createReasoningEffortPolicyRef"
@@ -2298,6 +2307,15 @@
             :placeholder="t('admin.groups.form.rpmLimitPlaceholder')"
           />
           <p class="input-hint">{{ t("admin.groups.form.rpmLimitHint") }}</p>
+        </div>
+        <div>
+          <label class="input-label">{{ t("admin.groups.form.displayCategory") }}</label>
+          <Select
+            v-model="editForm.display_category"
+            :options="displayCategoryOptions"
+            data-testid="edit-group-display-category"
+          />
+          <p class="input-hint">{{ t("admin.groups.form.displayCategoryHint") }}</p>
         </div>
         <ReasoningEffortPolicyFields
           v-if="supportsReasoningEffortPolicyPlatform(editForm.platform)"
@@ -4345,6 +4363,7 @@ import type {
   CompositeRouteDecision,
   CompositeRouteEndpoint,
   CompositeRouteMatchType,
+  GroupDisplayCategory,
   GroupI18n,
   GroupPlatform,
   SubscriptionType,
@@ -4687,6 +4706,15 @@ const platformOptions = computed(() =>
     (option) => !authStore.isSimpleMode || option.value !== "composite",
   ),
 );
+
+// 展示分类（二开）：决定模型广场与创建密钥里的归类，空值按平台自动归类。
+const displayCategoryOptions = computed(() => [
+  { value: "", label: t("admin.groups.form.displayCategoryAuto") },
+  { value: "anthropic", label: t("keys.providers.anthropic") },
+  { value: "openai", label: t("keys.providers.openai") },
+  { value: "domestic", label: t("keys.providers.domestic") },
+  { value: "other", label: t("keys.providers.other") },
+]);
 
 const platformFilterOptions = computed(() => [
   { value: "", label: t("admin.groups.allPlatforms") },
@@ -5081,6 +5109,8 @@ const createForm = reactive({
   copy_accounts_from_group_ids: [] as number[],
   // 分组级 RPM 限制（每用户每分钟最大请求数；0 = 不限制）
   rpm_limit: 0 as number,
+  // 展示分类（二开）：空 = 按平台自动归类
+  display_category: "" as GroupDisplayCategory,
   max_reasoning_effort: "",
   max_reasoning_effort_over_limit: reasoningEffortOverLimitDowngrade,
   reasoning_effort_mappings: [] as ReasoningEffortMappingRow[],
@@ -5458,6 +5488,7 @@ const editForm = reactive({
   copy_accounts_from_group_ids: [] as number[],
   // 分组级 RPM 限制（每用户每分钟最大请求数；0 = 不限制）
   rpm_limit: 0 as number,
+  display_category: "" as GroupDisplayCategory,
   max_reasoning_effort: "",
   max_reasoning_effort_over_limit: reasoningEffortOverLimitDowngrade,
   reasoning_effort_mappings: [] as ReasoningEffortMappingRow[],
@@ -5915,6 +5946,7 @@ const closeCreateModal = () => {
   createForm.mcp_xml_inject = true;
   createForm.copy_accounts_from_group_ids = [];
   createForm.rpm_limit = 0;
+  createForm.display_category = "";
   createForm.max_reasoning_effort = "";
   createForm.max_reasoning_effort_over_limit = reasoningEffortOverLimitDowngrade;
   createForm.reasoning_effort_mappings = [];
@@ -6222,6 +6254,7 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.mcp_xml_inject = group.mcp_xml_inject ?? true;
   editForm.copy_accounts_from_group_ids = []; // 复制账号字段每次编辑时重置为空
   editForm.rpm_limit = group.rpm_limit ?? 0;
+  editForm.display_category = group.display_category ?? "";
   editForm.max_reasoning_effort = normalizeReasoningEffortForPlatform(
     group.platform,
     group.max_reasoning_effort,

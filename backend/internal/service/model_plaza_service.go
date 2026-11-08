@@ -37,11 +37,13 @@ type PlazaModel struct {
 // 支持模型（普通分组按分组平台隔离，Composite 分组展开关联渠道已配置的
 // 具体平台），与「可用渠道」页口径一致。
 type PlazaGroup struct {
-	ID                 int64
-	Name               string
-	Description        string
-	I18n               GroupI18n
-	Platform           string
+	ID          int64
+	Name        string
+	Description string
+	I18n        GroupI18n
+	Platform    string
+	// DisplayCategory 展示分类（二开），空字符串表示按平台自动归类。
+	DisplayCategory    string
 	SubscriptionType   string
 	RateMultiplier     float64
 	PeakRateEnabled    bool
@@ -152,6 +154,7 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 			Description:               g.Description,
 			I18n:                      g.I18n,
 			Platform:                  g.Platform,
+			DisplayCategory:           g.DisplayCategory,
 			SubscriptionType:          g.SubscriptionType,
 			RateMultiplier:            g.RateMultiplier,
 			PeakRateEnabled:           g.PeakRateEnabled,
