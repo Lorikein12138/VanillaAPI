@@ -283,6 +283,48 @@ describe('GroupsView group translations and automatic allowlists', () => {
     }
   })
 
+  it.each([
+    ['3.5', 3.5e-6],
+    ['0', 0],
+    ['', null]
+  ])('round-trips the composite group 12h cache write price with edited value "%s"', async (edited, serialized) => {
+    const group: AdminGroup = {
+      ...sourceGroup,
+      platform: 'composite',
+      model_pricing: sourceGroup.model_pricing!.map(pricing => ({
+        ...pricing,
+        platform: 'composite',
+        cache_write_price: 1e-6,
+        cache_write_12h_price: 2e-6
+      }))
+    }
+    listGroups.mockResolvedValue(page([group]))
+
+    const wrapper = mountView()
+    try {
+      await flushPromises()
+      await wrapper.findAll('button').find(button => button.text().trim() === 'common.edit')!.trigger('click')
+      await flushPromises()
+      const form = wrapper.get('#edit-group-form')
+      const label = form.findAll('label').find(label => label.text() === 'admin.channels.form.cacheWrite12hPrice')
+      expect(label, '12h cache write price label').toBeDefined()
+      const input = form.findAll<HTMLInputElement>('input').find(input => input.element.parentElement === label!.element.parentElement)!
+      expect(input.element.value).toBe('2')
+      await input.setValue(edited)
+      await form.trigger('submit')
+      await flushPromises()
+
+      expect(updateGroup).toHaveBeenCalledWith(42, expect.objectContaining({
+        model_pricing: [expect.objectContaining({
+          cache_write_price: 1e-6,
+          cache_write_12h_price: serialized
+        })]
+      }))
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('delegates copy translation rules to the duplicate endpoint and refreshes the copied record', async () => {
     const duplicate = {
       ...sourceGroup,

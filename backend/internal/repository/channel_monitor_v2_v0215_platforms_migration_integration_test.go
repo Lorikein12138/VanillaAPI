@@ -428,7 +428,7 @@ func readChannelMonitorV2V0215SideEffectSnapshot(ctx context.Context, db *sql.DB
 		return snapshot, err
 	}
 	snapshot.ChannelModelPrices, err = readJSON(`
-		SELECT COALESCE(jsonb_agg(to_jsonb(pricing_row) ORDER BY pricing_row.channel_id, pricing_row.platform, pricing_row.id), '[]'::jsonb)::text
+		SELECT COALESCE(jsonb_agg(to_jsonb(pricing_row) - 'cache_write_12h_price' ORDER BY pricing_row.channel_id, pricing_row.platform, pricing_row.id), '[]'::jsonb)::text
 		FROM public.channel_model_pricing AS pricing_row
 		JOIN public.channels AS channel_row ON channel_row.id = pricing_row.channel_id
 		WHERE channel_row.name LIKE 'CMV2 V0215 %'`)

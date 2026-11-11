@@ -613,6 +613,7 @@ func TestSanitizeOpenAIResponsesToolParameterTypes_RewriteCountIndependentOfHits
 	cmd := exec.Command(executable,
 		"-test.run=^TestSanitizeOpenAIResponsesToolParameterTypes_RewriteCountIndependentOfHits$",
 		"-test.count=1",
+		"-test.timeout=1m",
 		"-test.v",
 	)
 	cmd.Env = append(os.Environ(), childEnv+"=1")

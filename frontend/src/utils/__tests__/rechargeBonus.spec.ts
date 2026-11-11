@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   calculateRechargeBonus,
   describeRechargeBonusIntervals,
+  formatBalanceRechargeMultiplier,
   formatRechargeBonusNumber,
   isDuplicateRechargeBonusMinAmount,
   isRechargeBonusPercentValidForMode,
@@ -137,5 +138,20 @@ describe('rechargeBonus helpers', () => {
     expect(formatRechargeBonusNumber(20)).toBe('20')
     expect(formatRechargeBonusNumber(12.5)).toBe('12.5')
     expect(formatRechargeBonusNumber(100.1)).toBe('100.1')
+  })
+
+  it('formats balance recharge multiplier with up to six decimals', () => {
+    expect(formatBalanceRechargeMultiplier(0.140845)).toBe('0.140845')
+    expect(formatBalanceRechargeMultiplier(0.15)).toBe('0.15')
+    expect(formatBalanceRechargeMultiplier(0.5)).toBe('0.50')
+    expect(formatBalanceRechargeMultiplier(1)).toBe('1.00')
+    expect(formatBalanceRechargeMultiplier(0.1408454)).toBe('0.140845')
+    expect(formatBalanceRechargeMultiplier(Number.NaN)).toBe('1.00')
+  })
+
+  it('formats valid recharge multiplier boundaries without changing their values', () => {
+    expect(formatBalanceRechargeMultiplier(16384.123456)).toBe('16384.123456')
+    expect(formatBalanceRechargeMultiplier(1e303)).toBe('1e+303')
+    expect(formatBalanceRechargeMultiplier(1.23e303)).toBe('1.23e+303')
   })
 })

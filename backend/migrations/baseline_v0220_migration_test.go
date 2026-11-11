@@ -42,5 +42,7 @@ func TestBaselineV0220MigrationIdentity(t *testing.T) {
 	require.True(t, slices.IsSorted(expected))
 	actual, err := fs.Glob(FS, "*.sql")
 	require.NoError(t, err)
-	require.Equal(t, expected, actual)
+	require.Equal(t, expected, slices.DeleteFunc(actual, func(name string) bool {
+		return name != baselineV0220MCPOAuthMigration && isMigrationAfterV0219(name)
+	}))
 }
