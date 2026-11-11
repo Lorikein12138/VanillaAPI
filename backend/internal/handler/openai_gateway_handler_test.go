@@ -2477,9 +2477,37 @@ func TestOpenAIResponses_APIKeyPassthroughSSERateLimitUsesConfiguredPoolRetry(t 
 }
 
 func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T) {
+	for _, mode := range []string{service.OpenAIWSIngressModePassthrough, service.OpenAIWSIngressModeCtxPool} {
+		t.Run(mode, func(t *testing.T) {
+			runOpenAIResponsesWebSocketUsageLimitCase(t, mode, nil, false)
+		})
+	}
+}
+
+func TestOpenAIResponsesWebSocket_NativeLaterTurnUsageLimitDoesNotReplayFirstMessage(t *testing.T) {
+	for _, continuation := range []struct {
+		name           string
+		input          string
+		handshakeLimit bool
+	}{
+		{name: "user message", input: `[{"role":"user","content":"continue the task"}]`},
+		{name: "tool result", input: `[{"type":"function_call_output","call_id":"call_inspect","output":"file contents"}]`},
+		{name: "handshake after disconnect", input: `[{"role":"user","content":"continue the task"}]`, handshakeLimit: true},
+	} {
+		t.Run(continuation.name, func(t *testing.T) {
+			runOpenAIResponsesWebSocketUsageLimitCase(t, service.OpenAIWSIngressModeCtxPool, []string{
+				`{"type":"response.create","model":"gpt-5.1","instructions":"Inspect the project before editing it.","tools":[{"type":"function","name":"inspect","parameters":{"type":"object"}}],"input":[{"role":"user","content":"fix the project"}]}`,
+				fmt.Sprintf(`{"type":"response.create","model":"gpt-5.1","store":%t,"previous_response_id":"resp_ws_turn_2","input":%s}`, continuation.handshakeLimit, continuation.input),
+			}, continuation.handshakeLimit)
+		})
+	}
+}
+
+func runOpenAIResponsesWebSocketUsageLimitCase(t *testing.T, mode string, followups []string, handshakeLimit bool) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	firstHitCh := make(chan []byte, 1)
+	firstHitCh := make(chan []byte, len(followups)+1)
 	secondHitCh := make(chan []byte, 1)
 	var firstConnections atomic.Int32
 	var firstRequests atomic.Int32
@@ -2491,20 +2519,42 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 	var secondHandlerOnce sync.Once
 
 	firstUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		firstConnections.Add(1)
 		defer firstHandlerOnce.Do(func() { close(firstHandlerDone) })
+		if firstConnections.Add(1) > 1 && handshakeLimit {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
 		conn, err := coderws.Accept(w, r, &coderws.AcceptOptions{CompressionMode: coderws.CompressionContextTakeover})
 		if err != nil {
 			return
 		}
 		defer func() { _ = conn.CloseNow() }()
 
-		readCtx, cancelRead := context.WithTimeout(r.Context(), 3*time.Second)
-		_, payload, readErr := conn.Read(readCtx)
-		cancelRead()
-		if readErr == nil {
+		for turn := 0; turn <= len(followups); turn++ {
+			readCtx, cancelRead := context.WithTimeout(r.Context(), 3*time.Second)
+			_, payload, readErr := conn.Read(readCtx)
+			cancelRead()
+			if readErr != nil {
+				return
+			}
 			firstRequests.Add(1)
 			firstHitCh <- payload
+			if turn < len(followups) {
+				output := `[]`
+				if turn > 0 {
+					output = `[{"type":"function_call","call_id":"call_inspect","name":"inspect","arguments":"{}"}]`
+				}
+				completed := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_ws_turn_%d","model":"gpt-5.1","output":%s,"usage":{"input_tokens":1,"output_tokens":1}}}`, turn+1, output)
+				writeCtx, cancelWrite := context.WithTimeout(r.Context(), 3*time.Second)
+				writeErr := conn.Write(writeCtx, coderws.MessageText, []byte(completed))
+				cancelWrite()
+				if writeErr != nil {
+					return
+				}
+				if handshakeLimit && turn == len(followups)-1 {
+					return
+				}
+			}
 		}
 
 		writeCtx, cancelWrite := context.WithTimeout(r.Context(), 3*time.Second)
@@ -2554,7 +2604,7 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 			},
 			Extra: map[string]any{
 				"openai_apikey_responses_websockets_v2_enabled": true,
-				"openai_apikey_responses_websockets_v2_mode":    service.OpenAIWSIngressModePassthrough,
+				"openai_apikey_responses_websockets_v2_mode":    mode,
 			},
 		},
 		{
@@ -2572,7 +2622,7 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 			},
 			Extra: map[string]any{
 				"openai_apikey_responses_websockets_v2_enabled": true,
-				"openai_apikey_responses_websockets_v2_mode":    service.OpenAIWSIngressModePassthrough,
+				"openai_apikey_responses_websockets_v2_mode":    mode,
 			},
 		},
 	}
@@ -2594,6 +2644,7 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 	accountRepo := &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}
 	rateLimitSvc := service.NewRateLimitService(accountRepo, nil, cfg, nil, nil)
 	billingCacheSvc := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingCacheSvc.Stop)
 	gatewaySvc := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,
@@ -2641,15 +2692,17 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 		User:    &service.User{ID: 1702, Status: service.StatusActive},
 		Group:   &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive},
 	}
-	handlerDone := make(chan struct{})
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		defer close(handlerDone)
 		c.Set(string(middleware.ContextKeyAPIKey), apiKey)
 		c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.User.ID, Concurrency: 1})
 		c.Next()
 	})
-	router.GET("/openai/v1/responses", h.ResponsesWebSocket)
+	handlerDone := make(chan struct{})
+	router.GET("/openai/v1/responses", func(c *gin.Context) {
+		h.ResponsesWebSocket(c)
+		close(handlerDone)
+	})
 	handlerServer := httptest.NewServer(router)
 	defer handlerServer.Close()
 
@@ -2668,46 +2721,76 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 	cancelWrite()
 	require.NoError(t, err)
 
+	for _, followup := range followups {
+		readCtx, cancelRead := context.WithTimeout(context.Background(), 5*time.Second)
+		_, event, readErr := clientConn.Read(readCtx)
+		cancelRead()
+		require.NoError(t, readErr)
+		require.Equal(t, "response.completed", gjson.GetBytes(event, "type").String())
+
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
+		writeErr := clientConn.Write(writeCtx, coderws.MessageText, []byte(followup))
+		cancelWrite()
+		require.NoError(t, writeErr)
+	}
+
 	readCtx, cancelRead := context.WithTimeout(context.Background(), 5*time.Second)
 	_, event, err := clientConn.Read(readCtx)
 	cancelRead()
-	require.NoError(t, err)
-	require.Equal(t, "response.completed", gjson.GetBytes(event, "type").String())
-	require.Equal(t, "resp_ws_failover_ok", gjson.GetBytes(event, "response.id").String())
+	if len(followups) > 0 {
+		require.Equal(t, coderws.StatusTryAgainLater, coderws.CloseStatus(err), "a later-turn limit must not turn into a successful replay: %s", event)
+		require.ErrorContains(t, err, "rate limit")
+	} else {
+		require.NoError(t, err)
+		require.Equal(t, "response.completed", gjson.GetBytes(event, "type").String())
+		require.Equal(t, "resp_ws_failover_ok", gjson.GetBytes(event, "response.id").String())
+	}
 	_ = clientConn.CloseNow()
 	select {
 	case <-handlerDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("等待 WebSocket handler 收尾超时")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket handler")
 	}
 
-	select {
-	case payload := <-firstHitCh:
-		require.Equal(t, "response.create", gjson.GetBytes(payload, "type").String())
-	case <-time.After(3 * time.Second):
-		t.Fatal("等待第一个上游收到首帧超时")
+	expectedFrames := len(followups) + 1
+	if handshakeLimit {
+		expectedFrames--
+		require.Equal(t, int32(2), firstConnections.Load(), "the same account must reject the replacement handshake")
 	}
-	select {
-	case payload := <-secondHitCh:
-		require.Equal(t, "response.create", gjson.GetBytes(payload, "type").String())
-	case <-time.After(3 * time.Second):
-		t.Fatal("等待第二个上游收到重放首帧超时")
+	require.Len(t, firstHitCh, expectedFrames)
+	if len(followups) > 0 {
+		require.Zero(t, secondConnections.Load(), "the replacement account must not receive the original connection message")
+		require.Empty(t, secondHitCh)
+	} else {
+		select {
+		case payload := <-secondHitCh:
+			require.Equal(t, "response.create", gjson.GetBytes(payload, "type").String())
+		case <-time.After(3 * time.Second):
+			t.Fatal("等待第二个上游收到重放首帧超时")
+		}
 	}
 	select {
 	case <-firstHandlerDone:
 	case <-time.After(3 * time.Second):
 		t.Fatal("等待第一个上游处理结束超时")
 	}
-	select {
-	case <-secondHandlerDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("等待第二个上游处理结束超时")
+	require.EqualValues(t, expectedFrames, firstRequests.Load())
+	if !handshakeLimit {
+		require.EqualValues(t, 1, firstConnections.Load())
 	}
-	require.EqualValues(t, 1, firstConnections.Load())
-	require.EqualValues(t, 1, firstRequests.Load())
-	require.EqualValues(t, 1, secondConnections.Load())
-	require.EqualValues(t, 1, secondRequests.Load())
-	require.Equal(t, []int64{int64(9902)}, accountRepo.rateLimitedIDs)
+	for range expectedFrames {
+		require.Equal(t, "response.create", gjson.GetBytes(<-firstHitCh, "type").String())
+	}
+	if len(followups) == 0 {
+		select {
+		case <-secondHandlerDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("等待第二个上游处理结束超时")
+		}
+		require.EqualValues(t, 1, secondConnections.Load())
+		require.EqualValues(t, 1, secondRequests.Load())
+		require.Equal(t, []int64{int64(9902)}, accountRepo.rateLimitedIDs)
+	}
 }
 
 func TestOpenAIResponsesWebSocket_NoFailoverAfterCreatedOnUpstreamUsageLimitEvent(t *testing.T) {

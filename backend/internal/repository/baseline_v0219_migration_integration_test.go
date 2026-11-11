@@ -44,7 +44,7 @@ func baselineV0219BusinessSentinels(t *testing.T, ctx context.Context, db *sql.D
 		`SELECT to_jsonb(u)::text FROM users u WHERE email='baseline-v0217@example.test'`,
 		`SELECT to_jsonb(a)::text FROM accounts a WHERE name='baseline v0217'`,
 		`SELECT to_jsonb(k)::text FROM api_keys k WHERE key='sk-baseline-v0217'`,
-		`SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY id),'[]')::text FROM usage_logs u`,
+		`SELECT COALESCE(jsonb_agg(to_jsonb(u) - 'cache_creation_30m_tokens' - 'cache_creation_12h_tokens' ORDER BY id),'[]')::text FROM usage_logs u`,
 		`SELECT COALESCE(jsonb_agg(to_jsonb(g) - 'image_count_billing' - 'display_category' ORDER BY g.name),'[]')::text FROM groups g WHERE g.name IN ('baseline v0217','baseline v0219 old image true','baseline v0219 old image false')`,
 		`SELECT to_jsonb(s)::text FROM settings s WHERE key='PAYMENT_QUICK_AMOUNTS'`,
 		`SELECT to_jsonb(c)::text FROM channel_monitor_v2_config c WHERE id=1`,

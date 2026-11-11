@@ -30,7 +30,9 @@ func TestConfiguredMinOutputTokens(t *testing.T) {
 			requested := 1
 			chat, err := chatCompletionsToResponses(tc.cfg, &apicompat.ChatCompletionsRequest{Model: "gpt-4o", MaxTokens: &requested})
 			require.NoError(t, err)
-			anthropic, err := anthropicToResponses(tc.cfg, &apicompat.AnthropicRequest{Model: "gpt-4o", MaxTokens: requested})
+			anthropic, err := apicompat.AnthropicToResponsesWithMinOutputTokens(
+				&apicompat.AnthropicRequest{Model: "gpt-4o", MaxTokens: requested}, configuredMinOutputTokens(tc.cfg),
+			)
 			require.NoError(t, err)
 			for _, request := range []*apicompat.ResponsesRequest{chat, anthropic} {
 				body, err := json.Marshal(request)
@@ -47,7 +49,9 @@ func TestAPICompatConfigPreservesLargerLimitsAndLegacyDefaults(t *testing.T) {
 	chat, err := chatCompletionsToResponses(cfg, &apicompat.ChatCompletionsRequest{Model: "gpt-4o", MaxTokens: &requested})
 	require.NoError(t, err)
 	require.Equal(t, requested, *chat.MaxOutputTokens)
-	anthropic, err := anthropicToResponses(cfg, &apicompat.AnthropicRequest{Model: "gpt-4o", MaxTokens: requested})
+	anthropic, err := apicompat.AnthropicToResponsesWithMinOutputTokens(
+		&apicompat.AnthropicRequest{Model: "gpt-4o", MaxTokens: requested}, configuredMinOutputTokens(cfg),
+	)
 	require.NoError(t, err)
 	require.Equal(t, requested, *anthropic.MaxOutputTokens)
 	requested = 1
