@@ -3,9 +3,12 @@
 /backend/cmd/server/VERSION text eol=lf
 /backend/migrations/testdata/baseline_v0219_prior_migrations.sha256 text eol=lf
 /backend/migrations/testdata/baseline_v0220_prior_migrations.sha256 text eol=lf
+/backend/migrations/testdata/baseline_v0221_prior_migrations.sha256 text eol=lf
 
 # 确保所有 SQL 迁移文件使用 LF 换行符
 backend/migrations/*.sql text eol=lf
+# 保留 v0.2.21 上游迁移的原始文件尾。
+/backend/migrations/250_openai_cache_write_ttl.sql whitespace=-blank-at-eof
 backend/go.mod text eol=lf
 backend/resources/model-pricing/model_prices_and_context_window.json text eol=lf
 

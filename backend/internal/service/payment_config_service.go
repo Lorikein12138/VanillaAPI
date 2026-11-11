@@ -354,9 +354,18 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 		}
 		quickAmountsJSON = string(encoded)
 	}
+	var rechargeMultiplier string
 	if req.BalanceRechargeMultiplier != nil {
-		if math.IsNaN(*req.BalanceRechargeMultiplier) || math.IsInf(*req.BalanceRechargeMultiplier, 0) || *req.BalanceRechargeMultiplier <= 0 {
+		v := *req.BalanceRechargeMultiplier
+		if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
 			return infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier must be greater than 0")
+		}
+		// 6 位小数可容纳实时汇率（如 1 USD = 7.100000 CNY → 0.140845），
+		// 到账金额仍按结算币种精度取整，余额不会被放大精度。
+		rechargeMultiplier = formatPositiveFloatExact(req.BalanceRechargeMultiplier)
+		_, fraction, _ := strings.Cut(rechargeMultiplier, ".")
+		if len(fraction) > balanceRechargeMultiplierMaxDecimals {
+			return infraerrors.BadRequest("INVALID_BALANCE_RECHARGE_MULTIPLIER", "balance recharge multiplier allows at most 6 decimal places")
 		}
 	}
 	if req.SubscriptionUSDToCNYRate != nil {
@@ -410,7 +419,7 @@ func (s *PaymentConfigService) UpdatePaymentConfig(ctx context.Context, req Upda
 		m[SettingBalancePayDisabled] = formatBoolOrEmpty(req.BalanceDisabled)
 	}
 	if req.BalanceRechargeMultiplier != nil {
-		m[SettingBalanceRechargeMult] = formatPositiveFloat(req.BalanceRechargeMultiplier)
+		m[SettingBalanceRechargeMult] = rechargeMultiplier
 	}
 	if req.SubscriptionUSDToCNYRate != nil {
 		m[SettingSubscriptionUSDToCNYRate] = formatPositiveFloatExact(req.SubscriptionUSDToCNYRate)
@@ -494,6 +503,8 @@ func formatPositiveFloat(v *float64) string {
 	}
 	return strconv.FormatFloat(*v, 'f', 2, 64)
 }
+
+const balanceRechargeMultiplierMaxDecimals = 6
 
 // formatPositiveFloatExact 保留完整精度，用于汇率等对小数位敏感的配置。
 func formatPositiveFloatExact(v *float64) string {

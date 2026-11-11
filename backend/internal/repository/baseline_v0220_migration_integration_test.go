@@ -20,20 +20,25 @@ const baselineV0220MCPOAuthMigration = "249_mcp_oauth.sql"
 
 func baselineV0219FS(t *testing.T) fstest.MapFS {
 	t.Helper()
-	fixture, err := os.ReadFile("../../migrations/testdata/baseline_v0220_prior_migrations.sha256")
+	return readBaselineMigrationFS(t, "baseline_v0220_prior_migrations.sha256", 304)
+}
+
+func readBaselineMigrationFS(t *testing.T, fixtureName string, wantCount int) fstest.MapFS {
+	t.Helper()
+	fixture, err := os.ReadFile("../../migrations/testdata/" + fixtureName)
 	require.NoError(t, err)
 	historical := make(fstest.MapFS)
 	for _, line := range strings.Split(strings.TrimSpace(string(fixture)), "\n") {
 		fields := strings.Fields(line)
 		require.Len(t, fields, 2)
+		require.NotContains(t, historical, fields[1])
 		data, readErr := dbmigrations.FS.ReadFile(fields[1])
 		require.NoError(t, readErr)
 		sum := sha256.Sum256(data)
 		require.Equal(t, fields[0], hex.EncodeToString(sum[:]), fields[1])
 		historical[fields[1]] = &fstest.MapFile{Data: data}
 	}
-	require.Len(t, historical, 304)
-	require.NotContains(t, historical, baselineV0220MCPOAuthMigration)
+	require.Len(t, historical, wantCount)
 	return historical
 }
 
@@ -43,6 +48,7 @@ func TestBaselineV0220Migrations(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 			fixture := newChannelMonitorV2V0215TestDatabase(t)
+			target := baselineV0220FS(t)
 			var before map[string]baselineV0216MigrationRecord
 			var sentinels []string
 			if mode == "upgrade-from-304" {
@@ -52,7 +58,7 @@ func TestBaselineV0220Migrations(t *testing.T) {
 				sentinels = baselineV0219BusinessSentinels(t, ctx, fixture.db)
 			}
 
-			require.NoError(t, ApplyMigrations(ctx, fixture.db))
+			require.NoError(t, applyMigrationsFS(ctx, fixture.db, target))
 			after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 			require.NoError(t, err)
 			// 305 = v0.2.20 上游全量；+1 为二开 249_group_display_category.sql。
@@ -72,7 +78,7 @@ func TestBaselineV0220Migrations(t *testing.T) {
 
 			_, err = fixture.db.ExecContext(ctx, string(sql))
 			require.NoError(t, err)
-			require.NoError(t, ApplyMigrations(ctx, fixture.db))
+			require.NoError(t, applyMigrationsFS(ctx, fixture.db, target))
 			restarted, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 			require.NoError(t, err)
 			require.Equal(t, after, restarted)

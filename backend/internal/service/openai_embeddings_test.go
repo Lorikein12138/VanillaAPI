@@ -63,7 +63,7 @@ func TestForwardEmbeddings_APIKeyPassthroughRecordsUsageAndBatchInput(t *testing
 				{"object":"embedding","index":1,"embedding":[0.3,0.4]}
 			],
 			"model":"jina-embeddings-v5-text-small",
-			"usage":{"prompt_tokens":13,"total_tokens":13}
+			"usage":{"prompt_tokens":13,"total_tokens":13,"prompt_tokens_details":{"cache_write_tokens":5,"cache_write_tokens_details":{"ttl_30m_tokens":2,"ttl_12h_tokens":3}}}
 		}`)),
 	}}
 	svc := &OpenAIGatewayService{
@@ -94,6 +94,9 @@ func TestForwardEmbeddings_APIKeyPassthroughRecordsUsageAndBatchInput(t *testing
 	require.Equal(t, "jina-embeddings-v5-text-small", result.UpstreamModel)
 	require.Equal(t, 13, result.Usage.InputTokens)
 	require.Equal(t, 0, result.Usage.OutputTokens)
+	require.Equal(t, 5, result.Usage.CacheCreationInputTokens)
+	require.Equal(t, 2, result.Usage.CacheCreation30mInputTokens)
+	require.Equal(t, 3, result.Usage.CacheCreation12hInputTokens)
 	require.Equal(t, "https://api.jina.ai/v1/embeddings", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer sk-test", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "jina-embeddings-v5-text-small", gjson.GetBytes(upstream.lastBody, "model").String())
