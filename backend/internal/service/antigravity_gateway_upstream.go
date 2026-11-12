@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // ForwardUpstream 使用 base_url + /v1/messages + 双 header 认证透传上游 Claude 请求
@@ -40,6 +41,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 		return nil, fmt.Errorf("missing model")
 	}
 	originalModel := claudeReq.Model
+	advisor := beginAnthropicAdvisorResponse(c, account, body)
 
 	// 构建上游请求 URL
 	upstreamURL := baseURL + "/v1/messages"
@@ -70,6 +72,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	if v := clientBeta; v != "" {
 		req.Header.Set("anthropic-beta", v)
 	}
+	restoreAnthropicAdvisorBeta(c.Request.Header, req.Header)
 
 	// 代理 URL
 	proxyURL := ""
@@ -131,6 +134,11 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 		// 提取 usage
 		upstreamResponseModelObserverFromContext(c).ObserveAnthropic(respBody)
 		usage = s.extractClaudeUsage(respBody)
+		if advisor != nil {
+			iterations := gjson.GetBytes(respBody, "usage.iterations")
+			advisor.observe(iterations)
+			respBody = advisor.restoreRelay(respBody, string(respBody), iterations)
+		}
 
 		c.Header("Content-Type", resp.Header.Get("Content-Type"))
 		c.Status(http.StatusOK)
@@ -150,6 +158,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 		FirstTokenMs:                  firstTokenMs,
 		ClientDisconnect:              clientDisconnect,
 		UpstreamHeaders:               resp.Header,
+		advisor:                       advisor,
 		Usage: ClaudeUsage{
 			InputTokens:              usage.InputTokens,
 			OutputTokens:             usage.OutputTokens,
@@ -162,6 +171,7 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 // streamUpstreamResponse 透传上游 SSE 流并提取 Claude usage
 func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp *http.Response, startTime time.Time) *antigravityStreamResult {
 	usage := &ClaudeUsage{}
+	advisor := anthropicAdvisorResponseFromContext(c)
 	var firstTokenMs *int
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -262,6 +272,11 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 			line := ev.line
 			if data, ok := extractAnthropicSSEDataLine(line); ok {
 				upstreamResponseModelObserverFromContext(c).ObserveAnthropic([]byte(strings.TrimSpace(data)))
+				if advisor != nil && gjson.Get(data, "type").String() == "message_delta" {
+					iterations := gjson.Get(data, "usage.iterations")
+					advisor.observe(iterations)
+					line = string(advisor.restoreRelay([]byte(line), data, iterations))
+				}
 			}
 
 			// 记录首 token 时间

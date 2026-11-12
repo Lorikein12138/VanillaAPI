@@ -93,6 +93,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if parsed == nil {
 		return nil, fmt.Errorf("parse request: empty request")
 	}
+	advisor := beginAnthropicAdvisorResponse(c, account, parsed.Body.Bytes())
 	// API-key mappings and OAuth native IDs are resolved before mimicry.
 	validationModel := parsed.Model
 	if account != nil {
@@ -115,6 +116,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// partial-stream results all use the same billing and usage-log path.
 	defer func() {
 		if result != nil {
+			result.advisor = advisor
 			if tier := anthropicSpeedServiceTier(account, parsed.Speed, anthropicSpeedModel(parsed, result)); tier != nil {
 				result.ServiceTier = tier
 			}
@@ -154,7 +156,11 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// Beta policy: evaluate once; block check + cache filter set for buildUpstreamRequest.
 	// Always overwrite the cache to prevent stale values from a previous retry with a different account.
 	if account.Platform == PlatformAnthropic && c != nil {
-		policy := s.evaluateBetaPolicy(ctx, c.GetHeader("anthropic-beta"), account, parsed.Model)
+		clientBeta := c.GetHeader("anthropic-beta")
+		if c.Request != nil && hasAnthropicAdvisorBeta(c.Request.Header) {
+			clientBeta = retainAnthropicAdvisorBeta(clientBeta)
+		}
+		policy := s.evaluateBetaPolicy(ctx, clientBeta, account, parsed.Model)
 		if policy.blockErr != nil {
 			return nil, policy.blockErr
 		}
