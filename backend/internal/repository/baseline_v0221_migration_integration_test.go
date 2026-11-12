@@ -19,6 +19,7 @@ const (
 	baselineV0221CostIndexMigration = "249_add_usage_logs_api_key_cost_index_notx.sql"
 	baselineV0221CacheTTLMigration  = "250_openai_cache_write_ttl.sql"
 	baselineGroupDisplayMigration   = "249_group_display_category.sql"
+	advisorRequestIDMigration       = "251_extend_usage_log_request_id.sql"
 )
 
 func baselineV0220FS(t *testing.T) fstest.MapFS {
@@ -53,16 +54,22 @@ func TestBaselineV0221Migrations(t *testing.T) {
 			require.NoError(t, ApplyMigrations(ctx, fixture.db))
 			after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 			require.NoError(t, err)
-			require.Len(t, after, 308)
+			require.Len(t, after, 309)
 			for name, entry := range before {
 				require.Equal(t, entry, after[name], "%s checksum/applied_at", name)
 			}
-			for _, name := range []string{baselineV0221CostIndexMigration, baselineGroupDisplayMigration, baselineV0220MCPOAuthMigration, baselineV0221CacheTTLMigration} {
+			for _, name := range []string{baselineV0221CostIndexMigration, baselineGroupDisplayMigration, baselineV0220MCPOAuthMigration, baselineV0221CacheTTLMigration, advisorRequestIDMigration} {
 				data, readErr := dbmigrations.FS.ReadFile(name)
 				require.NoError(t, readErr)
 				sum := sha256.Sum256([]byte(strings.TrimSpace(string(data))))
 				require.Equal(t, hex.EncodeToString(sum[:]), after[name].checksum, name)
 			}
+			var requestIDWidth int
+			require.NoError(t, fixture.db.QueryRowContext(ctx, `
+				SELECT character_maximum_length FROM information_schema.columns
+				WHERE table_schema='public' AND table_name='usage_logs' AND column_name='request_id'
+			`).Scan(&requestIDWidth))
+			require.Equal(t, 255, requestIDWidth)
 
 			var valid bool
 			var indexDef string

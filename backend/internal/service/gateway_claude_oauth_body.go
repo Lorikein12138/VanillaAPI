@@ -1048,7 +1048,7 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 	if tools.IsArray() {
 		toolIndex := 0
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("cache_control").Exists() {
+			if tool.Get("cache_control").Exists() && tool.Get("type").String() != anthropicAdvisorType {
 				toolPaths = append(toolPaths, fmt.Sprintf("tools.%d.cache_control", toolIndex))
 			}
 			toolIndex++
@@ -1251,7 +1251,9 @@ func forceEphemeralCacheControlTTL(body []byte, ttl string) []byte {
 		idx := -1
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			idx++
-			addPath(fmt.Sprintf("tools.%d", idx), tool)
+			if tool.Get("type").String() != anthropicAdvisorType {
+				addPath(fmt.Sprintf("tools.%d", idx), tool)
+			}
 			return true
 		})
 	}

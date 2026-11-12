@@ -275,7 +275,7 @@ func applyToolsLastCacheBreakpoint(body []byte) []byte {
 	}
 	lastIdx := -1
 	for idx, tool := range arr {
-		if isDeferredLoadingTool(tool) {
+		if isDeferredLoadingTool(tool) || tool.Get("type").String() == anthropicAdvisorType {
 			continue
 		}
 		lastIdx = idx
@@ -317,7 +317,7 @@ func stripDeferredToolCacheControl(body []byte) []byte {
 		return body
 	}
 	for idx, tool := range tools.Array() {
-		if !isDeferredLoadingTool(tool) || !tool.Get("cache_control").Exists() {
+		if !isDeferredLoadingTool(tool) || !tool.Get("cache_control").Exists() || tool.Get("type").String() == anthropicAdvisorType {
 			continue
 		}
 		if next, err := sjson.DeleteBytes(body, fmt.Sprintf("tools.%d.cache_control", idx)); err == nil {
