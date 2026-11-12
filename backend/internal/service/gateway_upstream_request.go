@@ -148,6 +148,9 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
 		finalBetaHeader, finalBetaShouldSet = beta, true
 	}
+	if hasAnthropicAdvisorBeta(clientHeaders) {
+		finalBetaHeader, finalBetaShouldSet = retainAnthropicAdvisorBeta(finalBetaHeader), true
+	}
 	finalBetaHeader = filterSonnet55ToolsetBeta(finalBetaHeader, body, modelID)
 
 	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
@@ -234,6 +237,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	// 放在所有 header 逻辑之后，确保配置值对同名头拥有最终决定权。
 	account.ApplyHeaderOverrides(req.Header)
 	filterSonnet55ToolsetBetaHeader(req.Header, body, modelID)
+	restoreAnthropicAdvisorBeta(clientHeaders, req.Header)
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
 	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
@@ -597,6 +601,7 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 				claude.BetaStructuredOutputs,
 				claude.BetaMidConversationToolChanges,
 				claude.BetaInlineTools,
+				anthropicAdvisorBeta,
 			} {
 				if containsBetaToken(clientBeta, token) {
 					incomingBetas = append(incomingBetas, token)

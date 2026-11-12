@@ -39,6 +39,7 @@ var baselineV0216CurrentMigrationNames = []string{
 	baselineGroupDisplayMigration,
 	baselineV0221CostIndexMigration,
 	baselineV0221CacheTTLMigration,
+	advisorRequestIDMigration,
 }
 
 type baselineV0216MigrationRecord struct {
@@ -79,7 +80,7 @@ func baselineV0216RequireCurrentMigrationHistory(t *testing.T, ctx context.Conte
 	t.Helper()
 	current, err := baselineV0216ReadMigrationRecords(ctx, db)
 	require.NoError(t, err)
-	require.Len(t, current, 308, "current baseline must contain the 306 historical migrations plus two v0.2.21 migrations")
+	require.Len(t, current, 309, "the current schema includes migration 251")
 	for name, before := range historical {
 		require.Equal(t, before, current[name], "historical checksum/applied_at must remain unchanged for %s", name)
 	}
@@ -116,7 +117,7 @@ func TestBaselineV0216FreshInstall(t *testing.T) {
 	fixture := newChannelMonitorV2V0215TestDatabase(t)
 	// Keep the v0.2.16 history projection frozen at 301 before applying the
 	// current migrations. The production group repository is exercised only
-	// after this isolated database reaches the current 308-migration schema.
+	// after this isolated database reaches the current schema.
 	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0216TargetFS(t)))
 	baselineV0216RequireNewSchema(t, ctx, fixture.db)
 	baselineV0217RequireLedger(t, ctx, fixture.db)
@@ -268,12 +269,12 @@ func TestBaselineV0216UpgradePreservesHistory(t *testing.T) {
 		historicalRecords = records
 	}))
 
-	require.True(t, t.Run("current-repository-after-upgrade-308", func(t *testing.T) {
+	require.True(t, t.Run("current-repository-after-upgrade-309", func(t *testing.T) {
 		require.NoError(t, ApplyMigrations(ctx, fixture.db))
 		afterRecords := baselineV0216RequireCurrentMigrationHistory(t, ctx, fixture.db, historicalRecords)
 		baselineV0216RequireNewSchema(t, ctx, fixture.db)
-		requireImageGeneration(t, true, "current-308")
-		requirePreserved(t, "current-308")
+		requireImageGeneration(t, true, "current-309")
+		requirePreserved(t, "current-309")
 
 		_, repo := baselineV0216GroupRepository(t, fixture.db)
 		got, err := repo.GetByID(ctx, groupID)
@@ -292,7 +293,7 @@ func TestBaselineV0216UpgradePreservesHistory(t *testing.T) {
 		restartRecords, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 		require.NoError(t, err)
 		require.Equal(t, afterRecords, restartRecords, "restart must not rewrite checksums or applied_at")
-		requirePreserved(t, "current-308-restart")
+		requirePreserved(t, "current-309-restart")
 	}))
 
 	baselineV0216RequireHarnessUnchanged(t, ctx, harnessDatabase, harnessConfig)

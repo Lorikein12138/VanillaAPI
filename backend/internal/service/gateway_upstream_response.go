@@ -683,7 +683,8 @@ func (u *ClaudeUsage) hasObservedTokens() bool {
 // 不变式：UpstreamFailoverError 必须保持 result=nil——failover 重试成功后按成功请求
 // 计费，若同时返回部分 usage 会造成双重计费，此处显式拦截兜底。
 func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult *streamingResult, model, upstreamModel string, startTime time.Time, err error) *ForwardResult {
-	if streamResult == nil || !streamResult.usage.hasObservedTokens() {
+	advisor := anthropicAdvisorResponseFromContext(c)
+	if streamResult == nil || (!streamResult.usage.hasObservedTokens() && (advisor == nil || len(advisor.iterations) == 0)) {
 		return nil
 	}
 	var failoverErr *UpstreamFailoverError
@@ -707,6 +708,7 @@ func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult 
 }
 
 func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
+	advisor := anthropicAdvisorResponseFromContext(c)
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -912,6 +914,11 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		}
 
 		eventType, _ := event["type"].(string)
+		var iterations gjson.Result
+		if advisor != nil && eventType == "message_delta" {
+			iterations = gjson.Get(dataLine, "usage.iterations")
+			advisor.observe(iterations)
+		}
 		observer.ObserveAnthropic([]byte(dataLine))
 		if eventName == "" {
 			eventName = eventType
@@ -1016,6 +1023,11 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			block += "data: " + dataLine + "\n\n"
 			return []string{block}, dataLine, usagePatch, nil
 		}
+		if iterations.IsArray() {
+			if preserved, err := sjson.SetRawBytes(newData, "usage.iterations", []byte(iterations.Raw)); err == nil {
+				newData = preserved
+			}
+		}
 
 		block := ""
 		if eventName != "" {
@@ -1034,6 +1046,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			if !ok {
 				// 上游完成，返回结果
 				if !sawTerminalEvent {
+					if advisor.disconnectedBeforeIterations() && (clientDisconnected || errors.Is(ctx.Err(), context.Canceled)) {
+						return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
+					}
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, fmt.Errorf("stream usage incomplete: missing terminal event")
 				}
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
@@ -1041,6 +1056,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			if ev.err != nil {
 				if sawTerminalEvent {
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
+				}
+				if advisor.disconnectedBeforeIterations() && (clientDisconnected || errors.Is(ev.err, context.Canceled)) {
+					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
 				}
 				// 检测 context 取消（客户端断开会导致 context 取消，进而影响上游读取）
 				if errors.Is(ev.err, context.Canceled) || errors.Is(ev.err, context.DeadlineExceeded) {
@@ -1101,7 +1119,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 
 				for _, block := range outputBlocks {
 					if !clientDisconnected {
-						restored := reverseToolNamesIfPresent(c, []byte(block))
+						restored := advisor.restore(c, []byte(block), data)
 						if _, werr := fmt.Fprint(w, string(restored)); werr != nil {
 							clientDisconnected = true
 							logger.LegacyPrintf("service.gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
@@ -1135,6 +1153,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				continue
 			}
 			if clientDisconnected {
+				if advisor.disconnectedBeforeIterations() {
+					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
+				}
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, fmt.Errorf("stream usage incomplete after timeout")
 			}
 			logger.LegacyPrintf("service.gateway", "Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
@@ -1430,6 +1451,10 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 	}
 
 	// 解析嵌套的 cache_creation 对象中的 5m/1h 明细
+	advisor := anthropicAdvisorResponseFromContext(c)
+	if advisor != nil {
+		advisor.observe(gjson.GetBytes(body, "usage.iterations"))
+	}
 	cc5m := gjson.GetBytes(body, "usage.cache_creation.ephemeral_5m_input_tokens")
 	cc1h := gjson.GetBytes(body, "usage.cache_creation.ephemeral_1h_input_tokens")
 	if cc5m.Exists() || cc1h.Exists() {
@@ -1476,7 +1501,7 @@ func (s *GatewayService) handleNonStreamingResponse(ctx context.Context, resp *h
 		}
 	}
 
-	body = reverseToolNamesIfPresent(c, body)
+	body = advisor.restore(c, body, string(body))
 
 	// 写入响应
 	c.Data(resp.StatusCode, contentType, body)

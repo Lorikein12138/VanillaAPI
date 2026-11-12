@@ -18,11 +18,12 @@ const (
 	baselineV0221CostIndexMigration = "249_add_usage_logs_api_key_cost_index_notx.sql"
 	baselineV0221CacheTTLMigration  = "250_openai_cache_write_ttl.sql"
 	baselineGroupDisplayMigration   = "249_group_display_category.sql"
+	advisorRequestIDMigration       = "251_extend_usage_log_request_id.sql"
 )
 
 func isMigrationAfterV0219(name string) bool {
 	switch name {
-	case baselineV0220MCPOAuthMigration, baselineGroupDisplayMigration, baselineV0221CostIndexMigration, baselineV0221CacheTTLMigration:
+	case baselineV0220MCPOAuthMigration, baselineGroupDisplayMigration, baselineV0221CostIndexMigration, baselineV0221CacheTTLMigration, advisorRequestIDMigration:
 		return true
 	default:
 		return false
@@ -62,6 +63,8 @@ func TestBaselineV0221MigrationIdentity(t *testing.T) {
 	slices.Sort(expected)
 	actual, err := fs.Glob(FS, "*.sql")
 	require.NoError(t, err)
+	require.Contains(t, actual, advisorRequestIDMigration)
+	actual = slices.DeleteFunc(actual, func(name string) bool { return name == advisorRequestIDMigration })
 	require.Equal(t, expected, actual)
 	require.Equal(t, []string{
 		baselineV0221CostIndexMigration, baselineGroupDisplayMigration, baselineV0220MCPOAuthMigration, baselineV0221CacheTTLMigration,

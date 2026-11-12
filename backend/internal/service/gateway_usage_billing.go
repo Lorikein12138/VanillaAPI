@@ -822,10 +822,10 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			responseCost := s.calculateRecordUsageCost(ctx, result, apiKey, responseModel, multiplier, imageMultiplier, pricingAt)
 			baselineChannelPriced := s.resolveChannelPricing(ctx, billingModel, apiKey) != nil
 			if responseModelBillingAdoptable(cost, responseCost, baselineChannelPriced, responseChannelPriced) {
-				// billingModel 到此为止只是定价查表的入参，后续流程只消费 cost，
-				// 因此这里不改写它，改由日志记录实际生效的计费基准。
+				// Advisor fallback uses the same pricing model as the parent charge.
 				logResponseModelBillingApplied("service.gateway", account, result.RequestID, billingModel, responseModel, cost, responseCost)
 				cost = responseCost
+				billingModel = responseModel
 			}
 		}
 	}
@@ -839,7 +839,14 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 
 	// 创建使用日志
 	accountRateMultiplier := account.BillingRateMultiplier()
-	usageLog := s.buildRecordUsageLog(ctx, input, result, apiKey, user, account, subscription,
+	advisorBilled := result.advisor != nil && len(result.advisor.iterations) > 0
+	var requestID string
+	if advisorBilled {
+		requestID = result.advisor.resolveBillingID(ctx, result.RequestID)
+	} else {
+		requestID = resolveUsageBillingRequestID(ctx, result.RequestID)
+	}
+	usageLog := s.buildRecordUsageLog(input, result, requestID, apiKey, user, account, subscription,
 		requestedModel, multiplier, imageMultiplier, accountRateMultiplier, billingType, cacheTTLOverridden, cost)
 
 	// 计算账号统计定价费用（使用最终上游模型匹配自定义规则）。纯存储费不是一次模型请求，
@@ -863,12 +870,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	}
 
 	simpleModeKeyRateLimitOnly := simpleModeKeyRateLimitBillingEnabled(s.cfg, apiKey)
-	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !simpleModeKeyRateLimitOnly {
-		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
-		logger.LegacyPrintf("service.gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
-		s.deferredService.ScheduleLastUsedUpdate(account.ID)
-		return nil
-	}
+	logOnly := s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !simpleModeKeyRateLimitOnly
 
 	// 配额平台由 handler 在请求 ctx 内经 QuotaPlatform() 算定并通过 input 传入；
 	// 后扣运行在 worker 池的 background ctx 上，无法再从 ctx 取 ForcePlatform。
@@ -880,8 +882,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			quotaPlatform = account.Platform
 		}
 	}
-	requestID := usageLog.RequestID
-	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{
+	params := postUsageBillingParams{
 		Cost:                       cost,
 		User:                       user,
 		APIKey:                     apiKey,
@@ -893,11 +894,28 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		APIKeyService:              input.APIKeyService,
 		Platform:                   quotaPlatform,
 		SimpleModeKeyRateLimitOnly: simpleModeKeyRateLimitOnly,
-	}, s.billingDeps(), s.usageBillingRepo)
+	}
+	billingErr := s.settleRecordUsage(ctx, usageLog, &params, logOnly, true)
+	if !advisorBilled {
+		return billingErr
+	}
+	return errors.Join(billingErr, s.recordAdvisorUsages(ctx, input, usageLog, billingModel, pricingAt, params, logOnly))
+}
 
-	if billingErr != nil {
-		usageLog.ActualCost = 0
+func (s *GatewayService) settleRecordUsage(ctx context.Context, usageLog *UsageLog, params *postUsageBillingParams, logOnly, logUnsettled bool) error {
+	if logOnly {
 		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
+		logger.LegacyPrintf("service.gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
+		s.deferredService.ScheduleLastUsedUpdate(params.Account.ID)
+		return nil
+	}
+
+	_, billingErr := applyUsageBilling(ctx, usageLog.RequestID, usageLog, params, s.billingDeps(), s.usageBillingRepo)
+	if billingErr != nil {
+		if logUnsettled {
+			usageLog.ActualCost = 0
+			writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
+		}
 		return billingErr
 	}
 	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
@@ -1260,16 +1278,6 @@ func (s *GatewayService) calculateTokenCost(
 	multiplier float64,
 	pricingAt time.Time,
 ) *CostBreakdown {
-	tokens := UsageTokens{
-		InputTokens:           result.Usage.InputTokens,
-		OutputTokens:          result.Usage.OutputTokens,
-		CacheCreationTokens:   result.Usage.CacheCreationInputTokens,
-		CacheReadTokens:       result.Usage.CacheReadInputTokens,
-		CacheCreation5mTokens: result.Usage.CacheCreation5mTokens,
-		CacheCreation1hTokens: result.Usage.CacheCreation1hTokens,
-		ImageOutputTokens:     result.Usage.ImageOutputTokens,
-	}
-
 	var resolved *ResolvedPricing
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
@@ -1280,7 +1288,7 @@ func (s *GatewayService) calculateTokenCost(
 		Ctx:             ctx,
 		Model:           billingModel,
 		Group:           apiKey.Group,
-		Tokens:          tokens,
+		Tokens:          claudeBillingTokens(result.Usage),
 		RateMultiplier:  multiplier,
 		PricingAt:       pricingAt,
 		ServiceTier:     optionalStringValue(result.ServiceTier),
@@ -1295,11 +1303,23 @@ func (s *GatewayService) calculateTokenCost(
 	return cost
 }
 
+func claudeBillingTokens(usage ClaudeUsage) UsageTokens {
+	return UsageTokens{
+		InputTokens:           usage.InputTokens,
+		OutputTokens:          usage.OutputTokens,
+		CacheCreationTokens:   usage.CacheCreationInputTokens,
+		CacheReadTokens:       usage.CacheReadInputTokens,
+		CacheCreation5mTokens: usage.CacheCreation5mTokens,
+		CacheCreation1hTokens: usage.CacheCreation1hTokens,
+		ImageOutputTokens:     usage.ImageOutputTokens,
+	}
+}
+
 // buildRecordUsageLog 构建使用日志并设置计费模式。
 func (s *GatewayService) buildRecordUsageLog(
-	ctx context.Context,
 	input *recordUsageCoreInput,
 	result *ForwardResult,
+	requestID string,
 	apiKey *APIKey,
 	user *User,
 	account *Account,
@@ -1313,7 +1333,6 @@ func (s *GatewayService) buildRecordUsageLog(
 	cost *CostBreakdown,
 ) *UsageLog {
 	durationMs := int(result.Duration.Milliseconds())
-	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
 	sentModel := upstreamSentModel(result.Model, result.UpstreamModel)
 	if result.UpstreamResponseModelConflict {
 		slog.Warn("upstream_response_model_conflict",

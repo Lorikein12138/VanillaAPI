@@ -64,7 +64,7 @@ func TestBaselineV0218MigrationIdentity(t *testing.T) {
 	sort.Strings(actual)
 	sort.Strings(v0218Projection)
 	sort.Strings(historical)
-	require.Len(t, actual, 308, "the current tree includes migrations through 250")
+	require.Len(t, actual, 309, "the current tree includes migrations through 251")
 	require.Len(t, v0218Projection, 302, "the fixed v0.2.18 projection must omit later migrations")
 	require.Equal(t, names, historical, "the current historical projection must match the frozen H set exactly")
 	require.Contains(t, actual, "246_enable_gemini_image_generation_groups.sql")

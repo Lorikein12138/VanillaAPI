@@ -10,10 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -80,6 +83,40 @@ func TestUsageBillingRepositoryApply_DeduplicatesBalanceBilling(t *testing.T) {
 	var dedupCount int
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_billing_dedup WHERE request_id = $1 AND api_key_id = $2", requestID, apiKey.ID).Scan(&dedupCount))
 	require.Equal(t, 1, dedupCount)
+}
+
+func TestUsageBillingRepositoryApply_AdvisorChildRequestIDs(t *testing.T) {
+	ctx := context.Background()
+	fixture := newChannelMonitorV2V0215TestDatabase(t)
+	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, fixture.db)))
+	billing := NewUsageBillingRepository(client, fixture.db)
+	logs := newUsageLogRepositoryWithSQL(client, fixture.db)
+	user := mustCreateUser(t, client, &service.User{Email: uuid.NewString() + "@example.com", Balance: 100})
+	key := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID, Key: "sk-" + uuid.NewString(), Name: "advisor"})
+	account := mustCreateAccount(t, client, &service.Account{Name: uuid.NewString(), Type: service.AccountTypeAPIKey})
+	parent := "client:" + strings.Repeat("x", 64)
+	for i, requestID := range []string{parent, parent + ":advisor:1", parent + ":advisor:2"} {
+		cost := float64(i + 1)
+		cmd := &service.UsageBillingCommand{
+			RequestID: requestID, APIKeyID: key.ID, UserID: user.ID, AccountID: account.ID,
+			AccountType: account.Type, BalanceCost: cost,
+		}
+		for _, first := range []bool{true, false} {
+			applied, err := billing.Apply(ctx, cmd)
+			require.NoError(t, err)
+			require.Equal(t, first, applied.Applied)
+			created, err := logs.Create(ctx, &service.UsageLog{
+				RequestID: requestID, APIKeyID: key.ID, UserID: user.ID, AccountID: account.ID,
+				Model: "claude-sonnet-4", TotalCost: cost, ActualCost: cost,
+			})
+			require.NoError(t, err)
+			require.Equal(t, first, created)
+		}
+	}
+	var balance float64
+	require.NoError(t, fixture.db.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.InDelta(t, 94.0, balance, 1e-9)
 }
 
 func TestUsageBillingRepositoryApply_DeduplicatesSubscriptionBilling(t *testing.T) {
