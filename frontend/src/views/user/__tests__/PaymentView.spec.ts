@@ -5,6 +5,8 @@ import { PAYMENT_RECOVERY_STORAGE_KEY } from '@/components/payment/paymentFlow'
 import { formatPaymentAmount } from '@/components/payment/currency'
 import AmountInput from '@/components/payment/AmountInput.vue'
 import SubscriptionPlanCard from '@/components/payment/SubscriptionPlanCard.vue'
+import PaymentStatusPanel from '@/components/payment/PaymentStatusPanel.vue'
+import { isMobileDevice } from '@/utils/device'
 import en from '@/i18n/locales/en'
 import zh from '@/i18n/locales/zh'
 import type { CheckoutInfoResponse, MethodLimit, SubscriptionPlan } from '@/types/payment'
@@ -103,7 +105,7 @@ vi.mock('@/api/payment', () => ({
 }))
 
 vi.mock('@/utils/device', () => ({
-  isMobileDevice: () => true,
+  isMobileDevice: vi.fn(() => true),
 }))
 
 function checkoutInfoFixture(overrides: Partial<CheckoutInfoResponse> = {}) {
@@ -452,6 +454,56 @@ describe('PaymentView checkout quick amounts', () => {
       order_type: 'balance',
     }))
     expect(getCheckoutInfo).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    { mode: 'popup', reopen: false, shouldClose: true },
+    { mode: 'popup', reopen: true, shouldClose: true },
+    { mode: 'redirect', reopen: false, shouldClose: false },
+  ])('handles the $mode payment window on success (reopened: $reopen)', async ({ mode, reopen, shouldClose }) => {
+    vi.mocked(isMobileDevice).mockReturnValue(false)
+    routerPush.mockClear()
+    const popup = { closed: false, close: vi.fn() }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    const wrapper = await mountRecharge()
+    try {
+      const payUrl = 'https://pay.example.com/checkout'
+      createOrder.mockResolvedValue({
+        order_id: 42,
+        amount: 10,
+        pay_amount: 10,
+        pay_url: payUrl,
+        payment_mode: mode,
+      })
+      await wrapper.getComponent(AmountInput).vm.$emit('update:modelValue', 10)
+      await wrapper.get('[data-testid="recharge-submit"]').trigger('click')
+      await flushPromises()
+
+      expect(open).toHaveBeenCalledWith(payUrl, 'paymentPopup', expect.any(String))
+      expect(popup.close).not.toHaveBeenCalled()
+      expect(routerPush).not.toHaveBeenCalled()
+
+      const panel = wrapper.getComponent(PaymentStatusPanel)
+      const reopenedPopup = { closed: false, close: vi.fn() }
+      if (reopen) {
+        popup.closed = true
+        panel.vm.$emit('popupOpened', reopenedPopup as unknown as Window)
+      }
+      panel.vm.$emit('success')
+      await flushPromises()
+
+      expect(popup.close).toHaveBeenCalledTimes(shouldClose && !reopen ? 1 : 0)
+      expect(reopenedPopup.close).toHaveBeenCalledTimes(reopen ? 1 : 0)
+      expect(routerPush).toHaveBeenCalledTimes(1)
+      expect(routerPush).toHaveBeenCalledWith({
+        path: '/payment/result',
+        query: { order_id: '42' },
+      })
+    } finally {
+      wrapper.unmount()
+      open.mockRestore()
+      vi.mocked(isMobileDevice).mockReturnValue(true)
+    }
   })
 
   it('keeps an explicit empty list and falls back to shared defaults for an older checkout response', async () => {

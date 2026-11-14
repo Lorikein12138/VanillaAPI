@@ -31,6 +31,7 @@
             @done="onPaymentDone"
             @success="onPaymentSuccess"
             @settled="onPaymentSettled"
+            @popup-opened="trackRechargePopup"
           />
         </template>
         <!-- Tab content (select phase) -->
@@ -361,7 +362,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import AmountInput from '@/components/payment/AmountInput.vue'
 import PaymentMethodSelector from '@/components/payment/PaymentMethodSelector.vue'
 import RecentOrders from '@/components/payment/RecentOrders.vue'
-import { METHOD_ORDER, getPaymentPopupFeatures } from '@/components/payment/providerConfig'
+import { METHOD_ORDER, PAYMENT_MODE_POPUP, getPaymentPopupFeatures } from '@/components/payment/providerConfig'
 import {
   PAYMENT_RECOVERY_STORAGE_KEY,
   buildCreateOrderPayload,
@@ -495,6 +496,14 @@ async function invokeWechatJsapiPayment(payload: Record<string, unknown>): Promi
 }
 
 const paymentState = ref<PaymentRecoverySnapshot>(emptyPaymentState())
+let rechargePopup: { orderId: number; window: Window } | undefined
+
+function trackRechargePopup(popup: Window) {
+  const { orderId, orderType, paymentMode } = paymentState.value
+  if (orderType === 'balance' && !isMobileDevice() && paymentMode.trim().toLowerCase() === PAYMENT_MODE_POPUP) {
+    rechargePopup = { orderId, window: popup }
+  }
+}
 
 function persistRecoverySnapshot(snapshot: PaymentRecoverySnapshot) {
   if (typeof window === 'undefined' || !snapshot.orderId) return
@@ -507,6 +516,7 @@ function removeRecoverySnapshot() {
 }
 
 function resetPayment() {
+  rechargePopup = undefined
   paymentPhase.value = 'select'
   paymentState.value = emptyPaymentState()
   removeRecoverySnapshot()
@@ -577,6 +587,11 @@ function onPaymentDone() {
 
 async function onPaymentSuccess() {
   const completedPayment = { ...paymentState.value }
+  const popup = rechargePopup
+  rechargePopup = undefined
+  if (popup?.orderId === completedPayment.orderId && !popup.window.closed) {
+    popup.window.close()
+  }
   removeRecoverySnapshot()
   authStore.refreshUser()
   if (paymentState.value.orderType === 'subscription') {
@@ -925,7 +940,9 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
       const win = window.open(url, 'paymentPopup', getPaymentPopupFeatures())
       if (!win || win.closed) {
         window.location.href = url
+        return
       }
+      return win
     }
     const visibleMethod = normalizeVisibleMethod(requestType) || requestType
     // When user clicks the dedicated Stripe button, leave method blank so the
@@ -1043,7 +1060,8 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
         window.location.href = decision.paymentState.payUrl
         return
       }
-      openWindow(decision.paymentState.payUrl)
+      const popup = openWindow(decision.paymentState.payUrl)
+      if (popup) trackRechargePopup(popup)
     }
   } catch (err: unknown) {
     const apiErr = err as Record<string, unknown>
