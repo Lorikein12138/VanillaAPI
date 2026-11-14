@@ -84,6 +84,18 @@ describe('RecentOrders', () => {
     expect(rows[0].text()).toContain('alipay')
   })
 
+  it.each(['1.01', '0.99', '1.00'])('keeps actual %s and ordered amount distinct in desktop and mobile history', async (actual) => {
+    getMyOrders.mockResolvedValue({ data: { items: [order({ amount: 2, pay_amount: 1,
+      payment_info: { version: 1, actual_amount: actual, requires_cashier: true } })], total: 1 } })
+    const wrapper = mountOrders()
+    await flushPromises()
+    const row = wrapper.get('[data-testid="recent-order-row"]')
+    expect(row.text()).toContain('payment.orders.actualPaidAmount: ¥' + actual)
+    expect(row.text()).toContain('payment.orders.orderedAmount: ¥1.00')
+    expect(row.get('[data-testid="recent-order-credited"]').text()).toBe('+$2.00')
+    expect(wrapper.text()).not.toContain('payment.orders.payAmount')
+  })
+
   it('hides the whole section when the request fails', async () => {
     getMyOrders.mockRejectedValue(new Error('network'))
     const wrapper = mountOrders()

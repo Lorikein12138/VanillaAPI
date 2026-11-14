@@ -1,5 +1,10 @@
 <template>
   <div class="space-y-4">
+    <div v-if="!outcome && !paymentBlocked && paymentInfo" class="card space-y-2 p-4 text-center" data-test="payment-amounts">
+      <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.actualAmount') }}</p>
+      <p class="text-3xl font-semibold tabular-nums text-gray-950 dark:text-white" data-test="actual-amount">{{ currencySymbol(paymentCurrency) }}{{ paymentInfo.actual_amount }}</p>
+      <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.amountSeparation', { ordered: displayPaymentAmount, credited: creditedAmountSymbol + creditedAmount.toFixed(2) }) }}</p>
+    </div>
     <!-- ═══ Terminal States: show result, user clicks to return ═══ -->
 
     <!-- Success -->
@@ -21,7 +26,7 @@
                 <span class="font-medium text-gray-900 dark:text-white">{{ paidOrder.out_trade_no }}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.amount') }}</span>
+                <span class="text-gray-500 dark:text-gray-400">{{ t(paidPaymentInfo ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
                 <span class="font-medium text-gray-900 dark:text-white">
                   {{ creditedAmountSymbol }}{{ paidOrder.amount.toFixed(2) }}
                   <span v-if="(paidOrder.bonus_amount ?? 0) > 0" class="ml-1 text-xs font-normal text-amber-600 dark:text-amber-400">
@@ -30,8 +35,12 @@
                 </span>
               </div>
               <div class="flex justify-between">
-                <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.payAmount') }}</span>
+                <span class="text-gray-500 dark:text-gray-400">{{ t(paidPaymentInfo ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
                 <span class="font-medium text-gray-900 dark:text-white">{{ formatGatewayAmount(paidOrder.pay_amount, paidOrder.currency) }}</span>
+              </div>
+              <div v-if="paidPaymentInfo" class="flex justify-between" data-test="actual-paid-amount">
+                <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.actualPaidAmount') }}</span>
+                <span class="font-semibold text-gray-900 dark:text-white">{{ currencySymbol(paidOrder.currency) }}{{ paidPaymentInfo.actual_amount }}</span>
               </div>
             </div>
           </div>
@@ -188,16 +197,17 @@
         <div class="flex flex-col items-center space-y-4">
           <p class="text-lg font-semibold text-gray-900 dark:text-white">{{ scanTitle }}</p>
           <div :class="['relative rounded-lg border-2 p-4', qrBorderClass]">
-            <canvas ref="qrCanvas" class="mx-auto"></canvas>
+            <img v-if="qrImageUrl" :src="qrImageUrl" :alt="scanTitle" class="mx-auto h-[220px] w-[220px] object-contain" referrerpolicy="no-referrer" data-test="payment-qr-image" @error="qrFailed = true" />
+            <canvas v-else ref="qrCanvas" class="mx-auto"></canvas>
             <!-- Brand logo overlay -->
-            <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div v-if="!qrImageUrl" class="pointer-events-none absolute inset-0 flex items-center justify-center">
               <span :class="['rounded-full p-2 shadow ring-2 ring-white', qrLogoBgClass]">
                 <img :src="qrLogoIcon" alt="" class="h-5 w-5 brightness-0 invert" />
               </span>
             </div>
           </div>
           <p v-if="scanHint" class="text-center text-sm text-gray-500 dark:text-gray-400">{{ scanHint }}</p>
-          <button v-if="payUrl" class="btn btn-secondary text-sm" @click="reopenPopup">
+          <button v-if="cashierUrl" class="btn btn-secondary text-sm" @click="reopenPopup">
             {{ t('payment.qr.openPayWindow') }}
           </button>
         </div>
@@ -216,9 +226,10 @@
     <template v-else>
       <div class="card p-6">
         <div class="flex flex-col items-center space-y-4 py-4">
-          <div class="h-10 w-10 animate-spin rounded-full border-4 border-primary-500 border-t-transparent"></div>
-          <p class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.payInNewWindowHint') }}</p>
-          <button v-if="payUrl" class="btn btn-secondary text-sm" @click="reopenPopup">
+          <div v-if="!hasPaymentInfo" class="h-10 w-10 animate-spin rounded-full border-4 border-primary-500 border-t-transparent"></div>
+          <p v-if="hasPaymentInfo" data-test="qr-unavailable" class="text-center text-sm text-gray-500 dark:text-gray-400">{{ t(!cashierUrl ? 'payment.qr.unavailable' : qrExpired ? 'payment.qr.codeExpired' : 'payment.qr.cashierRequired') }}</p>
+          <p v-else class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.payInNewWindowHint') }}</p>
+          <button v-if="cashierUrl" class="btn btn-secondary text-sm" @click="reopenPopup">
             {{ t('payment.qr.openPayWindow') }}
           </button>
         </div>
@@ -244,7 +255,8 @@ import { extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
 import { getPaymentPopupFeatures, isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
 import { currencySymbol, formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
-import type { PaymentOrder } from '@/types/payment'
+import type { PaymentInfo, PaymentOrder } from '@/types/payment'
+import { normalizePaymentInfo, safeCashierUrl } from './paymentFlow'
 import Icon from '@/components/icons/Icon.vue'
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
@@ -270,11 +282,13 @@ const props = defineProps<{
   mobileAlipayDeepLink?: boolean
   paymentMode?: string
   recovering?: boolean
+  requireOrderRead?: boolean
+  paymentInfo?: PaymentInfo | null
 }>()
 
 type PaymentOutcome = 'success' | 'cancelled' | 'expired'
 
-const emit = defineEmits<{ done: []; success: []; settled: [outcome: PaymentOutcome]; popupOpened: [popup: Window] }>()
+const emit = defineEmits<{ done: []; success: []; settled: [outcome: PaymentOutcome]; popupOpened: [popup: Window]; orderUpdated: [order: PaymentOrder] }>()
 
 const i18n = useI18n()
 const { t } = i18n
@@ -282,13 +296,34 @@ const paymentStore = usePaymentStore()
 const appStore = useAppStore()
 
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
-const qrUrl = ref('')
+const serverOrder = ref<PaymentOrder | null>(null)
+// Once observed, a versioned contract cannot fall back to cached legacy fields.
+const contractObserved = ref(props.paymentInfo !== undefined)
+const hasPaymentInfo = computed(() => contractObserved.value || props.paymentInfo !== undefined || serverOrder.value?.payment_info !== undefined)
+const paymentInfo = computed(() => normalizePaymentInfo(serverOrder.value
+  ? (serverOrder.value.payment_info ?? (hasPaymentInfo.value ? null : undefined))
+  : props.paymentInfo))
+const qrFailed = ref(false)
+const qrExpired = ref(false)
+const qrRemainingSeconds = ref(0)
+const isExplicitRedirect = computed(() => hasPaymentInfo.value && ['popup', 'redirect'].includes(props.paymentMode?.trim().toLowerCase() || ''))
+const qrUrl = computed(() => hasPaymentInfo.value
+  ? (!paymentInfo.value?.requires_cashier && !isExplicitRedirect.value ? paymentInfo.value?.qr_content || '' : '')
+  : props.qrCode)
+const qrImageUrl = computed(() => hasPaymentInfo.value && !paymentInfo.value?.requires_cashier && !isExplicitRedirect.value && !qrUrl.value
+  ? paymentInfo.value?.qr_image_url || '' : '')
+const cashierUrl = computed(() => {
+  const url = serverOrder.value && hasPaymentInfo.value ? serverOrder.value.pay_url : props.payUrl
+  return hasPaymentInfo.value ? safeCashierUrl(url) : url || ''
+})
 const remainingSeconds = ref(0)
 const cancelling = ref(false)
 const paidOrder = ref<PaymentOrder | null>(null)
+const paidPaymentInfo = computed(() => normalizePaymentInfo(paidOrder.value?.payment_info))
 const deepLinkState = ref<AlipayDeepLinkState>('idle')
 const deepLinkFallbackVisible = ref(false)
-const paymentCurrency = computed(() => normalizePaymentCurrency(props.currency))
+const paymentCurrency = computed(() => normalizePaymentCurrency(serverOrder.value?.currency ?? props.currency))
+const creditedAmount = computed(() => serverOrder.value?.amount ?? props.amount ?? 0)
 const creditedAmountSymbol = currencySymbol('USD')
 const localeCode = computed(() => {
   const raw = i18n.locale as unknown
@@ -317,11 +352,14 @@ const isWxpay = computed(() => isBuiltInWxpayMethod(props.paymentType))
 // qrcode is the explicit EasyPay mode. Do not infer provider scope from a visible method name.
 const isQrBalance = computed(() => props.paymentMode?.trim().toLowerCase() === 'qrcode'
   && props.orderType === 'balance' && !isMobileDevice() && !props.mobileAlipayDeepLink)
-const verificationRequired = ref(isQrBalance.value && props.recovering === true)
+const needsVerification = computed(() => isQrBalance.value || hasPaymentInfo.value)
+const verificationRequired = ref(needsVerification.value && props.recovering === true)
+const orderReadRequired = ref(props.recovering === true && props.requireOrderRead === true)
 const verificationFailed = ref(false)
-const paymentBlocked = computed(() => isQrBalance.value && (verificationRequired.value || remainingSeconds.value <= 0))
-const isMobileAlipayDeepLink = computed(() => props.mobileAlipayDeepLink === true && isAlipay.value && !!qrUrl.value)
-const showQRCode = computed(() => !outcome.value && !paymentBlocked.value && !!qrUrl.value
+const paymentBlocked = computed(() => orderReadRequired.value || (needsVerification.value && (verificationRequired.value || (!hasPaymentInfo.value && remainingSeconds.value <= 0))))
+const isMobileAlipayDeepLink = computed(() => !hasPaymentInfo.value && props.mobileAlipayDeepLink === true && isAlipay.value && !!qrUrl.value && !qrFailed.value)
+const showQRCode = computed(() => !outcome.value && !paymentBlocked.value && !qrFailed.value && !qrExpired.value && !!(qrUrl.value || qrImageUrl.value)
+  && (!hasPaymentInfo.value || !!cashierUrl.value)
   && (!isMobileAlipayDeepLink.value || deepLinkFallbackVisible.value))
 
 const qrBorderClass = computed(() => {
@@ -355,12 +393,13 @@ const scanHint = computed(() => {
 })
 
 const countdownDisplay = computed(() => {
-  const m = Math.floor(remainingSeconds.value / 60)
-  const s = remainingSeconds.value % 60
+  const seconds = hasPaymentInfo.value && showQRCode.value ? qrRemainingSeconds.value : remainingSeconds.value
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
   return m.toString().padStart(2, '0') + ':' + s.toString().padStart(2, '0')
 })
 
-const displayPaymentAmount = computed(() => formatGatewayAmount(props.payAmount || props.amount || 0))
+const displayPaymentAmount = computed(() => formatGatewayAmount(serverOrder.value?.pay_amount ?? props.payAmount ?? props.amount ?? 0))
 const displayOrderNumber = computed(() => props.outTradeNo || `#${props.orderId}`)
 
 function formatGatewayAmount(value: number, currency?: string | null): string {
@@ -373,10 +412,10 @@ function isSuccessStatus(status: string | null | undefined): boolean {
 
 function reopenPopup() {
   if (stopped || outcome.value || paymentBlocked.value) return
-  if (props.payUrl) {
-    const win = window.open(props.payUrl, 'paymentPopup', getPaymentPopupFeatures())
+  if (cashierUrl.value) {
+    const win = window.open(cashierUrl.value, 'paymentPopup', getPaymentPopupFeatures())
     if (!win || win.closed) {
-      window.location.href = props.payUrl
+      window.location.href = cashierUrl.value
     } else {
       emit('popupOpened', win)
     }
@@ -393,10 +432,15 @@ function setOutcome(next: PaymentOutcome) {
 async function renderQR() {
   await nextTick()
   if (!showQRCode.value || !qrCanvas.value || !qrUrl.value) return
-  await QRCode.toCanvas(qrCanvas.value, qrUrl.value, {
-    width: 220, margin: 2,
-    errorCorrectionLevel: 'M',
-  })
+  const content = qrUrl.value
+  try {
+    await QRCode.toCanvas(qrCanvas.value, content, {
+      width: 220, margin: 2,
+      errorCorrectionLevel: 'M',
+    })
+  } catch {
+    if (!stopped && content === qrUrl.value) qrFailed.value = true
+  }
 }
 
 function updateDeepLinkState(state: AlipayDeepLinkState) {
@@ -425,16 +469,16 @@ function saveQRCode() {
 }
 
 async function tryRecoverPendingOrder(order: PaymentOrder | null, force: boolean): Promise<PaymentOrder | null> {
-  if (!isQrBalance.value && !isWxpay.value && !isAlipay.value) return order
+  if (!needsVerification.value && !isWxpay.value && !isAlipay.value) return order
   const outTradeNo = String(order?.out_trade_no || props.outTradeNo || '').trim()
   if (!outTradeNo) {
-    if (isQrBalance.value) verificationFailed.value = true
+    if (needsVerification.value) verificationFailed.value = true
     return order
   }
   const normalizedStatus = String(order?.status || '').trim().toUpperCase()
-  if (!isQrBalance.value && normalizedStatus !== 'PENDING') return order
+  if (!needsVerification.value && normalizedStatus !== 'PENDING') return order
   const now = Date.now()
-  if ((!isQrBalance.value && verifyAttempts >= VERIFY_RETRY_MAX_ATTEMPTS)
+  if ((!needsVerification.value && verifyAttempts >= VERIFY_RETRY_MAX_ATTEMPTS)
     || (!force && verifyAttempts > 0 && now - lastVerifyAt < VERIFY_RETRY_INTERVAL_MS)) {
     return order
   }
@@ -445,12 +489,13 @@ async function tryRecoverPendingOrder(order: PaymentOrder | null, force: boolean
   try {
     const result = await paymentAPI.verifyOrder(outTradeNo)
     if (stopped || props.orderId !== orderId) return null
-    if (isQrBalance.value) {
+    if (needsVerification.value) {
       if (!result.data || result.data.id !== orderId || result.data.out_trade_no !== outTradeNo) {
         verificationFailed.value = true
         return order
       }
-      verificationFailed.value = !['PENDING', 'PAID', 'RECHARGING', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED'].includes(result.data.status)
+      verificationFailed.value = !['PENDING', ...terminalStatuses].includes(result.data.status)
+      if (verificationFailed.value) return order
       if (result.data.status === 'PENDING') {
         verificationRequired.value = false
         // The server deadline can supersede an old recovery snapshot; an overdue
@@ -461,13 +506,25 @@ async function tryRecoverPendingOrder(order: PaymentOrder | null, force: boolean
     }
     return result.data ?? order
   } catch (error: unknown) {
-    if (!stopped && isQrBalance.value) {
+    if (!stopped && needsVerification.value) {
       verificationFailed.value = true
       if (typeof error === 'object' && error !== null && 'reason' in error
         && error.reason === 'PAYMENT_VERIFICATION_UNAVAILABLE') verificationRequired.value = true
     }
     return order
   }
+}
+
+const terminalStatuses = ['PAID', 'RECHARGING', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED',
+  'REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING', 'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED']
+
+function applyServerOrder(order: PaymentOrder) {
+  if (order.payment_info !== undefined && !hasPaymentInfo.value && props.recovering) verificationRequired.value = true
+  if (order.payment_info !== undefined) contractObserved.value = true
+  serverOrder.value = order
+  orderReadRequired.value = false
+  updateQrExpiry()
+  emit('orderUpdated', order)
 }
 
 const pollInFlight = ref(false)
@@ -481,37 +538,57 @@ async function pollStatus(forceVerify = false) {
     let order = await paymentStore.pollOrderStatus(orderId)
     // 已进入终态则不再处理迟到的响应。
     if (stopped || props.orderId !== orderId) return
-    const terminal = order && (isSuccessStatus(order.status) || ['CANCELLED', 'EXPIRED', 'FAILED'].includes(order.status))
-    if (!terminal) order = await tryRecoverPendingOrder(order, forceVerify && isQrBalance.value)
+    if (order && (order.id !== orderId || (props.outTradeNo && order.out_trade_no !== props.outTradeNo))) {
+      if (needsVerification.value) verificationRequired.value = true
+      return
+    }
+    if (order) applyServerOrder(order)
+    const terminal = order && terminalStatuses.includes(order.status)
+    if (!terminal) order = await tryRecoverPendingOrder(order, forceVerify && needsVerification.value)
     if (stopped || props.orderId !== orderId || !order) return
+    if (order.id !== orderId) return
+    applyServerOrder(order)
     if (isSuccessStatus(order.status)) {
       paidOrder.value = order
       setOutcome('success')
       emit('success')
     } else if (order.status === 'CANCELLED') {
       setOutcome('cancelled')
-    } else if (order.status === 'EXPIRED' || order.status === 'FAILED') {
+    } else if (terminalStatuses.includes(order.status)) {
       setOutcome('expired')
     }
   } catch {
-    if (!stopped && isQrBalance.value) verificationFailed.value = true
+    if (!stopped && (needsVerification.value || orderReadRequired.value)) verificationFailed.value = true
   } finally {
     pollInFlight.value = false
   }
+}
+
+function updateQrExpiry() {
+  if (!hasPaymentInfo.value) return
+  const orderDeadline = Date.parse(serverOrder.value?.expires_at || props.expiresAt)
+  const qrDeadline = Date.parse(paymentInfo.value?.expires_at || serverOrder.value?.expires_at || props.expiresAt)
+  const deadline = Number.isFinite(orderDeadline) ? Math.min(orderDeadline, qrDeadline) : qrDeadline
+  qrRemainingSeconds.value = Number.isFinite(deadline) ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : 0
+  // Absolute deadline, latched for this order: a later PENDING response cannot
+  // renew a QR or replace its expired deadline with a newer order deadline.
+  if (qrRemainingSeconds.value <= 0 && (!props.recovering || serverOrder.value)) qrExpired.value = true
 }
 
 function startCountdown(seconds: number) {
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
   remainingSeconds.value = Math.max(0, seconds)
   const deadline = Date.now() + remainingSeconds.value * 1000
+  updateQrExpiry()
   if (remainingSeconds.value <= 0) {
-    if (!isQrBalance.value) setOutcome('expired')
-    return
+    if (!needsVerification.value) setOutcome('expired')
+    if (!hasPaymentInfo.value) return
   }
   countdownTimer = setInterval(() => {
     remainingSeconds.value = Math.max(0, Math.floor((deadline - Date.now()) / 1000))
+    updateQrExpiry()
     if (remainingSeconds.value <= 0) {
-      if (isQrBalance.value) {
+      if (needsVerification.value) {
         if (countdownTimer) clearInterval(countdownTimer)
         countdownTimer = null
         void pollStatus(true)
@@ -545,7 +622,6 @@ function cleanup() {
 }
 
 // Initialize on mount
-qrUrl.value = props.qrCode
 verifyAttempts = 0
 lastVerifyAt = 0
 let seconds = 30 * 60
@@ -556,7 +632,8 @@ startCountdown(seconds)
 if (!stopped) pollTimer = setInterval(() => pollStatus(), 3000)
 renderQR()
 
-watch([() => qrUrl.value, showQRCode], () => renderQR())
+watch([qrUrl, qrImageUrl], () => { qrFailed.value = false })
+watch([qrUrl, showQRCode], () => renderQR())
 onMounted(() => {
   if (paymentBlocked.value) void pollStatus(true)
   if (!isMobileAlipayDeepLink.value) return

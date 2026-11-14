@@ -14,11 +14,13 @@
     </template>
     <template #cell-pay_amount="{ value, row }">
       <div class="text-sm">
-        <span class="font-medium text-gray-900 dark:text-white">{{ paymentAmountSymbol(row) }}{{ value.toFixed(2) }}</span>
+        <span v-if="orderPaymentInfo(row)" class="font-medium text-gray-900 dark:text-white" data-test="order-actual-amount">{{ t(actualPaymentLabelKey(row.status)) }}: {{ paymentAmountSymbol(row) }}{{ orderPaymentInfo(row)?.actual_amount }}</span>
+        <span v-else class="font-medium text-gray-900 dark:text-white">{{ paymentAmountSymbol(row) }}{{ value.toFixed(2) }}</span>
         <span v-if="row.fee_rate > 0" class="ml-1 text-xs text-gray-400" :title="t('payment.orders.fee') + ': ' + row.fee_rate + '%'">
           ({{ t('payment.orders.fee') }} {{ row.fee_rate }}%)
         </span>
-        <div v-if="row.amount !== row.pay_amount || (row.bonus_amount ?? 0) > 0" class="text-xs text-gray-500">
+        <div v-if="orderPaymentInfo(row)" class="text-xs text-gray-500" data-test="order-ordered-amount">{{ t('payment.orders.orderedAmount') }}: {{ paymentAmountSymbol(row) }}{{ value.toFixed(2) }}</div>
+        <div v-if="orderPaymentInfo(row) || row.amount !== row.pay_amount || (row.bonus_amount ?? 0) > 0" class="text-xs text-gray-500">
           {{ t('payment.orders.creditedAmount') }}: {{ creditedAmountSymbol }}{{ row.amount.toFixed(2) }}
           <span v-if="(row.bonus_amount ?? 0) > 0" class="ml-1 text-amber-600 dark:text-amber-400">
             ({{ t('payment.orders.bonusIncluded', { amount: creditedAmountSymbol + (row.bonus_amount ?? 0).toFixed(2) }) }})
@@ -49,6 +51,7 @@ import type { Column } from '@/components/common/types'
 import DataTable from '@/components/common/DataTable.vue'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
 import { currencySymbol } from '@/components/payment/currency'
+import { actualPaymentLabelKey, normalizePaymentInfo } from './paymentFlow'
 
 const { t } = useI18n()
 
@@ -66,6 +69,11 @@ function paymentAmountSymbol(order: PaymentOrder): string {
   return currencySymbol(order.currency)
 }
 
+// Admin reuses this table with showUser; keep that existing presentation scoped out.
+function orderPaymentInfo(order: PaymentOrder) {
+  return props.showUser ? undefined : normalizePaymentInfo(order.payment_info)
+}
+
 const columns = computed((): Column[] => {
   const cols: Column[] = [
     { key: 'id', label: t('payment.orders.orderId') },
@@ -75,7 +83,7 @@ const columns = computed((): Column[] => {
     cols.push({ key: 'user_email', label: t('payment.admin.colUser') })
   }
   cols.push(
-    { key: 'pay_amount', label: t('payment.orders.payAmount') },
+    { key: 'pay_amount', label: t(props.orders.some(order => orderPaymentInfo(order)) ? 'payment.orders.paymentAmount' : 'payment.orders.payAmount') },
     { key: 'payment_type', label: t('payment.orders.paymentMethod') },
     { key: 'status', label: t('payment.orders.status') },
     { key: 'created_at', label: t('payment.orders.createdAt') },

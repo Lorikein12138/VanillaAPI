@@ -468,14 +468,26 @@ func (s *PaymentService) invokeProvider(ctx context.Context, order *dbent.Paymen
 		}
 		return nil, classifyCreatePaymentError(req, sel.ProviderKey, err)
 	}
+	if pr.PaymentInfo != nil {
+		pr.PaymentInfo, pr.PayURL = payment.NormalizePaymentInfo(pr.PaymentInfo, pr.PayURL, order.ExpiresAt, time.Now())
+		pr.QRCode = ""
+	}
 	sanitizeCreatePaymentResponseDetails(pr)
-	_, err = s.entClient.PaymentOrder.UpdateOneID(order.ID).
+	update := s.entClient.PaymentOrder.UpdateOneID(order.ID).
 		SetNillablePaymentTradeNo(psNilIfEmpty(pr.TradeNo)).
 		SetNillablePayURL(psNilIfEmpty(pr.PayURL)).
 		SetNillableQrCode(psNilIfEmpty(pr.QRCode)).
 		SetNillableProviderInstanceID(psNilIfEmpty(sel.InstanceID)).
-		SetNillableProviderKey(psNilIfEmpty(sel.ProviderKey)).
-		Save(ctx)
+		SetNillableProviderKey(psNilIfEmpty(sel.ProviderKey))
+	if pr.PaymentInfo != nil {
+		snapshot := make(map[string]any, len(order.ProviderSnapshot)+1)
+		for key, value := range order.ProviderSnapshot {
+			snapshot[key] = value
+		}
+		snapshot["payment_info"] = pr.PaymentInfo
+		update.SetProviderSnapshot(snapshot).ClearQrCode().ClearQrCodeImg()
+	}
+	order, err = update.Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("update order with payment details: %w", err)
 	}
@@ -742,7 +754,7 @@ func classifyCreatePaymentError(req CreateOrderRequest, providerKey string, err 
 }
 
 func buildCreateOrderResponse(order *dbent.PaymentOrder, req CreateOrderRequest, payAmount float64, sel *payment.InstanceSelection, pr *payment.CreatePaymentResponse, resultType payment.CreatePaymentResultType) *CreateOrderResponse {
-	return &CreateOrderResponse{
+	resp := &CreateOrderResponse{
 		OrderID:      order.ID,
 		Amount:       order.Amount,
 		PayAmount:    payAmount,
@@ -765,6 +777,16 @@ func buildCreateOrderResponse(order *dbent.PaymentOrder, req CreateOrderRequest,
 		ExpiresAt:    order.ExpiresAt,
 		PaymentMode:  sel.PaymentMode,
 	}
+	if order.Status != "" {
+		resp.Status = order.Status
+	}
+	if _, present := order.ProviderSnapshot["payment_info"]; present {
+		details := PaymentOrderPaymentPresentation(order)
+		resp.PaymentInfo, resp.PayURL, resp.QRCode = details.PaymentInfo, details.PayURL, details.QRCode
+	} else if resp.Status != OrderStatusPending {
+		resp.PayURL, resp.QRCode = "", ""
+	}
+	return resp
 }
 
 func buildWeChatPaymentOAuthStartURL(req CreateOrderRequest, scope string) (string, error) {

@@ -107,6 +107,34 @@ describe('PaymentResultView', () => {
     vi.useRealTimers()
   })
 
+  it.each(['1.01', '0.99', '1.00'])('displays actual %s, ordered 1.00 and credited 2.00 from the signed result', async (actual) => {
+    routeState.query = { resume_token: 'signed-info-42' }
+    resolveOrderPublicByResumeToken.mockResolvedValue({ data: {
+      ...orderFactory('COMPLETED'), amount: 2, pay_amount: 1, currency: 'CNY',
+      payment_info: { version: 1, actual_amount: actual, requires_cashier: true },
+    } })
+    const wrapper = mount(PaymentResultView, { global: { stubs: { OrderStatusBadge: true } } })
+    await flushPromises()
+    expect(wrapper.get('[data-test="result-actual-amount"]').text()).toContain('¥' + actual)
+    expect(wrapper.text()).toContain('payment.orders.actualPaidAmount')
+    expect(wrapper.text()).toContain('payment.orders.orderedAmount')
+    expect(wrapper.text()).toContain('¥1.00')
+    expect(wrapper.text()).toContain('$2.00')
+    expect(wrapper.text()).not.toContain('payment.orders.payAmount')
+    wrapper.unmount()
+  })
+
+  it('does not label a pending actual amount as money already paid', async () => {
+    routeState.query = { order_id: '42' }
+    pollOrderStatus.mockResolvedValue({ ...orderFactory('PENDING'), pay_amount: 1,
+      payment_info: { version: 1, actual_amount: '1.01' } })
+    const wrapper = mount(PaymentResultView, { global: { stubs: { OrderStatusBadge: true } } })
+    await flushPromises()
+    expect(wrapper.get('[data-test="result-actual-amount"]').text()).toContain('payment.orders.actualPayAmount')
+    expect(wrapper.text()).not.toContain('payment.orders.actualPaidAmount')
+    wrapper.unmount()
+  })
+
   it('renders a pending state instead of a failure state when the restored order is still pending', async () => {
     routeState.query = {
       resume_token: 'resume-42',

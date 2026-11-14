@@ -97,11 +97,24 @@ export interface CheckoutInfoResponse {
 
 // ==================== Orders ====================
 
+/** Gateway payable amount and QR lifecycle; independent from order/credited amounts. */
+export interface PaymentInfo {
+  version: 1
+  actual_amount: string
+  qr_content?: string
+  qr_image_url?: string
+  expires_at?: string
+  requires_cashier?: boolean
+}
+
 export interface PaymentOrder {
   id: number
   user_id: number
   amount: number
   pay_amount: number
+  payment_info?: PaymentInfo
+  pay_url?: string
+  qr_code?: string
   currency?: string
   fee_rate: number
   /** 充值赠送额度（USD），已计入 amount */
@@ -226,6 +239,7 @@ export interface CreateOrderResult {
   country_code?: string
   payment_env?: string
   pay_amount: number
+  payment_info?: PaymentInfo
   fee_rate: number
   bonus_amount?: number
   expires_at: string
