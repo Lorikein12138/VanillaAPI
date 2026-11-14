@@ -485,6 +485,8 @@ func (h *PaymentHandler) VerifyOrder(c *gin.Context) {
 // proves possession of the checkout session, so the result keeps the legacy
 // frontend contract needed by payment result pages.
 type PublicOrderResult struct {
+	service.PaymentOrderPaymentDetails
+
 	ID                  int64      `json:"id"`
 	OutTradeNo          string     `json:"out_trade_no"`
 	Amount              float64    `json:"amount"`
@@ -521,6 +523,8 @@ type PublicOrderVerifyResult struct {
 
 func buildPublicOrderResult(order *dbent.PaymentOrder) PublicOrderResult {
 	return PublicOrderResult{
+		PaymentOrderPaymentDetails: service.PaymentOrderPaymentPresentation(order),
+
 		ID:                  order.ID,
 		OutTradeNo:          order.OutTradeNo,
 		Amount:              order.Amount,
@@ -630,6 +634,8 @@ func isMobile(c *gin.Context) bool {
 }
 
 type PaymentOrderResult struct {
+	service.PaymentOrderPaymentDetails
+
 	ID                  int64      `json:"id"`
 	UserID              int64      `json:"user_id"`
 	Amount              float64    `json:"amount"`
@@ -669,6 +675,8 @@ func sanitizePaymentOrderForResponse(order *dbent.PaymentOrder) *PaymentOrderRes
 		return nil
 	}
 	return &PaymentOrderResult{
+		PaymentOrderPaymentDetails: service.PaymentOrderPaymentPresentation(order),
+
 		ID:                  order.ID,
 		UserID:              order.UserID,
 		Amount:              order.Amount,

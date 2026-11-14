@@ -191,6 +191,17 @@ func (e *EasyPay) createAPIPayment(ctx context.Context, req payment.CreatePaymen
 	if err != nil {
 		return nil, fmt.Errorf("easypay create: %w", err)
 	}
+	// Dispatch before decoding legacy-only fields: malformed or unused legacy
+	// QR/mobile fields must not turn a safe extension fallback into a failed order.
+	var extension struct {
+		PaymentInfo json.RawMessage `json:"payment_info"`
+	}
+	if err := json.Unmarshal(body, &extension); err != nil {
+		return nil, fmt.Errorf("easypay parse: %w", err)
+	}
+	if len(extension.PaymentInfo) > 0 {
+		return parseEasyPayPaymentInfoResponse(body, extension.PaymentInfo)
+	}
 	var resp struct {
 		Code    int    `json:"code"`
 		Msg     string `json:"msg"`
@@ -215,6 +226,27 @@ func (e *EasyPay) createAPIPayment(ctx context.Context, req payment.CreatePaymen
 		PayURL:  resolveEasyPayReturnedRef(base, payURL),
 		QRCode:  resolveEasyPayReturnedRef(base, resp.QRCode),
 	}, nil
+}
+
+func parseEasyPayPaymentInfoResponse(body []byte, raw json.RawMessage) (*payment.CreatePaymentResponse, error) {
+	var resp struct {
+		Code    int             `json:"code"`
+		Msg     string          `json:"msg"`
+		TradeNo string          `json:"trade_no"`
+		PayURL  json.RawMessage `json:"payurl"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("easypay parse: %w", err)
+	}
+	if resp.Code != easypayCodeSuccess {
+		return nil, fmt.Errorf("easypay error: %s", resp.Msg)
+	}
+	var cashier string
+	if err := json.Unmarshal(resp.PayURL, &cashier); err != nil {
+		cashier = ""
+	}
+	info, cashier := payment.NormalizePaymentInfo(payment.ParsePaymentInfo(raw), cashier, time.Time{}, time.Now())
+	return &payment.CreatePaymentResponse{TradeNo: resp.TradeNo, PayURL: cashier, PaymentInfo: info}, nil
 }
 
 // resolveEasyPayReturnedRef absolutizes a payurl/payurl2/qrcode reference that

@@ -23,7 +23,7 @@
           <span>{{ t('payment.orders.createdAt') }}</span>
           <span>{{ t('payment.orders.orderType') }}</span>
           <span>{{ t('payment.orders.paymentMethod') }}</span>
-          <span class="text-right">{{ t('payment.orders.payAmount') }}</span>
+          <span class="text-right">{{ t(hasPaymentInfo ? 'payment.orders.paymentAmount' : 'payment.orders.payAmount') }}</span>
           <span class="text-right">{{ t('payment.orders.creditedAmount') }}</span>
           <span class="text-right">{{ t('payment.orders.status') }}</span>
         </div>
@@ -38,7 +38,10 @@
               <span class="tabular-nums text-gray-500 dark:text-dark-400">{{ row.time }}</span>
               <span class="text-gray-950 dark:text-dark-50">{{ row.type }}</span>
               <span class="text-gray-500 dark:text-dark-400">{{ row.method }}</span>
-              <span class="text-right tabular-nums text-gray-950 dark:text-dark-50">{{ row.pay }}</span>
+              <span class="text-right tabular-nums text-gray-950 dark:text-dark-50">
+                <span v-if="row.actual">{{ t(actualPaymentLabelKey(row.status)) }}: {{ row.actual }}</span><span v-else>{{ row.pay }}</span>
+                <span v-if="row.actual" class="block text-xs text-gray-500">{{ t('payment.orders.orderedAmount') }}: {{ row.pay }}</span>
+              </span>
               <span :class="['text-right tabular-nums', row.credited ? 'text-gray-950 dark:text-dark-50' : 'text-gray-400 dark:text-dark-500']" data-testid="recent-order-credited">{{ row.credited || '—' }}</span>
               <span class="justify-self-end"><OrderStatusBadge :status="row.status" /></span>
             </div>
@@ -48,7 +51,8 @@
                 <span class="text-xs tabular-nums text-gray-500 dark:text-dark-400">{{ row.time }}</span>
               </div>
               <div class="flex shrink-0 flex-col items-end gap-1">
-                <span class="text-sm tabular-nums text-gray-950 dark:text-dark-50">{{ row.pay }}</span>
+                <span class="text-sm tabular-nums text-gray-950 dark:text-dark-50">{{ row.actual ? t(actualPaymentLabelKey(row.status)) + ': ' + row.actual : row.pay }}</span>
+                <span v-if="row.actual" class="text-xs text-gray-500">{{ t('payment.orders.orderedAmount') }}: {{ row.pay }}</span>
                 <OrderStatusBadge :status="row.status" />
               </div>
             </div>
@@ -65,7 +69,8 @@ import { useI18n } from 'vue-i18n'
 import { paymentAPI } from '@/api/payment'
 import type { OrderStatus, PaymentOrder } from '@/types/payment'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
-import { formatPaymentAmount } from '@/components/payment/currency'
+import { currencySymbol, formatPaymentAmount } from '@/components/payment/currency'
+import { actualPaymentLabelKey, normalizePaymentInfo } from './paymentFlow'
 import { formatDateTimeToMinute } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
@@ -82,6 +87,7 @@ const { t } = useI18n()
 const orders = ref<PaymentOrder[]>([])
 const loading = ref(true)
 const failed = ref(false)
+const hasPaymentInfo = computed(() => orders.value.some(order => normalizePaymentInfo(order.payment_info)))
 
 const gridClass = 'grid-cols-[1.3fr_1fr_1fr_1fr_1fr_0.9fr] gap-4'
 
@@ -95,6 +101,7 @@ const rows = computed(() => orders.value.map((order) => ({
   type: order.order_type === 'subscription' ? t('payment.admin.subscriptionOrder') : t('payment.admin.balanceOrder'),
   method: t('payment.methods.' + order.payment_type, order.payment_type),
   pay: formatPaymentAmount(order.pay_amount, order.currency),
+  actual: normalizePaymentInfo(order.payment_info) ? currencySymbol(order.currency) + normalizePaymentInfo(order.payment_info)!.actual_amount : '',
   credited: order.order_type === 'balance' && CREDITED_STATUSES.includes(order.status) ? '+$' + order.amount.toFixed(2) : '',
 })))
 
