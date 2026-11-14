@@ -22,6 +22,7 @@
             :amount="paymentState.amount"
             :pay-amount="paymentState.payAmount"
             :qr-code="paymentState.qrCode"
+            :payment-info="paymentState.paymentInfo"
             :expires-at="paymentState.expiresAt"
             :payment-type="paymentState.paymentType"
             :pay-url="paymentState.payUrl"
@@ -31,10 +32,12 @@
             :mobile-alipay-deep-link="paymentState.alipayMobilePrecreateDeepLink"
             :payment-mode="paymentState.paymentMode"
             :recovering="recoveringPayment"
+            :require-order-read="recoveringPayment"
             @done="onPaymentDone"
             @success="onPaymentSuccess"
             @settled="onPaymentSettled"
             @popup-opened="trackRechargePopup"
+            @order-updated="onPaymentOrderUpdated"
           />
         </template>
         <!-- Tab content (select phase) -->
@@ -373,6 +376,8 @@ import {
   decidePaymentLaunch,
   getVisibleMethods,
   normalizeVisibleMethod,
+  normalizePaymentInfo,
+  safeCashierUrl,
   readPaymentRecoverySnapshot,
   type PaymentRecoverySnapshot,
   writePaymentRecoverySnapshot,
@@ -512,6 +517,24 @@ function trackRechargePopup(popup: Window) {
 function persistRecoverySnapshot(snapshot: PaymentRecoverySnapshot) {
   if (typeof window === 'undefined' || !snapshot.orderId) return
   writePaymentRecoverySnapshot(window.localStorage, snapshot, PAYMENT_RECOVERY_STORAGE_KEY)
+}
+
+function onPaymentOrderUpdated(order: import('@/types/payment').PaymentOrder) {
+  if (order.id !== paymentState.value.orderId) return
+  if (paymentState.value.paymentInfo === undefined && order.payment_info === undefined) return
+  paymentState.value = {
+    ...paymentState.value,
+    amount: order.amount,
+    payAmount: order.pay_amount,
+    paymentInfo: normalizePaymentInfo(order.payment_info) ?? null,
+    qrCode: '',
+    payUrl: safeCashierUrl(order.pay_url),
+    expiresAt: order.expires_at,
+    outTradeNo: order.out_trade_no,
+    currency: order.currency || paymentState.value.currency,
+  }
+  if (order.status === 'PENDING') persistRecoverySnapshot(paymentState.value)
+  else removeRecoverySnapshot()
 }
 
 function removeRecoverySnapshot() {
@@ -1183,7 +1206,7 @@ async function attemptMobileQrFallback(err: unknown, context: MobileQrFallbackCo
       stripeRouteUrl,
     })
 
-    if (decision.kind !== 'qr_waiting' || !decision.paymentState.qrCode) {
+    if (decision.kind !== 'qr_waiting' || (!decision.paymentState.qrCode && !decision.paymentState.paymentInfo)) {
       return false
     }
 

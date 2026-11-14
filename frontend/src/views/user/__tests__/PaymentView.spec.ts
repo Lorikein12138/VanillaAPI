@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import PaymentView from '../PaymentView.vue'
-import { PAYMENT_RECOVERY_STORAGE_KEY } from '@/components/payment/paymentFlow'
+import { decidePaymentLaunch, PAYMENT_RECOVERY_STORAGE_KEY } from '@/components/payment/paymentFlow'
 import { formatPaymentAmount } from '@/components/payment/currency'
 import AmountInput from '@/components/payment/AmountInput.vue'
 import SubscriptionPlanCard from '@/components/payment/SubscriptionPlanCard.vue'
@@ -656,6 +656,56 @@ describe('PaymentView payment recovery', () => {
     bridgeInvoke.mockReset()
     window.localStorage.clear()
     ;(window as Window & { WeixinJSBridge?: { invoke: typeof bridgeInvoke } }).WeixinJSBridge = undefined
+  })
+
+  it('persists verified payment_info and server amounts instead of stale recovery QR/money', async () => {
+    vi.useFakeTimers()
+    getCheckoutInfo.mockResolvedValue(checkoutInfoFixture())
+    const snapshot = decidePaymentLaunch({
+      order_id: 42, amount: 999, pay_amount: 888, fee_rate: 0,
+      payment_mode: 'qrcode', payment_info: { version: 1, actual_amount: '777', qr_content: 'cached-code' },
+      out_trade_no: 'order-42', pay_url: 'https://cached.example/42', expires_at: '2099-01-01T00:00:00Z',
+    }, { visibleMethod: 'wxpay', orderType: 'balance', isMobile: false }).recovery
+    localStorage.setItem(PAYMENT_RECOVERY_STORAGE_KEY, JSON.stringify(snapshot))
+    const order = {
+      id: 42, user_id: 9, amount: 2, pay_amount: 1, fee_rate: 0, payment_type: 'wxpay',
+      out_trade_no: 'order-42', status: 'PENDING', order_type: 'balance',
+      created_at: '2026-11-14T00:00:00Z', expires_at: '2099-01-01T00:00:00Z', refund_amount: 0,
+      pay_url: 'https://cashier.example/42', qr_code: 'unsafe-legacy',
+      payment_info: { version: 1, actual_amount: '1.01', qr_content: 'server-code' },
+    }
+    pollOrderStatus.mockReset().mockResolvedValue(order)
+    verifyOrder.mockReset().mockResolvedValue({ data: order })
+    const wrapper = shallowMount(PaymentView, { global: { stubs: {
+      AppLayout: { template: '<div><slot /></div>' }, PaymentStatusPanel: false, Teleport: true, Transition: false,
+    } } })
+    try {
+      await flushPromises()
+      expect(wrapper.get('[data-test="actual-amount"]').text()).toBe('¥1.01')
+      expect(JSON.parse(localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)!)).toMatchObject({
+        amount: 2, payAmount: 1, qrCode: '', payUrl: order.pay_url, paymentInfo: order.payment_info,
+      })
+      expect(toCanvas).not.toHaveBeenCalledWith(expect.anything(), 'cached-code', expect.anything())
+      expect(createOrder).not.toHaveBeenCalled()
+    } finally { wrapper.unmount(); vi.useRealTimers() }
+  })
+
+  it('persists payment_info returned by token-based WeChat resume without reordering', async () => {
+    getCheckoutInfo.mockResolvedValue(checkoutInfoFixture())
+    routeState.query = { wechat_resume: '1', wechat_resume_token: 'resume-info-42' }
+    const paymentInfo = { version: 1, actual_amount: '1.01', qr_content: 'wechat-resumed-code' }
+    createOrder.mockResolvedValue({ order_id: 42, amount: 2, pay_amount: 1, fee_rate: 0,
+      expires_at: '2099-01-01T00:00:00Z', payment_mode: 'qrcode', payment_info: paymentInfo, resume_token: 'resume-info-42' })
+    const wrapper = shallowMount(PaymentView, { global: { stubs: {
+      AppLayout: { template: '<div><slot /></div>' }, Teleport: true, Transition: false,
+    } } })
+    try {
+      await flushPromises()
+      expect(createOrder).toHaveBeenCalledTimes(1)
+      expect(createOrder.mock.calls[0]?.[0]).toMatchObject({ wechat_resume_token: 'resume-info-42' })
+      expect(wrapper.getComponent(PaymentStatusPanel).props('paymentInfo')).toEqual(paymentInfo)
+      expect(JSON.parse(localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)!)).toMatchObject({ amount: 2, payAmount: 1, paymentInfo })
+    } finally { wrapper.unmount() }
   })
 
   it('restores a custom EasyPay method as the selected payment method', async () => {

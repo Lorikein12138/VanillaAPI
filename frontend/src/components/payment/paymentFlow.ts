@@ -3,6 +3,7 @@ import type {
   CreateOrderResult,
   MethodLimit,
   OrderType,
+  PaymentInfo,
   WechatJSAPIPayload,
   WechatOAuthInfo,
 } from '@/types/payment'
@@ -49,6 +50,8 @@ export interface PaymentRecoverySnapshot {
   paymentMode: string
   resumeToken: string
   alipayMobilePrecreateDeepLink?: boolean
+  /** null preserves a present but invalid/withdrawn contract and blocks legacy QR. */
+  paymentInfo?: PaymentInfo | null
   createdAt: number
 }
 
@@ -95,6 +98,61 @@ type CreateOrderFlowResult = CreateOrderResult & {
 }
 
 type StorageWriter = Pick<Storage, 'removeItem' | 'setItem'>
+
+export function safeCashierUrl(value: unknown): string {
+  if (typeof value !== 'string' || !/^https?:\/\/[^/]/i.test(value)
+    || value !== value.trim() || /[\\\s\p{Cc}\p{Cs}]/u.test(value)) return ''
+  try {
+    if (/[\\\p{Cc}\p{Cs}]/u.test(decodeURIComponent(value))) return ''
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) && !!url.hostname && !url.username && !url.password ? value : ''
+  } catch {
+    return ''
+  }
+}
+
+function validPaymentInfoExpiry(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/.exec(value)
+  if (!parts) return false
+  const [, year, month, day, hour, minute, second, , offsetHour, offsetMinute] = parts
+  const y = Number(year)
+  const m = Number(month)
+  const days = [31, y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return m >= 1 && m <= 12 && Number(day) >= 1 && Number(day) <= days[m - 1]!
+    && Number(hour) < 24 && Number(minute) < 60 && Number(second) < 60
+    && Number(offsetHour || 0) < 24 && Number(offsetMinute || 0) < 60 && Number.isFinite(Date.parse(value))
+}
+
+export function actualPaymentLabelKey(status: string): string {
+  return ['PAID', 'RECHARGING', 'COMPLETED', 'REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING',
+    'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED'].includes(status)
+    ? 'payment.orders.actualPaidAmount' : 'payment.orders.actualPayAmount'
+}
+
+/** undefined means legacy; null means fail closed without consulting legacy qr_code. */
+export function normalizePaymentInfo(value: unknown): PaymentInfo | null | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const info = value as Record<string, unknown>
+  if (info.version !== 1 || typeof info.actual_amount !== 'string'
+    || !/^(?:0|[1-9]\d{0,11})(?:\.\d{1,2})?$/.test(info.actual_amount)
+    || !/[1-9]/.test(info.actual_amount)
+    || (info.requires_cashier !== undefined && typeof info.requires_cashier !== 'boolean')) return null
+  if (info.qr_content !== undefined && (typeof info.qr_content !== 'string' || !info.qr_content.trim()
+    || /[\p{Cc}\p{Cs}]/u.test(info.qr_content)
+    || /^\s*(?:<|(?:javascript|vbscript|data|file|blob):)/i.test(info.qr_content))) return null
+  if (info.qr_content === undefined && info.qr_image_url !== undefined && !safeCashierUrl(info.qr_image_url)) return null
+  if (info.expires_at !== undefined && !validPaymentInfoExpiry(info.expires_at)) return null
+  return {
+    version: 1,
+    actual_amount: info.actual_amount,
+    ...(info.qr_content !== undefined ? { qr_content: info.qr_content as string } : {}),
+    ...(safeCashierUrl(info.qr_image_url) ? { qr_image_url: info.qr_image_url as string } : {}),
+    ...(info.expires_at !== undefined ? { expires_at: info.expires_at as string } : {}),
+    ...(info.requires_cashier !== undefined ? { requires_cashier: info.requires_cashier as boolean } : {}),
+  }
+}
 
 export function normalizeVisibleMethod(method: string): VisiblePaymentMethod | '' {
   const normalized = VISIBLE_METHOD_ALIASES[method.trim() as keyof typeof VISIBLE_METHOD_ALIASES]
@@ -169,6 +227,7 @@ export function decidePaymentLaunch(
     paymentMode: (result.payment_mode || '').trim(),
     resumeToken: result.resume_token || '',
     alipayMobilePrecreateDeepLink: result.alipay_mobile_precreate_deep_link === true,
+    paymentInfo: normalizePaymentInfo(result.payment_info),
   }, context.now)
 
   if (visibleMethod === 'airwallex' && baseState.clientSecret && baseState.intentId) {
@@ -203,6 +262,22 @@ export function decidePaymentLaunch(
   const jsapiPayload = result.jsapi ?? result.jsapi_payload
   if (result.result_type === 'jsapi_ready' && jsapiPayload) {
     return { kind: 'wechat_jsapi', paymentState: baseState, recovery: baseState, jsapi: jsapiPayload }
+  }
+
+  // The versioned contract owns QR selection. Keep explicit popup/redirect modes.
+  if (baseState.paymentInfo !== undefined) {
+    baseState.qrCode = ''
+    baseState.payUrl = safeCashierUrl(baseState.payUrl)
+    baseState.alipayMobilePrecreateDeepLink = false
+    const info = baseState.paymentInfo
+    const qrAvailable = info && !info.requires_cashier && (info.qr_content || info.qr_image_url)
+      && (!info.expires_at || Date.parse(info.expires_at) > (context.now ?? Date.now()))
+    const redirect = ['popup', 'redirect'].includes(baseState.paymentMode.toLowerCase())
+    return {
+      kind: baseState.payUrl && (redirect || !qrAvailable) ? 'redirect_waiting' : 'qr_waiting',
+      paymentState: baseState,
+      recovery: baseState,
+    }
   }
 
   if (
@@ -305,7 +380,7 @@ export function readPaymentRecoverySnapshot(
     const expiresAt = Date.parse(parsed.expiresAt)
     const retainExpired = options.retainExpiredQrBalance && parsed.orderType === 'balance'
       && parsed.paymentMode.trim().toLowerCase() === 'qrcode' && !parsed.alipayMobilePrecreateDeepLink
-    if (Number.isFinite(expiresAt) && expiresAt <= now && !retainExpired) {
+    if (Number.isFinite(expiresAt) && expiresAt <= now && !retainExpired && parsed.paymentInfo === undefined) {
       return null
     }
     if (options.resumeToken && parsed.resumeToken !== options.resumeToken) {
@@ -315,10 +390,10 @@ export function readPaymentRecoverySnapshot(
     return {
       orderId: parsed.orderId,
       amount: parsed.amount,
-      qrCode: parsed.qrCode,
+      qrCode: parsed.paymentInfo !== undefined ? '' : parsed.qrCode,
       expiresAt: parsed.expiresAt,
       paymentType: parsed.paymentType,
-      payUrl: parsed.payUrl,
+      payUrl: parsed.paymentInfo !== undefined ? safeCashierUrl(parsed.payUrl) : parsed.payUrl,
       outTradeNo: parsed.outTradeNo || '',
       clientSecret: parsed.clientSecret,
       intentId: parsed.intentId || '',
@@ -330,6 +405,7 @@ export function readPaymentRecoverySnapshot(
       paymentMode: parsed.paymentMode,
       resumeToken: parsed.resumeToken,
       alipayMobilePrecreateDeepLink: parsed.alipayMobilePrecreateDeepLink === true,
+      paymentInfo: normalizePaymentInfo(parsed.paymentInfo),
       createdAt: parsed.createdAt,
     }
   } catch {

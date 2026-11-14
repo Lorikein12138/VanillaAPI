@@ -1,10 +1,18 @@
 <template>
   <AppLayout>
-    <div class="mx-auto flex max-w-md flex-col items-center space-y-6 py-8">
+    <PaymentStatusPanel v-if="extendedOrder" class="mx-auto max-w-md py-8"
+      :key="extendedOrder.id" :order-id="extendedOrder.id" :amount="extendedOrder.amount"
+      :pay-amount="extendedOrder.pay_amount" :currency="extendedOrder.currency"
+      :payment-info="normalizePaymentInfo(extendedOrder.payment_info) ?? null" :qr-code="''"
+      :pay-url="extendedOrder.pay_url" :expires-at="extendedOrder.expires_at"
+      :payment-type="extendedOrder.payment_type" :out-trade-no="extendedOrder.out_trade_no"
+      :order-type="extendedOrder.order_type" :recovering="true" :require-order-read="true"
+      @done="router.push('/purchase')" @success="handleSuccess" />
+    <div v-else class="mx-auto flex max-w-md flex-col items-center space-y-6 py-8">
       <h2 class="text-xl font-serif font-normal text-gray-950 dark:text-white">
         {{ qrUrl ? scanTitle : t('payment.qr.payInNewWindow') }}
       </h2>
-      <div v-if="qrUrl" class="rounded-2xl bg-white p-6 shadow-lg dark:bg-dark-800">
+      <div v-if="qrUrl && !expired" class="rounded-2xl bg-white p-6 shadow-lg dark:bg-dark-800">
         <canvas ref="qrCanvas" class="mx-auto"></canvas>
       </div>
       <!-- Scan prompt for QR code -->
@@ -16,7 +24,8 @@
         <button class="btn btn-primary mt-4" @click="router.push('/purchase')">{{ t('payment.result.backToRecharge') }}</button>
       </div>
       <div v-else class="text-center">
-        <p class="text-sm text-gray-500 dark:text-gray-400">{{ qrUrl ? t('payment.qr.expiresIn') : t('payment.qr.payInNewWindowHint') }}</p>
+        <p v-if="informationUnavailable" data-test="payment-unavailable" class="text-sm text-gray-500 dark:text-gray-400">{{ t('payment.qr.unavailable') }}</p>
+        <p v-if="!informationUnavailable" class="text-sm text-gray-500 dark:text-gray-400">{{ qrUrl ? t('payment.qr.expiresIn') : t('payment.qr.payInNewWindowHint') }}</p>
         <p class="mt-1 text-2xl font-serif font-normal tabular-nums text-gray-950 dark:text-dark-50">{{ countdownDisplay }}</p>
         <p class="mt-2 text-sm text-gray-400 dark:text-gray-500">{{ t('payment.qr.waitingPayment') }}</p>
       </div>
@@ -37,6 +46,9 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import PaymentStatusPanel from '@/components/payment/PaymentStatusPanel.vue'
+import type { PaymentOrder } from '@/types/payment'
+import { PAYMENT_RECOVERY_STORAGE_KEY, normalizePaymentInfo, readPaymentRecoverySnapshot, safeCashierUrl } from '@/components/payment/paymentFlow'
 import { usePaymentStore } from '@/stores/payment'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
@@ -60,6 +72,11 @@ const remainingSeconds = ref(0)
 const expired = ref(false)
 const cancelling = ref(false)
 const paymentType = ref('')
+const extendedOrder = ref<PaymentOrder | null>(null)
+const informationUnavailable = ref(false)
+let disposed = false
+let terminalObserved = false
+let recoveredContract = false
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
@@ -97,13 +114,19 @@ async function renderQR() {
 
   // Use medium error correction to support logo overlay while keeping QR code scannable
   const logoSrc = getLogoForType()
-  await QRCode.toCanvas(qrCanvas.value, qrUrl.value, {
-    width: 256,
-    margin: 2,
-    errorCorrectionLevel: logoSrc ? 'M' : 'L',
-  })
+  try {
+    await QRCode.toCanvas(qrCanvas.value, qrUrl.value, {
+      width: 256,
+      margin: 2,
+      errorCorrectionLevel: logoSrc ? 'M' : 'L',
+    })
+  } catch {
+    qrUrl.value = ''
+    informationUnavailable.value = !payUrl.value
+    return
+  }
 
-  if (!logoSrc) return
+  if (!logoSrc || disposed || expired.value || !qrCanvas.value || !qrUrl.value || extendedOrder.value) return
 
   // Draw logo in center of QR code
   const canvas = qrCanvas.value
@@ -143,29 +166,73 @@ async function pollStatus() {
     if (!order) return
     // 定时器已被 cleanup 清除时不再执行终态跳转（响应可能在 cleanup 后才回来）。
     if (!pollTimer) return
-    if (order.status === 'COMPLETED' || order.status === 'PAID') {
-      cleanup()
-      router.push({ path: '/payment/result', query: { order_id: String(orderId.value), status: 'success' } })
-    } else if (order.status === 'EXPIRED' || order.status === 'CANCELLED' || order.status === 'FAILED') {
-      cleanup()
-      expired.value = true
-    }
+    applyOrder(order)
+  } catch {
+    // A temporary read failure never invents an order outcome.
   } finally {
     pollInFlight = false
   }
 }
 
+function handleSuccess() {
+  router.push({ path: '/payment/result', query: { order_id: String(orderId.value), status: 'success' } })
+}
+
+function applyOrder(order: PaymentOrder) {
+  if (disposed || terminalObserved || order.id !== orderId.value) return
+  if (['COMPLETED', 'PAID', 'RECHARGING'].includes(order.status)) {
+    terminalObserved = true
+    qrUrl.value = ''
+    payUrl.value = ''
+    cleanup()
+    handleSuccess()
+  } else if (['EXPIRED', 'CANCELLED', 'FAILED', 'REFUND_REQUESTED', 'REFUNDING', 'REFUND_PENDING',
+    'PARTIALLY_REFUNDED', 'REFUNDED', 'REFUND_FAILED'].includes(order.status)) {
+    terminalObserved = true
+    cleanup()
+    expired.value = true
+    qrUrl.value = ''
+    payUrl.value = ''
+  } else if (order.status === 'PENDING' && (order.payment_info !== undefined || recoveredContract)) {
+    cleanup()
+    qrUrl.value = ''
+    payUrl.value = ''
+    extendedOrder.value = order
+  } else if (order.status === 'PENDING') {
+    // Older servers can omit the legacy projection. Query hints are considered
+    // only after an authenticated PENDING read without an extension.
+    qrUrl.value = order.qr_code ?? String(route.query.qr || '')
+    payUrl.value = safeCashierUrl(order.pay_url ?? route.query.pay_url)
+    paymentType.value = order.payment_type || paymentType.value
+    informationUnavailable.value = !qrUrl.value && !payUrl.value
+    const deadline = Date.parse(order.expires_at)
+    if (Number.isFinite(deadline)) {
+      expired.value = false
+      startCountdown(Math.floor((deadline - Date.now()) / 1000))
+    }
+  } else {
+    qrUrl.value = ''
+    payUrl.value = ''
+    informationUnavailable.value = true
+  }
+}
+
 function startCountdown(seconds: number) {
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
   remainingSeconds.value = Math.max(0, seconds)
   const deadline = Date.now() + remainingSeconds.value * 1000
   if (remainingSeconds.value <= 0) {
     expired.value = true
+    qrUrl.value = ''
+    payUrl.value = ''
     return
   }
   countdownTimer = setInterval(() => {
     remainingSeconds.value = Math.max(0, Math.floor((deadline - Date.now()) / 1000))
     if (remainingSeconds.value <= 0) {
       expired.value = true
+      qrUrl.value = ''
+      payUrl.value = ''
       cleanup()
     }
   }, 1000)
@@ -176,6 +243,9 @@ async function handleCancel() {
   cancelling.value = true
   try {
     await paymentAPI.cancelOrder(orderId.value)
+    terminalObserved = true
+    qrUrl.value = ''
+    payUrl.value = ''
     cleanup()
     router.push('/purchase')
   } catch (err: unknown) {
@@ -192,10 +262,10 @@ function cleanup() {
 
 watch(qrUrl, () => renderQR())
 
-onMounted(() => {
+onMounted(async () => {
   orderId.value = Number(route.query.order_id) || 0
-  qrUrl.value = String(route.query.qr || '')
-  payUrl.value = String(route.query.pay_url || '')
+  const recovery = readPaymentRecoverySnapshot(localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY))
+  recoveredContract = recovery?.orderId === orderId.value && recovery?.paymentInfo !== undefined
   paymentType.value = String(route.query.payment_type || '')
 
   // Calculate countdown from expiresAt
@@ -208,8 +278,14 @@ onMounted(() => {
   }
   startCountdown(seconds)
   pollTimer = setInterval(pollStatus, 3000)
-  renderQR()
+  try {
+    if (!orderId.value) throw new Error('Missing order ID')
+    const result = await paymentAPI.getOrder(orderId.value)
+    if (!disposed) applyOrder(result.data)
+  } catch {
+    if (!disposed) informationUnavailable.value = true
+  }
 })
 
-onUnmounted(() => cleanup())
+onUnmounted(() => { disposed = true; cleanup() })
 </script>
