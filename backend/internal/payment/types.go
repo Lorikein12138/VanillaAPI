@@ -67,11 +67,13 @@ const (
 // Provider-level status constants returned by provider implementations
 // to the service layer (lowercase, distinct from OrderStatus uppercase constants).
 const (
-	ProviderStatusPending  = "pending"
-	ProviderStatusPaid     = "paid"
-	ProviderStatusSuccess  = "success"
-	ProviderStatusFailed   = "failed"
-	ProviderStatusRefunded = "refunded"
+	ProviderStatusPending   = "pending"
+	ProviderStatusPaid      = "paid"
+	ProviderStatusExpired   = "expired"
+	ProviderStatusCancelled = "cancelled"
+	ProviderStatusSuccess   = "success"
+	ProviderStatusFailed    = "failed"
+	ProviderStatusRefunded  = "refunded"
 )
 
 // DefaultLoadBalanceStrategy is the default load-balancing strategy
@@ -163,11 +165,14 @@ type CreatePaymentResponse struct {
 
 // QueryOrderResponse describes the payment status from the upstream provider.
 type QueryOrderResponse struct {
-	TradeNo  string
-	Status   string  // "pending", "paid", "failed", "refunded"
-	Amount   float64 // 按服务商返回币种解释的金额
-	PaidAt   string  // RFC3339 timestamp or empty
-	Metadata map[string]string
+	// PendingVerified is internal evidence of an unambiguous upstream pending
+	// response. Status remains compatible for callers using conservative pending.
+	PendingVerified bool `json:"-"`
+	TradeNo         string
+	Status          string  // ProviderStatus values, including explicit expired/cancelled terminals.
+	Amount          float64 // 按服务商返回币种解释的金额
+	PaidAt          string  // RFC3339 timestamp or empty
+	Metadata        map[string]string
 }
 
 // PaymentNotification is the parsed result of a webhook/notify callback.

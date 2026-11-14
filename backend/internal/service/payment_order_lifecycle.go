@@ -20,18 +20,22 @@ import (
 
 // Cancel rate limit configuration constants.
 const (
-	rateLimitUnitDay           = "day"
-	rateLimitUnitMinute        = "minute"
-	rateLimitUnitHour          = "hour"
-	rateLimitModeFixed         = "fixed"
-	checkPaidResultAlreadyPaid = "already_paid"
-	checkPaidResultCancelled   = "cancelled"
+	rateLimitUnitDay               = "day"
+	rateLimitUnitMinute            = "minute"
+	rateLimitUnitHour              = "hour"
+	rateLimitModeFixed             = "fixed"
+	checkPaidResultAlreadyPaid     = "already_paid"
+	checkPaidResultCancelled       = "cancelled"
+	checkPaidResultTerminalSynced  = "terminal_synced"
+	checkPaidResultPendingVerified = "pending_verified"
 
 	pendingPaymentReconcileLimit = 20
 )
 
 type checkPaidOptions struct {
-	cancelIfUnpaid bool
+	cancelIfUnpaid         bool
+	syncTerminal           bool
+	requireVerifiedPending bool
 }
 
 func (s *PaymentService) checkCancelRateLimit(ctx context.Context, userID int64, cfg *PaymentConfig) error {
@@ -151,7 +155,7 @@ func (s *PaymentService) reconcilePaid(ctx context.Context, o *dbent.PaymentOrde
 
 func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.PaymentOrder, opts checkPaidOptions) string {
 	prov, err := s.getOrderProvider(ctx, o)
-	if err != nil {
+	if err != nil || prov == nil {
 		return ""
 	}
 	queryRef := paymentOrderQueryReference(o, prov)
@@ -163,6 +167,9 @@ func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.Paym
 	finishProviderCall()
 	if err != nil {
 		slog.Warn("query upstream failed", "orderID", o.ID, "error", err)
+		return ""
+	}
+	if resp == nil {
 		return ""
 	}
 	if resp.Status == payment.ProviderStatusPaid {
@@ -198,6 +205,28 @@ func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.Paym
 		}
 		return checkPaidResultAlreadyPaid
 	}
+	if opts.requireVerifiedPending && resp.Status == payment.ProviderStatusPending && resp.PendingVerified && s.canSyncEasyPayTerminal(ctx, o, prov) {
+		return checkPaidResultPendingVerified
+	}
+	if opts.syncTerminal && (resp.Status == payment.ProviderStatusExpired || resp.Status == payment.ProviderStatusCancelled) && s.canSyncEasyPayTerminal(ctx, o, prov) {
+		status, action := OrderStatusExpired, "ORDER_EXPIRED"
+		if resp.Status == payment.ProviderStatusCancelled {
+			status, action = OrderStatusCancelled, "ORDER_CANCELLED"
+		}
+		updated, err := s.entClient.PaymentOrder.Update().
+			Where(paymentorder.IDEQ(o.ID), paymentorder.StatusEQ(OrderStatusPending)).
+			SetStatus(status).Save(ctx)
+		if err != nil {
+			slog.Error("sync upstream terminal order failed", "orderID", o.ID, "error", err)
+			return ""
+		}
+		if updated > 0 {
+			s.writeAuditLog(ctx, o.ID, action, "system", map[string]any{"detail": "upstream order terminal", "provider": prov.ProviderKey()})
+		}
+		// A zero-row CAS may mean a success notification won the race. The
+		// caller must reload in either case rather than returning stale state.
+		return checkPaidResultTerminalSynced
+	}
 	if !opts.cancelIfUnpaid {
 		return ""
 	}
@@ -207,6 +236,59 @@ func (s *PaymentService) checkPaidWithOptions(ctx context.Context, o *dbent.Paym
 		finishProviderCall()
 	}
 	return ""
+}
+
+func (s *PaymentService) canSyncEasyPayTerminal(ctx context.Context, o *dbent.PaymentOrder, prov payment.Provider) bool {
+	if o.Status != OrderStatusPending || o.OrderType != payment.OrderTypeBalance || prov.ProviderKey() != payment.TypeEasyPay {
+		return false
+	}
+	if snapshot := psOrderProviderSnapshot(o); snapshot != nil && snapshot.PaymentMode != "" {
+		return snapshot.PaymentMode == "qrcode"
+	}
+	inst, err := s.getOrderProviderInstance(ctx, o)
+	return err == nil && inst != nil && inst.PaymentMode == "qrcode"
+}
+
+// Missing provider/mode evidence must not silently exempt a possible EasyPay
+// QR recharge from verification. Known non-target providers/modes keep their
+// existing behavior; canSyncEasyPayTerminal still requires positive QR evidence.
+func (s *PaymentService) requiresEasyPayPendingVerification(ctx context.Context, o *dbent.PaymentOrder) bool {
+	if o.Status != OrderStatusPending || o.OrderType != payment.OrderTypeBalance {
+		return false
+	}
+	key, mode := strings.TrimSpace(psStringValue(o.ProviderKey)), ""
+	if snapshot := psOrderProviderSnapshot(o); snapshot != nil {
+		if snapshot.ProviderKey != "" {
+			key = snapshot.ProviderKey
+		}
+		mode = snapshot.PaymentMode
+	}
+	if key != "" && key != payment.TypeEasyPay {
+		return false
+	}
+	if key == payment.TypeEasyPay && mode != "" {
+		return mode != "popup" && mode != "redirect"
+	}
+	inst, err := s.getOrderProviderInstance(ctx, o)
+	if err != nil {
+		return key == payment.TypeEasyPay || psHasPinnedProviderInstance(o)
+	}
+	if inst != nil {
+		if key == "" {
+			key = inst.ProviderKey
+		}
+		if mode == "" {
+			mode = inst.PaymentMode
+		}
+	}
+	if key == "" {
+		key = paymentOrderFallbackProviderKey(s.registry, o)
+	}
+	return key == payment.TypeEasyPay && mode != "popup" && mode != "redirect"
+}
+
+func paymentVerificationUnavailable() error {
+	return infraerrors.ServiceUnavailable("PAYMENT_VERIFICATION_UNAVAILABLE", "Payment verification is temporarily unavailable; please retry.")
 }
 
 func requeryPaidOrderOnce(ctx context.Context, prov payment.Provider, queryRef string) (*payment.QueryOrderResponse, bool) {
@@ -291,12 +373,19 @@ func (s *PaymentService) VerifyOrderByOutTradeNo(ctx context.Context, outTradeNo
 	}
 	// Only verify orders that are still pending or recently expired
 	if o.Status == OrderStatusPending || o.Status == OrderStatusExpired {
-		result := s.reconcilePaid(ctx, o)
-		if result == checkPaidResultAlreadyPaid {
+		requireVerifiedPending := s.requiresEasyPayPendingVerification(ctx, o)
+		result := s.checkPaidWithOptions(ctx, o, checkPaidOptions{syncTerminal: true, requireVerifiedPending: requireVerifiedPending})
+		if requireVerifiedPending || result == checkPaidResultAlreadyPaid || result == checkPaidResultTerminalSynced {
 			// Reload order to get updated status
 			o, err = s.entClient.PaymentOrder.Get(ctx, o.ID)
 			if err != nil {
+				if requireVerifiedPending {
+					return nil, paymentVerificationUnavailable()
+				}
 				return nil, fmt.Errorf("reload order: %w", err)
+			}
+			if requireVerifiedPending && o.Status == OrderStatusPending && result != checkPaidResultPendingVerified {
+				return nil, paymentVerificationUnavailable()
 			}
 		}
 	}
