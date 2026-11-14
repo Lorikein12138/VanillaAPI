@@ -273,7 +273,7 @@ export function clearPaymentRecoverySnapshot(
 
 export function readPaymentRecoverySnapshot(
   raw: string | null | undefined,
-  options: { now?: number; resumeToken?: string } = {},
+  options: { now?: number; resumeToken?: string; retainExpiredQrBalance?: boolean } = {},
 ): PaymentRecoverySnapshot | null {
   if (!raw) return null
 
@@ -303,7 +303,9 @@ export function readPaymentRecoverySnapshot(
 
     const now = options.now ?? Date.now()
     const expiresAt = Date.parse(parsed.expiresAt)
-    if (Number.isFinite(expiresAt) && expiresAt <= now) {
+    const retainExpired = options.retainExpiredQrBalance && parsed.orderType === 'balance'
+      && parsed.paymentMode.trim().toLowerCase() === 'qrcode' && !parsed.alipayMobilePrecreateDeepLink
+    if (Number.isFinite(expiresAt) && expiresAt <= now && !retainExpired) {
       return null
     }
     if (options.resumeToken && parsed.resumeToken !== options.resumeToken) {
