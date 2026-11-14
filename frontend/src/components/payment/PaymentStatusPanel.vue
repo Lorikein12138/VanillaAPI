@@ -259,7 +259,7 @@ const props = defineProps<{
 
 type PaymentOutcome = 'success' | 'cancelled' | 'expired'
 
-const emit = defineEmits<{ done: []; success: []; settled: [outcome: PaymentOutcome] }>()
+const emit = defineEmits<{ done: []; success: []; settled: [outcome: PaymentOutcome]; popupOpened: [popup: Window] }>()
 
 const i18n = useI18n()
 const { t } = i18n
@@ -353,6 +353,8 @@ function reopenPopup() {
     const win = window.open(props.payUrl, 'paymentPopup', getPaymentPopupFeatures())
     if (!win || win.closed) {
       window.location.href = props.payUrl
+    } else {
+      emit('popupOpened', win)
     }
   }
 }
