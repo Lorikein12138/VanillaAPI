@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { isMobileDevice } from '@/utils/device'
+
+enableAutoUnmount(afterEach)
+vi.mock('@/utils/device', () => ({ isMobileDevice: vi.fn(() => false) }))
 
 const pollOrderStatus = vi.hoisted(() => vi.fn())
 const cancelOrder = vi.hoisted(() => vi.fn())
@@ -339,5 +343,269 @@ describe('PaymentStatusPanel', () => {
     wrapper.unmount()
     Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
     if (originalHidden) Object.defineProperty(document, 'hidden', originalHidden)
+  })
+})
+
+describe('PaymentStatusPanel desktop EasyPay QR balance lifecycle', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-14T00:00:00Z'))
+    vi.mocked(isMobileDevice).mockReturnValue(false)
+    pollOrderStatus.mockReset().mockResolvedValue(orderFactory('PENDING'))
+    verifyOrder.mockReset().mockResolvedValue({ data: orderFactory('PENDING') })
+    cancelOrder.mockReset().mockResolvedValue({})
+    toCanvas.mockReset().mockResolvedValue(undefined)
+  })
+
+  afterEach(() => vi.useRealTimers())
+
+  function open(overrides: Partial<InstanceType<typeof PaymentStatusPanel>['$props']> = {}) {
+    return mount(PaymentStatusPanel, {
+      props: {
+        orderId: 42,
+        qrCode: 'https://pay.example.com/qr/42',
+        payUrl: 'https://pay.example.com/session/42',
+        expiresAt: '2099-01-01T12:30:00Z',
+        paymentType: 'ldc',
+        orderType: 'balance',
+        paymentMode: 'qrcode',
+        outTradeNo: 'sub2_20260420abcd1234',
+        ...overrides,
+      },
+      global: { stubs: { Icon: true } },
+    })
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((done) => { resolve = done })
+    return { promise, resolve }
+  }
+
+  it.each(['EXPIRED', 'CANCELLED'])('removes QR and payment entry when verification confirms %s', async (status) => {
+    verifyOrder.mockResolvedValue({ data: orderFactory(status) })
+    const wrapper = open()
+    await flushPromises()
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(wrapper.text()).toContain('payment.qr.openPayWindow')
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(verifyOrder).toHaveBeenCalledWith('sub2_20260420abcd1234')
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('payment.qr.openPayWindow')
+    expect(wrapper.text()).toContain(`payment.qr.${status.toLowerCase()}`)
+    expect(wrapper.emitted('settled')).toEqual([[status.toLowerCase()]])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(['EXPIRED', 'CANCELLED'])('never renders a QR while restoring provider %s', async (status) => {
+    const response = deferred<{ data: ReturnType<typeof orderFactory> }>()
+    verifyOrder.mockReturnValue(response.promise)
+    const wrapper = open({ recovering: true })
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('payment.qr.openPayWindow')
+    await flushPromises()
+    expect(toCanvas).not.toHaveBeenCalled()
+    response.resolve({ data: orderFactory(status) })
+    await flushPromises()
+    expect(wrapper.text()).toContain(`payment.qr.${status.toLowerCase()}`)
+    expect(toCanvas).not.toHaveBeenCalled()
+  })
+
+  it.each(['EXPIRED', 'CANCELLED'])('restores persisted %s without querying the provider or rendering QR', async (status) => {
+    pollOrderStatus.mockResolvedValue(orderFactory(status))
+    const wrapper = open({ recovering: true })
+    await flushPromises()
+    expect(wrapper.text()).toContain(`payment.qr.${status.toLowerCase()}`)
+    expect(verifyOrder).not.toHaveBeenCalled()
+    expect(toCanvas).not.toHaveBeenCalled()
+  })
+
+  it('releases recovered QR and payment entry only after verified PENDING', async () => {
+    const response = deferred<{ data: ReturnType<typeof orderFactory> }>()
+    verifyOrder.mockReturnValue(response.promise)
+    const wrapper = open({ recovering: true })
+    await flushPromises()
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    expect(wrapper.get('[data-test="payment-verification"] button').attributes('disabled')).toBeDefined()
+    response.resolve({ data: orderFactory('PENDING') })
+    await flushPromises()
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(wrapper.text()).toContain('payment.qr.openPayWindow')
+    expect(wrapper.emitted('settled')).toBeUndefined()
+  })
+
+  it.each(['failure', 'unknown', 'empty', 'wrong order'])('keeps recovery blocked and retryable after %s', async (scenario) => {
+    if (scenario === 'failure') verifyOrder.mockRejectedValue(new Error('temporary outage'))
+    else if (scenario === 'unknown') verifyOrder.mockResolvedValue({ data: orderFactory('UNKNOWN') })
+    else if (scenario === 'empty') verifyOrder.mockResolvedValue({})
+    else verifyOrder.mockResolvedValue({ data: { ...orderFactory('EXPIRED'), id: 99 } })
+    const wrapper = open({ recovering: true })
+    await flushPromises()
+    expect(wrapper.text()).toContain('payment.qr.verifyUnavailable')
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('payment.qr.openPayWindow')
+    expect(toCanvas).not.toHaveBeenCalled()
+    expect(wrapper.emitted('settled')).toBeUndefined()
+    verifyOrder.mockResolvedValue({ data: orderFactory('PENDING') })
+    await wrapper.get('[data-test="payment-verification"] button').trigger('click')
+    await flushPromises()
+    expect(verifyOrder).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('canvas').exists()).toBe(true)
+  })
+
+  it('verifies recovery even when the local order read temporarily returns null', async () => {
+    pollOrderStatus.mockResolvedValue(null)
+    verifyOrder.mockResolvedValue({ data: orderFactory('CANCELLED') })
+    const wrapper = open({ recovering: true })
+    await flushPromises()
+    expect(wrapper.text()).toContain('payment.qr.cancelled')
+    expect(toCanvas).not.toHaveBeenCalled()
+  })
+
+  it.each(['ldc', 'alipay', 'wxpay'])('keeps %s verifying beyond six attempts and removes QR on a later terminal result', async (paymentType) => {
+    verifyOrder.mockImplementation(async () => ({ data: orderFactory(verifyOrder.mock.calls.length >= 9 ? 'EXPIRED' : 'PENDING') }))
+    const wrapper = open({ paymentType })
+    await vi.advanceTimersByTimeAsync(108_000)
+    expect(verifyOrder).toHaveBeenCalledTimes(8)
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(verifyOrder).toHaveBeenCalledTimes(9)
+    expect(wrapper.text()).toContain('payment.qr.expired')
+    expect(wrapper.find('canvas').exists()).toBe(false)
+  })
+
+  it.each(['UNKNOWN', 'error'])('keeps active PENDING QR after a provider %s response', async (status) => {
+    if (status === 'error') verifyOrder.mockRejectedValue(new Error('temporary outage'))
+    else verifyOrder.mockResolvedValue({ data: orderFactory(status) })
+    const wrapper = open()
+    await vi.advanceTimersByTimeAsync(18_000)
+    expect(verifyOrder).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(wrapper.emitted('settled')).toBeUndefined()
+  })
+
+  it('hides locally timed-out payment entries without settling, continues verification, then accepts PAID', async () => {
+    const response = deferred<{ data: ReturnType<typeof orderFactory> }>()
+    verifyOrder.mockReturnValueOnce(response.promise).mockResolvedValue({ data: orderFactory('PAID') })
+    const wrapper = open({ expiresAt: new Date(Date.now() + 4000).toISOString() })
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('payment.qr.openPayWindow')
+    expect(wrapper.emitted('settled')).toBeUndefined()
+    response.resolve({ data: { ...orderFactory('PENDING'), expires_at: new Date(Date.now() - 1000).toISOString() } })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(14_000)
+    expect(wrapper.emitted('success')).toHaveLength(1)
+    expect(wrapper.emitted('settled')).toEqual([['success']])
+  })
+
+  it('uses a fresh verified server deadline for an expired recovery snapshot', async () => {
+    const wrapper = open({ recovering: true, expiresAt: new Date(Date.now() - 1000).toISOString() })
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    await flushPromises()
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(wrapper.emitted('settled')).toBeUndefined()
+  })
+
+  it('does not overlap slow provider verification and ignores it after cancellation', async () => {
+    const response = deferred<{ data: ReturnType<typeof orderFactory> }>()
+    verifyOrder.mockReturnValue(response.promise)
+    const wrapper = open()
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(pollOrderStatus).toHaveBeenCalledTimes(1)
+    expect(verifyOrder).toHaveBeenCalledTimes(1)
+    await wrapper.get('button.w-full').trigger('click')
+    await flushPromises()
+    response.resolve({ data: orderFactory('COMPLETED') })
+    await flushPromises()
+    expect(wrapper.emitted('settled')).toEqual([['cancelled']])
+    expect(wrapper.emitted('success')).toBeUndefined()
+    expect(wrapper.find('canvas').exists()).toBe(false)
+  })
+
+  it('ignores a late cancel response after payment succeeds', async () => {
+    const response = deferred<object>()
+    cancelOrder.mockReturnValue(response.promise)
+    pollOrderStatus.mockResolvedValue(orderFactory('COMPLETED'))
+    const wrapper = open()
+    await wrapper.get('button.w-full').trigger('click')
+    await vi.advanceTimersByTimeAsync(3000)
+    response.resolve({})
+    await flushPromises()
+    expect(wrapper.emitted('settled')).toEqual([['success']])
+    expect(wrapper.emitted('success')).toHaveLength(1)
+  })
+
+  it('ignores verification after unmount', async () => {
+    const response = deferred<{ data: ReturnType<typeof orderFactory> }>()
+    verifyOrder.mockReturnValue(response.promise)
+    const wrapper = open({ recovering: true })
+    await flushPromises()
+    wrapper.unmount()
+    response.resolve({ data: orderFactory('PAID') })
+    await flushPromises()
+    expect(wrapper.emitted('settled')).toBeUndefined()
+    expect(wrapper.emitted('success')).toBeUndefined()
+    expect(toCanvas).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('ignores an order read that completes after unmount', async () => {
+    const response = deferred<ReturnType<typeof orderFactory>>()
+    pollOrderStatus.mockReturnValue(response.promise)
+    const wrapper = open({ recovering: true })
+    wrapper.unmount()
+    response.resolve(orderFactory('PAID'))
+    await flushPromises()
+    expect(verifyOrder).not.toHaveBeenCalled()
+    expect(wrapper.emitted('success')).toBeUndefined()
+    expect(wrapper.emitted('settled')).toBeUndefined()
+  })
+
+  it('keeps a locally overdue order retryable through repeated verification errors', async () => {
+    verifyOrder.mockRejectedValue(new Error('temporary outage'))
+    const wrapper = open({ expiresAt: new Date(Date.now() + 1000).toISOString() })
+    await vi.advanceTimersByTimeAsync(124_000)
+    expect(verifyOrder.mock.calls.length).toBeGreaterThan(6)
+    expect(wrapper.find('canvas').exists()).toBe(false)
+    expect(wrapper.text()).toContain('payment.qr.verifyUnavailable')
+    expect(wrapper.emitted('settled')).toBeUndefined()
+    verifyOrder.mockResolvedValue({ data: orderFactory('CANCELLED') })
+    await wrapper.get('[data-test="payment-verification"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('settled')).toEqual([['cancelled']])
+  })
+
+  it.each(['PAID', 'RECHARGING', 'COMPLETED'])('keeps the existing success event for recovered %s', async (status) => {
+    verifyOrder.mockResolvedValue({ data: orderFactory(status) })
+    const wrapper = open({ recovering: true })
+    await flushPromises()
+    expect(wrapper.emitted('success')).toHaveLength(1)
+    expect(wrapper.text()).toContain('payment.result.success')
+    expect(toCanvas).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { paymentMode: 'popup' },
+    { paymentMode: 'redirect' },
+    { paymentMode: 'native' },
+    { paymentMode: undefined },
+    { orderType: 'subscription' },
+    { orderType: undefined },
+    { mobile: true },
+  ])('does not gate or expand custom method verification outside QR balance scope: %j', async ({ mobile, ...props }) => {
+    vi.mocked(isMobileDevice).mockReturnValue(mobile === true)
+    const wrapper = open({ ...props, recovering: true })
+    await vi.advanceTimersByTimeAsync(123_000)
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(verifyOrder).not.toHaveBeenCalled()
+  })
+
+  it('retains the existing six verification attempts for a built-in popup method', async () => {
+    const wrapper = open({ paymentType: 'alipay', paymentMode: 'popup', recovering: true })
+    await vi.advanceTimersByTimeAsync(123_000)
+    expect(verifyOrder).toHaveBeenCalledTimes(6)
+    expect(wrapper.find('canvas').exists()).toBe(true)
+    expect(wrapper.text()).toContain('payment.qr.openPayWindow')
   })
 })

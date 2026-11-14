@@ -376,6 +376,23 @@ describe('buildCreateOrderPayload', () => {
 })
 
 describe('readPaymentRecoverySnapshot', () => {
+  it.each([
+    { paymentMode: 'qrcode', orderType: 'balance', enabled: true, retained: true },
+    { paymentMode: 'qrcode', orderType: 'balance', enabled: false, retained: false },
+    { paymentMode: 'popup', orderType: 'balance', enabled: true, retained: false },
+    { paymentMode: 'qrcode', orderType: 'subscription', enabled: true, retained: false },
+  ])('retains expired snapshots only for opted-in QR balance recovery: %j', ({ paymentMode, orderType, enabled, retained }) => {
+    const snapshot = {
+      orderId: 42, amount: 10, qrCode: 'qr-data', payUrl: 'https://pay.example.com',
+      expiresAt: '2026-01-01T00:00:00Z', paymentType: 'ldc', outTradeNo: 'qr-42',
+      clientSecret: '', payAmount: 10, orderType, paymentMode, resumeToken: '', createdAt: 0,
+    }
+    const restored = readPaymentRecoverySnapshot(JSON.stringify(snapshot), {
+      now: Date.UTC(2026, 10, 14), retainExpiredQrBalance: enabled,
+    })
+    expect(restored !== null).toBe(retained)
+  })
+
   it('restores an unexpired snapshot when the resume token matches', () => {
     const snapshot: PaymentRecoverySnapshot = {
       orderId: 33,

@@ -17,6 +17,7 @@
         <!-- Payment in progress (shared by recharge and subscription) -->
         <template v-if="paymentPhase === 'paying'">
           <PaymentStatusPanel
+            :key="paymentState.orderId"
             :order-id="paymentState.orderId"
             :amount="paymentState.amount"
             :pay-amount="paymentState.payAmount"
@@ -28,6 +29,8 @@
             :currency="paymentState.currency || selectedCurrency"
             :out-trade-no="paymentState.outTradeNo"
             :mobile-alipay-deep-link="paymentState.alipayMobilePrecreateDeepLink"
+            :payment-mode="paymentState.paymentMode"
+            :recovering="recoveringPayment"
             @done="onPaymentDone"
             @success="onPaymentSuccess"
             @settled="onPaymentSettled"
@@ -420,6 +423,7 @@ const selectedPlan = ref<SubscriptionPlan | null>(null)
 const previewImage = ref('')
 
 const paymentPhase = ref<'select' | 'paying'>('select')
+const recoveringPayment = ref(false)
 
 interface CreateOrderOptions {
   openid?: string
@@ -516,6 +520,7 @@ function removeRecoverySnapshot() {
 }
 
 function resetPayment() {
+  recoveringPayment.value = false
   rechargePopup = undefined
   paymentPhase.value = 'select'
   paymentState.value = emptyPaymentState()
@@ -998,6 +1003,7 @@ async function createOrder(orderAmount: number, orderType: OrderType, planId?: n
     }
 
     paymentState.value = decision.paymentState
+    recoveringPayment.value = false
     paymentPhase.value = 'paying'
     persistRecoverySnapshot(decision.recovery)
 
@@ -1268,9 +1274,10 @@ onMounted(async () => {
           : undefined
       const restored = readPaymentRecoverySnapshot(
         window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY),
-        { resumeToken: routeResumeToken },
+        { resumeToken: routeResumeToken, retainExpiredQrBalance: !isMobileDevice() },
       )
       if (restored) {
+        recoveringPayment.value = true
         paymentState.value = restored
         paymentPhase.value = 'paying'
         const restoredMethod = normalizeVisibleMethod(restored.paymentType)

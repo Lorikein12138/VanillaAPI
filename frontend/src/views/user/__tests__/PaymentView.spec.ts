@@ -26,6 +26,9 @@ const showError = vi.hoisted(() => vi.fn())
 const showInfo = vi.hoisted(() => vi.fn())
 const showWarning = vi.hoisted(() => vi.fn())
 const getCheckoutInfo = vi.hoisted(() => vi.fn())
+const pollOrderStatus = vi.hoisted(() => vi.fn())
+const verifyOrder = vi.hoisted(() => vi.fn())
+const toCanvas = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 const bridgeInvoke = vi.hoisted(() => vi.fn())
 const translate = vi.hoisted(() => vi.fn((key: string) => key))
 // Public settings live in a reactive holder so tests can flip feature flags after mount
@@ -70,6 +73,7 @@ vi.mock('@/stores/auth', () => ({
 vi.mock('@/stores/payment', () => ({
   usePaymentStore: () => ({
     createOrder,
+    pollOrderStatus,
   }),
 }))
 
@@ -101,12 +105,15 @@ vi.mock('@/stores', async () => {
 vi.mock('@/api/payment', () => ({
   paymentAPI: {
     getCheckoutInfo,
+    verifyOrder,
   },
 }))
 
 vi.mock('@/utils/device', () => ({
   isMobileDevice: vi.fn(() => true),
 }))
+
+vi.mock('qrcode', () => ({ default: { toCanvas } }))
 
 function checkoutInfoFixture(overrides: Partial<CheckoutInfoResponse> = {}) {
   const wxpayMethod: MethodLimit = {
@@ -712,6 +719,71 @@ describe('PaymentView payment recovery', () => {
 
     expect(wrapper.find('[data-test="method-selector"]').text()).toBe('ldc')
   })
+
+  it.each(['EXPIRED', 'CANCELLED', 'PAID', 'PENDING', 'UNKNOWN', 'error'])(
+    'recovers a stored desktop QR order with no payment-entry flash before %s verification', async (status) => {
+      vi.useFakeTimers()
+      vi.mocked(isMobileDevice).mockReturnValue(false)
+      getCheckoutInfo.mockResolvedValue(checkoutInfoFixture())
+      toCanvas.mockClear()
+      const order = {
+        id: 42, user_id: 9, amount: 10, pay_amount: 10, fee_rate: 0,
+        payment_type: 'ldc', out_trade_no: 'qr-42', status: 'PENDING', order_type: 'balance',
+        created_at: '2026-11-14T00:00:00Z', expires_at: '2099-01-01T00:10:00Z', refund_amount: 0,
+      }
+      pollOrderStatus.mockReset().mockResolvedValue(order)
+      let resolve!: (result: { data: typeof order }) => void
+      let reject!: (reason: Error) => void
+      verifyOrder.mockReset().mockReturnValue(new Promise((yes, no) => { resolve = yes; reject = no }))
+      window.localStorage.setItem(PAYMENT_RECOVERY_STORAGE_KEY, JSON.stringify({
+        orderId: 42, amount: 10, qrCode: 'qr-data', payUrl: 'https://pay.example.com/42',
+        // An already overdue local deadline must also recover through server verification.
+        expiresAt: '2026-01-01T00:00:00Z', paymentType: 'ldc', outTradeNo: 'qr-42',
+        clientSecret: '', payAmount: 10, orderType: 'balance', paymentMode: 'qrcode', resumeToken: '', createdAt: Date.now(),
+      }))
+      const wrapper = shallowMount(PaymentView, {
+        global: { stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          PaymentStatusPanel: false,
+          Teleport: true,
+          Transition: false,
+        } },
+      })
+      try {
+        await flushPromises()
+        const panel = wrapper.getComponent(PaymentStatusPanel)
+        expect(panel.props()).toMatchObject({ recovering: true, paymentMode: 'qrcode', orderType: 'balance' })
+        expect(verifyOrder).toHaveBeenCalledWith('qr-42')
+        expect(wrapper.find('canvas').exists()).toBe(false)
+        expect(wrapper.text()).not.toContain('payment.qr.openPayWindow')
+        expect(toCanvas).not.toHaveBeenCalled()
+        if (status === 'error') reject(new Error('temporary outage'))
+        else resolve({ data: { ...order, status } })
+        await flushPromises()
+        if (status === 'PENDING') {
+          expect(wrapper.find('canvas').exists()).toBe(true)
+          expect(wrapper.text()).toContain('payment.qr.openPayWindow')
+        } else {
+          expect(wrapper.find('canvas').exists()).toBe(false)
+          expect(toCanvas).not.toHaveBeenCalled()
+        }
+        if (status === 'EXPIRED' || status === 'CANCELLED') {
+          expect(wrapper.text()).toContain(`payment.qr.${status.toLowerCase()}`)
+          expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).toBeNull()
+        } else if (status === 'PAID') {
+          expect(routerPush).toHaveBeenCalledWith({ path: '/payment/result', query: { order_id: '42', out_trade_no: 'qr-42' } })
+          expect(refreshUser).toHaveBeenCalledTimes(1)
+        } else {
+          expect(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY)).not.toBeNull()
+          expect(routerPush).not.toHaveBeenCalled()
+        }
+      } finally {
+        wrapper.unmount()
+        vi.mocked(isMobileDevice).mockReturnValue(true)
+        vi.useRealTimers()
+      }
+    },
+  )
 })
 
 describe('PaymentView WeChat JSAPI flow', () => {

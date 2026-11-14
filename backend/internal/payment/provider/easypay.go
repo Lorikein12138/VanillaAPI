@@ -318,19 +318,31 @@ func (e *EasyPay) QueryOrder(ctx context.Context, tradeNo string) (*payment.Quer
 	}
 	amount, _ := strconv.ParseFloat(result.money, 64)
 	return &payment.QueryOrderResponse{
-		TradeNo:  responseTradeNo,
-		Status:   result.status,
-		Amount:   amount,
-		Metadata: e.MerchantIdentityMetadata(),
+		PendingVerified: result.pendingVerified,
+		TradeNo:         responseTradeNo,
+		Status:          result.status,
+		Amount:          amount,
+		Metadata:        e.MerchantIdentityMetadata(),
 	}, nil
 }
 
 // easyPayQueryResult is the normalized api.php?act=order answer. tradeNo is
 // the upstream trade number exactly as returned (empty when absent).
 type easyPayQueryResult struct {
-	status  string
-	money   string
-	tradeNo string
+	pendingVerified bool
+	status          string
+	money           string
+	tradeNo         string
+}
+
+type easyPayQueryData struct {
+	TradeStatus  *string         `json:"trade_status"`
+	Status       json.RawMessage `json:"status"`
+	OrderStatus  json.RawMessage `json:"order_status"`
+	ExpireReason json.RawMessage `json:"expire_reason"`
+	Money        json.RawMessage `json:"money"`
+	TradeNo      json.RawMessage `json:"trade_no"`
+	OutTradeNo   json.RawMessage `json:"out_trade_no"`
 }
 
 func (e *EasyPay) queryOrder(ctx context.Context, outTradeNo string) (*easyPayQueryResult, error) {
@@ -345,7 +357,7 @@ func (e *EasyPay) queryOrder(ctx context.Context, outTradeNo string) (*easyPayQu
 	for k, v := range params {
 		query.Set(k, v)
 	}
-	body, err := e.post(ctx, e.apiBase()+"/api.php?"+query.Encode(), params)
+	body, httpStatus, err := e.postRaw(ctx, e.apiBase()+"/api.php?"+query.Encode(), params)
 	if err != nil {
 		// The request URL carries the merchant key; never let it reach logs
 		// or audit records through *url.Error.
@@ -357,13 +369,6 @@ func (e *EasyPay) queryOrder(ctx context.Context, outTradeNo string) (*easyPayQu
 	}
 	// Scalars are decoded leniently: PHP deployments commonly serialize
 	// integer columns as strings ("status":"1").
-	type easyPayQueryData struct {
-		TradeStatus *string         `json:"trade_status"`
-		Status      json.RawMessage `json:"status"`
-		Money       json.RawMessage `json:"money"`
-		TradeNo     json.RawMessage `json:"trade_no"`
-		OutTradeNo  json.RawMessage `json:"out_trade_no"`
-	}
 	var resp struct {
 		easyPayQueryData
 		Code any              `json:"code"`
@@ -373,6 +378,9 @@ func (e *EasyPay) queryOrder(ctx context.Context, outTradeNo string) (*easyPayQu
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("easypay parse query: %w", err)
 	}
+	if httpStatus < http.StatusOK || httpStatus >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("easypay query HTTP status: %d", httpStatus)
+	}
 	// An explicit failure code wins over any paid-looking status field that
 	// may accompany it.
 	if resp.Code != nil && !easyPayResponseCodeIsSuccess(resp.Code, easypayCodeSuccess) {
@@ -380,34 +388,140 @@ func (e *EasyPay) queryOrder(ctx context.Context, outTradeNo string) (*easyPayQu
 		if msg == "" {
 			msg = summarizeEasyPayResponse(body)
 		}
+		// Upstream diagnostics may echo credentials from the query URL.
+		for _, secret := range []string{e.config["pkey"], url.QueryEscape(e.config["pkey"])} {
+			if secret != "" {
+				msg = strings.ReplaceAll(msg, secret, "[REDACTED]")
+			}
+		}
 		return nil, fmt.Errorf("easypay query failed: %s", msg)
 	}
 	// When the upstream echoes the order identity it must be this order; some
 	// implementations silently ignore unknown lookup parameters.
-	if echoed := easyPayJSONScalar(pickEasyPayJSON(resp.OutTradeNo, resp.Data.OutTradeNo)); echoed != "" && echoed != strings.TrimSpace(outTradeNo) {
-		return nil, fmt.Errorf("easypay query out_trade_no mismatch: expected %s, got %s", strings.TrimSpace(outTradeNo), echoed)
+	for _, raw := range []json.RawMessage{resp.OutTradeNo, resp.Data.OutTradeNo} {
+		if echoed := easyPayJSONScalar(raw); echoed != "" && echoed != strings.TrimSpace(outTradeNo) {
+			return nil, fmt.Errorf("easypay query out_trade_no mismatch")
+		}
 	}
 
 	status := payment.ProviderStatusPending
-	if resp.TradeStatus != nil {
-		if *resp.TradeStatus == tradeStatusSuccess {
-			status = payment.ProviderStatusPaid
-		}
-	} else if resp.Data.TradeStatus != nil {
-		if *resp.Data.TradeStatus == tradeStatusSuccess {
-			status = payment.ProviderStatusPaid
-		}
-	} else if raw := pickEasyPayJSON(resp.Status, resp.Data.Status); raw != nil {
-		if easyPayJSONScalar(raw) == strconv.Itoa(easypayStatusPaid) {
+	// An explicit trade success wins over terminal extension fields, even
+	// when another response layer still carries an older pending status.
+	if easyPayHasTradeSuccess(resp.easyPayQueryData, resp.Data) {
+		status = payment.ProviderStatusPaid
+	} else if resp.TradeStatus == nil && resp.Data.TradeStatus == nil {
+		if easyPayJSONScalar(pickEasyPayJSON(resp.Status, resp.Data.Status)) == strconv.Itoa(easypayStatusPaid) {
 			status = payment.ProviderStatusPaid
 		}
 	}
+	if status != payment.ProviderStatusPaid {
+		status = easyPayTerminalQueryStatus(resp.easyPayQueryData, resp.Data)
+	}
 
 	return &easyPayQueryResult{
-		status:  status,
-		money:   easyPayJSONScalar(pickEasyPayJSON(resp.Money, resp.Data.Money)),
-		tradeNo: easyPayJSONScalar(pickEasyPayJSON(resp.TradeNo, resp.Data.TradeNo)),
+		pendingVerified: status == payment.ProviderStatusPending && easyPayPendingVerified(resp.easyPayQueryData, resp.Data),
+		status:          status,
+		money:           easyPayJSONScalar(pickEasyPayJSON(resp.Money, resp.Data.Money)),
+		tradeNo:         easyPayJSONScalar(pickEasyPayJSON(resp.TradeNo, resp.Data.TradeNo)),
 	}, nil
+}
+
+// Pending is actionable only when every supplied state field agrees and at
+// least one field positively identifies pending. Unknown/empty/conflicting
+// answers retain the legacy Status but cannot release a recovery barrier.
+func easyPayPendingVerified(sources ...easyPayQueryData) bool {
+	confirmed := false
+	for _, data := range sources {
+		if data.TradeStatus != nil {
+			switch *data.TradeStatus {
+			case "WAITING", "WAIT_BUYER_PAY":
+				confirmed = true
+			default:
+				return false
+			}
+		}
+		if raw := pickEasyPayJSON(data.Status, nil); raw != nil {
+			if easyPayJSONScalar(raw) != "0" {
+				return false
+			}
+			confirmed = true
+		}
+		if raw := pickEasyPayJSON(data.OrderStatus, nil); raw != nil {
+			if strings.ToLower(easyPayJSONScalar(raw)) != payment.ProviderStatusPending {
+				return false
+			}
+			confirmed = true
+		}
+		if raw := pickEasyPayJSON(data.ExpireReason, nil); raw != nil {
+			var reason string
+			if json.Unmarshal(raw, &reason) != nil || strings.TrimSpace(reason) != "" {
+				return false
+			}
+		}
+	}
+	return confirmed
+}
+
+func easyPayHasTradeSuccess(sources ...easyPayQueryData) bool {
+	for _, data := range sources {
+		if data.TradeStatus != nil && *data.TradeStatus == tradeStatusSuccess {
+			return true
+		}
+	}
+	return false
+}
+
+// Only the explicit extension may close an unpaid order. Legacy status=0
+// cannot distinguish pending, expired and cancelled. Conflicting or unknown
+// fields stay pending; the existing paid precedence above remains authoritative.
+func easyPayTerminalQueryStatus(sources ...easyPayQueryData) string {
+	var orderStatus, expireReason string
+	for _, data := range sources {
+		if data.TradeStatus != nil {
+			return payment.ProviderStatusPending
+		}
+		if raw := pickEasyPayJSON(data.Status, nil); raw != nil && easyPayJSONScalar(raw) != "0" {
+			return payment.ProviderStatusPending
+		}
+		if raw := pickEasyPayJSON(data.OrderStatus, nil); raw != nil {
+			value := strings.ToLower(easyPayJSONScalar(raw))
+			if value != payment.ProviderStatusExpired && value != payment.ProviderStatusCancelled {
+				return payment.ProviderStatusPending
+			}
+			if orderStatus != "" && orderStatus != value {
+				return payment.ProviderStatusPending
+			}
+			orderStatus = value
+		}
+		if raw := pickEasyPayJSON(data.ExpireReason, nil); raw != nil {
+			value := strings.ToLower(easyPayJSONScalar(raw))
+			// Empty/null reasons accompany gateways that only expose order_status.
+			if value == "" && string(raw) != `""` {
+				return payment.ProviderStatusPending
+			}
+			if value != "" && value != "timeout" && value != payment.ProviderStatusCancelled {
+				return payment.ProviderStatusPending
+			}
+			if expireReason != "" && value != "" && expireReason != value {
+				return payment.ProviderStatusPending
+			}
+			if value != "" {
+				expireReason = value
+			}
+		}
+	}
+	switch orderStatus {
+	case payment.ProviderStatusExpired:
+		if expireReason == payment.ProviderStatusCancelled {
+			return payment.ProviderStatusCancelled
+		}
+		return payment.ProviderStatusExpired
+	case payment.ProviderStatusCancelled:
+		if expireReason != "timeout" {
+			return payment.ProviderStatusCancelled
+		}
+	}
+	return payment.ProviderStatusPending
 }
 
 // ConfirmNotification checks a verified success notification against the

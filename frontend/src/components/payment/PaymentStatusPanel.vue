@@ -72,6 +72,18 @@
       </div>
     </template>
 
+    <!-- Recovery and local timeout require provider confirmation before payment can resume. -->
+    <template v-else-if="paymentBlocked">
+      <div class="card p-6 text-center space-y-4" data-test="payment-verification">
+        <p class="text-sm text-gray-500 dark:text-gray-400">
+          {{ verificationFailed ? t('payment.qr.verifyUnavailable') : t('payment.qr.verifying') }}
+        </p>
+        <button class="btn btn-secondary" :disabled="pollInFlight" @click="pollStatus(true)">
+          {{ pollInFlight ? t('common.processing') : t('payment.qr.retryVerification') }}
+        </button>
+      </div>
+    </template>
+
     <!-- ═══ Active States: QR or Popup waiting ═══ -->
 
     <!-- Mobile Alipay app handoff. The QR fallback stays hidden until launch timeout. -->
@@ -229,6 +241,7 @@ import { usePaymentStore } from '@/stores/payment'
 import { useAppStore } from '@/stores'
 import { paymentAPI } from '@/api/payment'
 import { extractI18nErrorMessage } from '@/utils/apiError'
+import { isMobileDevice } from '@/utils/device'
 import { getPaymentPopupFeatures, isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
 import { currencySymbol, formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
 import type { PaymentOrder } from '@/types/payment'
@@ -255,6 +268,8 @@ const props = defineProps<{
   currency?: string
   outTradeNo?: string
   mobileAlipayDeepLink?: boolean
+  paymentMode?: string
+  recovering?: boolean
 }>()
 
 type PaymentOutcome = 'success' | 'cancelled' | 'expired'
@@ -292,14 +307,22 @@ let countdownTimer: ReturnType<typeof setInterval> | null = null
 let verifyAttempts = 0
 let lastVerifyAt = 0
 let alipayLauncher: AlipayDeepLinkLauncher | null = null
+let stopped = false
 
 const VERIFY_RETRY_INTERVAL_MS = 15000
 const VERIFY_RETRY_MAX_ATTEMPTS = 6
 
 const isAlipay = computed(() => isBuiltInAlipayMethod(props.paymentType))
 const isWxpay = computed(() => isBuiltInWxpayMethod(props.paymentType))
+// qrcode is the explicit EasyPay mode. Do not infer provider scope from a visible method name.
+const isQrBalance = computed(() => props.paymentMode?.trim().toLowerCase() === 'qrcode'
+  && props.orderType === 'balance' && !isMobileDevice() && !props.mobileAlipayDeepLink)
+const verificationRequired = ref(isQrBalance.value && props.recovering === true)
+const verificationFailed = ref(false)
+const paymentBlocked = computed(() => isQrBalance.value && (verificationRequired.value || remainingSeconds.value <= 0))
 const isMobileAlipayDeepLink = computed(() => props.mobileAlipayDeepLink === true && isAlipay.value && !!qrUrl.value)
-const showQRCode = computed(() => !!qrUrl.value && (!isMobileAlipayDeepLink.value || deepLinkFallbackVisible.value))
+const showQRCode = computed(() => !outcome.value && !paymentBlocked.value && !!qrUrl.value
+  && (!isMobileAlipayDeepLink.value || deepLinkFallbackVisible.value))
 
 const qrBorderClass = computed(() => {
   if (isAlipay.value) return 'border-[#00AEEF] bg-blue-50 dark:border-[#00AEEF]/70 dark:bg-blue-950/20'
@@ -349,6 +372,7 @@ function isSuccessStatus(status: string | null | undefined): boolean {
 }
 
 function reopenPopup() {
+  if (stopped || outcome.value || paymentBlocked.value) return
   if (props.payUrl) {
     const win = window.open(props.payUrl, 'paymentPopup', getPaymentPopupFeatures())
     if (!win || win.closed) {
@@ -360,8 +384,9 @@ function reopenPopup() {
 }
 
 function setOutcome(next: PaymentOutcome) {
-  if (outcome.value === next) return
+  if (stopped || outcome.value) return
   outcome.value = next
+  cleanup()
   emit('settled', next)
 }
 
@@ -399,75 +424,110 @@ function saveQRCode() {
   link.remove()
 }
 
-async function tryRecoverPendingOrder(order: PaymentOrder): Promise<PaymentOrder> {
-  if (!isWxpay.value && !isAlipay.value) return order
-  const outTradeNo = String(order.out_trade_no || '').trim()
-  if (!outTradeNo) return order
-  const normalizedStatus = String(order.status || '').trim().toUpperCase()
-  if (normalizedStatus !== 'PENDING') return order
+async function tryRecoverPendingOrder(order: PaymentOrder | null, force: boolean): Promise<PaymentOrder | null> {
+  if (!isQrBalance.value && !isWxpay.value && !isAlipay.value) return order
+  const outTradeNo = String(order?.out_trade_no || props.outTradeNo || '').trim()
+  if (!outTradeNo) {
+    if (isQrBalance.value) verificationFailed.value = true
+    return order
+  }
+  const normalizedStatus = String(order?.status || '').trim().toUpperCase()
+  if (!isQrBalance.value && normalizedStatus !== 'PENDING') return order
   const now = Date.now()
-  if (verifyAttempts >= VERIFY_RETRY_MAX_ATTEMPTS || now - lastVerifyAt < VERIFY_RETRY_INTERVAL_MS) {
+  if ((!isQrBalance.value && verifyAttempts >= VERIFY_RETRY_MAX_ATTEMPTS)
+    || (!force && verifyAttempts > 0 && now - lastVerifyAt < VERIFY_RETRY_INTERVAL_MS)) {
     return order
   }
 
   lastVerifyAt = now
   verifyAttempts += 1
+  const orderId = props.orderId
   try {
     const result = await paymentAPI.verifyOrder(outTradeNo)
+    if (stopped || props.orderId !== orderId) return null
+    if (isQrBalance.value) {
+      if (!result.data || result.data.id !== orderId || result.data.out_trade_no !== outTradeNo) {
+        verificationFailed.value = true
+        return order
+      }
+      verificationFailed.value = !['PENDING', 'PAID', 'RECHARGING', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED'].includes(result.data.status)
+      if (result.data.status === 'PENDING') {
+        verificationRequired.value = false
+        // The server deadline can supersede an old recovery snapshot; an overdue
+        // PENDING order stays blocked and is verified until its status is explicit.
+        const deadline = Date.parse(result.data.expires_at)
+        if (Number.isFinite(deadline)) startCountdown(Math.floor((deadline - Date.now()) / 1000))
+      }
+    }
     return result.data ?? order
-  } catch {
+  } catch (error: unknown) {
+    if (!stopped && isQrBalance.value) {
+      verificationFailed.value = true
+      if (typeof error === 'object' && error !== null && 'reason' in error
+        && error.reason === 'PAYMENT_VERIFICATION_UNAVAILABLE') verificationRequired.value = true
+    }
     return order
   }
 }
 
-let pollInFlight = false
-async function pollStatus() {
-  if (!props.orderId || outcome.value) return
+const pollInFlight = ref(false)
+async function pollStatus(forceVerify = false) {
+  if (!props.orderId || stopped || outcome.value) return
   // 防重入：接口（含 verifyOrder 二次确认）响应慢于 3 秒轮询间隔时避免并发重叠请求。
-  if (pollInFlight) return
-  pollInFlight = true
+  if (pollInFlight.value) return
+  pollInFlight.value = true
+  const orderId = props.orderId
   try {
-    let order = await paymentStore.pollOrderStatus(props.orderId)
-    if (!order) return
+    let order = await paymentStore.pollOrderStatus(orderId)
     // 已进入终态则不再处理迟到的响应。
-    if (outcome.value) return
-    order = await tryRecoverPendingOrder(order)
-    if (outcome.value) return
+    if (stopped || props.orderId !== orderId) return
+    const terminal = order && (isSuccessStatus(order.status) || ['CANCELLED', 'EXPIRED', 'FAILED'].includes(order.status))
+    if (!terminal) order = await tryRecoverPendingOrder(order, forceVerify && isQrBalance.value)
+    if (stopped || props.orderId !== orderId || !order) return
     if (isSuccessStatus(order.status)) {
-      cleanup()
       paidOrder.value = order
       setOutcome('success')
       emit('success')
     } else if (order.status === 'CANCELLED') {
-      cleanup()
       setOutcome('cancelled')
     } else if (order.status === 'EXPIRED' || order.status === 'FAILED') {
-      cleanup()
       setOutcome('expired')
     }
+  } catch {
+    if (!stopped && isQrBalance.value) verificationFailed.value = true
   } finally {
-    pollInFlight = false
+    pollInFlight.value = false
   }
 }
 
 function startCountdown(seconds: number) {
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
   remainingSeconds.value = Math.max(0, seconds)
   const deadline = Date.now() + remainingSeconds.value * 1000
-  if (remainingSeconds.value <= 0) { setOutcome('expired'); return }
+  if (remainingSeconds.value <= 0) {
+    if (!isQrBalance.value) setOutcome('expired')
+    return
+  }
   countdownTimer = setInterval(() => {
     remainingSeconds.value = Math.max(0, Math.floor((deadline - Date.now()) / 1000))
-    if (remainingSeconds.value <= 0) { setOutcome('expired'); cleanup() }
+    if (remainingSeconds.value <= 0) {
+      if (isQrBalance.value) {
+        if (countdownTimer) clearInterval(countdownTimer)
+        countdownTimer = null
+        void pollStatus(true)
+      } else setOutcome('expired')
+    }
   }, 1000)
 }
 
 async function handleCancel() {
-  if (!props.orderId || cancelling.value) return
+  if (!props.orderId || stopped || cancelling.value) return
   cancelling.value = true
   try {
     await paymentAPI.cancelOrder(props.orderId)
-    cleanup()
     setOutcome('cancelled')
   } catch (err: unknown) {
+    if (stopped) return
     appStore.showError(extractI18nErrorMessage(err, t, 'payment.errors', t('common.error')))
   } finally {
     cancelling.value = false
@@ -477,6 +537,7 @@ async function handleCancel() {
 function handleDone() { cleanup(); emit('done') }
 
 function cleanup() {
+  stopped = true
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
   alipayLauncher?.dispose()
@@ -492,11 +553,12 @@ if (props.expiresAt) {
   seconds = Math.floor((new Date(props.expiresAt).getTime() - Date.now()) / 1000)
 }
 startCountdown(seconds)
-pollTimer = setInterval(pollStatus, 3000)
+if (!stopped) pollTimer = setInterval(() => pollStatus(), 3000)
 renderQR()
 
 watch([() => qrUrl.value, showQRCode], () => renderQR())
 onMounted(() => {
+  if (paymentBlocked.value) void pollStatus(true)
   if (!isMobileAlipayDeepLink.value) return
   alipayLauncher = createAlipayDeepLinkLauncher({
     qrCode: qrUrl.value,
