@@ -495,7 +495,7 @@
         </div>
 
         <fieldset v-if="!showEditModal" data-tour="key-form-provider">
-          <legend class="input-label">{{ t('keys.providerLabel') }}</legend>
+          <legend class="input-label">{{ t('keys.groupCategoryLabel') }}</legend>
           <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <label
               v-for="provider in createProviderOptions"
@@ -538,7 +538,7 @@
             </label>
           </div>
           <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400" aria-live="polite">
-            {{ groups.length === 0 ? t('common.noGroupsAvailable') : t(`keys.providerHints.${createProvider}`) }}
+            {{ groups.length === 0 ? t('common.noGroupsAvailable') : t('keys.groupCategoryHint') }}
           </p>
         </fieldset>
 
