@@ -38,8 +38,12 @@
           <span class="font-medium text-gray-900 dark:text-white">{{ creditedAmountSymbol }}{{ order?.amount?.toFixed(2) }}</span>
         </div>
         <div class="mt-1 flex justify-between text-sm">
-          <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.payAmount') }}</span>
+          <span class="text-gray-500 dark:text-gray-400">{{ t(refundFloatingAmount ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
           <span class="font-medium text-gray-900 dark:text-white">{{ paymentAmountSymbol }}{{ order?.pay_amount?.toFixed(2) }}</span>
+        </div>
+        <div v-if="order && refundFloatingAmount" class="mt-1 flex justify-between text-sm">
+          <span class="text-gray-500 dark:text-gray-400">{{ t(actualPaymentLabelKey(order.status)) }}</span>
+          <span class="font-medium text-gray-900 dark:text-white">{{ paymentAmountSymbol }}{{ refundFloatingAmount }}</span>
         </div>
         <div v-if="actuallyRefunded > 0" class="mt-1 flex justify-between text-sm">
           <span class="text-gray-500 dark:text-gray-400">{{ t('payment.admin.alreadyRefunded') }}</span>
@@ -170,6 +174,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { PaymentOrder } from '@/types/payment'
 import { formatOrderDateTime } from '@/components/payment/orderUtils'
 import { currencySymbol } from '@/components/payment/currency'
+import { actualPaymentLabelKey, getFloatingPaymentAmount } from '@/components/payment/paymentFlow'
 
 const { t } = useI18n()
 
@@ -190,6 +195,7 @@ const emit = defineEmits<{
 const creditedAmountSymbol = currencySymbol('USD')
 
 const paymentAmountSymbol = computed(() => currencySymbol(props.order?.currency))
+const refundFloatingAmount = computed(() => getFloatingPaymentAmount(props.order?.pay_amount, props.order?.payment_info))
 
 const form = reactive({
   amount: 0,

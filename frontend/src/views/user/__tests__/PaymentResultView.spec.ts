@@ -107,7 +107,7 @@ describe('PaymentResultView', () => {
     vi.useRealTimers()
   })
 
-  it.each(['1.01', '0.99', '1.00'])('displays actual %s, ordered 1.00 and credited 2.00 from the signed result', async (actual) => {
+  it.each(['1.01', '0.99'])('displays actual %s, ordered 1.00 and credited 2.00 from the signed result', async (actual) => {
     routeState.query = { resume_token: 'signed-info-42' }
     resolveOrderPublicByResumeToken.mockResolvedValue({ data: {
       ...orderFactory('COMPLETED'), amount: 2, pay_amount: 1, currency: 'CNY',
@@ -120,6 +120,32 @@ describe('PaymentResultView', () => {
     expect(wrapper.text()).toContain('payment.orders.orderedAmount')
     expect(wrapper.text()).toContain('¥1.00')
     expect(wrapper.text()).toContain('$2.00')
+    expect(wrapper.text()).not.toContain('payment.orders.payAmount')
+    wrapper.unmount()
+  })
+
+  it('uses the regular paid amount when the signed result has the same amount', async () => {
+    routeState.query = { resume_token: 'signed-info-42' }
+    resolveOrderPublicByResumeToken.mockResolvedValue({ data: {
+      ...orderFactory('COMPLETED'), amount: 19.5, pay_amount: 19.5, currency: 'CNY',
+      payment_info: { version: 1, actual_amount: '19.50' },
+    } })
+    const wrapper = mount(PaymentResultView, { global: { stubs: { OrderStatusBadge: true } } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('payment.orders.payAmount')
+    expect(wrapper.find('[data-test="result-actual-amount"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('payment.orders.creditedAmount')
+    wrapper.unmount()
+  })
+
+  it('labels EasyPay return money as the order amount when no order loads', async () => {
+    routeState.query = { out_trade_no: 'order-42', money: '19.50', trade_status: 'TRADE_SUCCESS' }
+    verifyOrder.mockRejectedValue(new Error('unavailable'))
+    verifyOrderPublic.mockRejectedValue(new Error('unavailable'))
+    const wrapper = mount(PaymentResultView, { global: { stubs: { OrderStatusBadge: true } } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('payment.orders.orderedAmount')
+    expect(wrapper.text()).toContain('¥19.50')
     expect(wrapper.text()).not.toContain('payment.orders.payAmount')
     wrapper.unmount()
   })

@@ -52,18 +52,18 @@
               <span class="font-medium text-gray-900 dark:text-white">{{ formatGatewayAmount(feeAmount) }}</span>
             </div>
             <div v-if="hasAmountFields(order)" class="flex justify-between">
-              <span class="text-gray-500 dark:text-gray-400">{{ t(resultPaymentInfo ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
+              <span class="text-gray-500 dark:text-gray-400">{{ t(resultFloatingAmount ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
               <span class="font-semibold text-primary-600 dark:text-primary-400">{{ formatGatewayAmount(order.pay_amount) }}</span>
             </div>
-            <div v-if="resultPaymentInfo" class="flex justify-between" data-test="result-actual-amount">
+            <div v-if="resultFloatingAmount" class="flex justify-between" data-test="result-actual-amount">
               <span class="text-gray-500 dark:text-gray-400">{{ t(actualPaymentLabelKey(order.status)) }}</span>
-              <span class="font-semibold text-primary-600 dark:text-primary-400">{{ currencySymbol(currency) }}{{ resultPaymentInfo.actual_amount }}</span>
+              <span class="font-semibold text-primary-600 dark:text-primary-400">{{ currencySymbol(currency) }}{{ resultFloatingAmount }}</span>
             </div>
             <div v-if="hasAmountFields(order) && orderBonusAmount(order) > 0" class="flex justify-between">
               <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.bonusAmount') }}</span>
               <span class="font-medium text-amber-600 dark:text-amber-400">+${{ orderBonusAmount(order).toFixed(2) }}</span>
             </div>
-            <div v-if="hasAmountFields(order) && (resultPaymentInfo || order.amount !== order.pay_amount || orderBonusAmount(order) > 0)" class="flex justify-between">
+            <div v-if="hasAmountFields(order) && (resultFloatingAmount || order.amount !== order.pay_amount || orderBonusAmount(order) > 0)" class="flex justify-between">
               <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.creditedAmount') }}</span>
               <span class="font-medium text-gray-900 dark:text-white">{{ order.order_type === 'balance' ? '$' + order.amount.toFixed(2) : formatGatewayAmount(order.amount) }}</span>
             </div>
@@ -85,7 +85,7 @@
               <span class="font-medium text-gray-900 dark:text-white">{{ returnInfo.outTradeNo }}</span>
             </div>
             <div v-if="returnInfo.money" class="flex justify-between">
-              <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.payAmount') }}</span>
+              <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.orderedAmount') }}</span>
               <span class="font-medium text-gray-900 dark:text-white">{{ formatGatewayAmount(Number(returnInfo.money) || 0) }}</span>
             </div>
             <div v-if="returnInfo.type" class="flex justify-between">
@@ -113,7 +113,7 @@ import {
   PAYMENT_RECOVERY_STORAGE_KEY,
   clearPaymentRecoverySnapshot,
   readPaymentRecoverySnapshot,
-  normalizePaymentInfo,
+  getFloatingPaymentAmount,
   actualPaymentLabelKey,
 } from '@/components/payment/paymentFlow'
 import { usePaymentStore } from '@/stores/payment'
@@ -134,7 +134,7 @@ const authStore = useAuthStore()
 type ResolvedOrder = PaymentOrder | SignedOrderResumeResult | PublicOrderVerifyResult
 
 const order = ref<ResolvedOrder | null>(null)
-const resultPaymentInfo = computed(() => normalizePaymentInfo(order.value?.payment_info))
+const resultFloatingAmount = computed(() => getFloatingPaymentAmount(hasAmountFields(order.value) ? order.value.pay_amount : undefined, order.value?.payment_info))
 const loading = ref(true)
 const currency = ref('CNY')
 

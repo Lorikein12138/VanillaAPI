@@ -84,16 +84,37 @@ describe('RecentOrders', () => {
     expect(rows[0].text()).toContain('alipay')
   })
 
-  it.each(['1.01', '0.99', '1.00'])('keeps actual %s and ordered amount distinct in desktop and mobile history', async (actual) => {
-    getMyOrders.mockResolvedValue({ data: { items: [order({ amount: 2, pay_amount: 1,
-      payment_info: { version: 1, actual_amount: actual, requires_cashier: true } })], total: 1 } })
+  it('uses a fixed heading and expands only floating orders in desktop and mobile history', async () => {
+    const paymentInfo = { version: 1, requires_cashier: true } as const
+    getMyOrders.mockResolvedValue({ data: { items: [
+      order({ id: 1, amount: 19.5, pay_amount: 19.5 }),
+      order({ id: 2, amount: 19.5, pay_amount: 19.5, payment_info: { ...paymentInfo, actual_amount: '19.50' } }),
+      order({ id: 3, amount: 19.5, pay_amount: 19.5, payment_info: { ...paymentInfo, actual_amount: 'invalid' } }),
+      order({ id: 4, amount: 2, pay_amount: 1, payment_info: { ...paymentInfo, actual_amount: '1.1' } }),
+      order({ id: 5, amount: 2, pay_amount: 1, status: 'PENDING', payment_info: { ...paymentInfo, actual_amount: '0.99' } }),
+    ], total: 5 } })
     const wrapper = mountOrders()
     await flushPromises()
-    const row = wrapper.get('[data-testid="recent-order-row"]')
-    expect(row.text()).toContain('payment.orders.actualPaidAmount: ¥' + actual)
-    expect(row.text()).toContain('payment.orders.orderedAmount: ¥1.00')
-    expect(row.get('[data-testid="recent-order-credited"]').text()).toBe('+$2.00')
-    expect(wrapper.text()).not.toContain('payment.orders.payAmount')
+    const rows = wrapper.findAll('[data-testid="recent-order-row"]')
+    expect(wrapper.text()).toContain('payment.orders.paymentAmount')
+    for (const row of rows.slice(0, 3)) {
+      expect(row.text()).not.toContain('payment.orders.orderedAmount')
+      expect(row.text().match(/¥19\.50/g)).toHaveLength(2)
+      expect(row.get('div.md\\:hidden').text()).toContain('payment.orders.creditedAmount: +$19.50')
+    }
+    for (const [index, label, amount] of [
+      [3, 'actualPaidAmount', '1.10'],
+      [4, 'actualPayAmount', '0.99'],
+    ] as const) {
+      for (const layout of ['div.md\\:grid', 'div.md\\:hidden']) {
+        const text = rows[index].get(layout).text()
+        expect(text).toContain('payment.orders.' + label + ': ¥' + amount)
+        expect(text).toContain('payment.orders.orderedAmount: ¥1.00')
+      }
+    }
+    expect(rows[3].get('[data-testid="recent-order-credited"]').text()).toBe('+$2.00')
+    expect(rows[4].get('[data-testid="recent-order-credited"]').text()).toBe('—')
+    expect(rows[4].get('div.md\\:hidden').text()).not.toContain('payment.orders.creditedAmount')
   })
 
   it('hides the whole section when the request fails', async () => {

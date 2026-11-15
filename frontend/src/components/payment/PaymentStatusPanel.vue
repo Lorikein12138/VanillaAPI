@@ -26,7 +26,7 @@
                 <span class="font-medium text-gray-900 dark:text-white">{{ paidOrder.out_trade_no }}</span>
               </div>
               <div class="flex justify-between">
-                <span class="text-gray-500 dark:text-gray-400">{{ t(paidPaymentInfo ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
+                <span class="text-gray-500 dark:text-gray-400">{{ t(paidFloatingAmount ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
                 <span class="font-medium text-gray-900 dark:text-white">
                   {{ creditedAmountSymbol }}{{ paidOrder.amount.toFixed(2) }}
                   <span v-if="(paidOrder.bonus_amount ?? 0) > 0" class="ml-1 text-xs font-normal text-amber-600 dark:text-amber-400">
@@ -35,12 +35,12 @@
                 </span>
               </div>
               <div class="flex justify-between">
-                <span class="text-gray-500 dark:text-gray-400">{{ t(paidPaymentInfo ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
+                <span class="text-gray-500 dark:text-gray-400">{{ t(paidFloatingAmount ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
                 <span class="font-medium text-gray-900 dark:text-white">{{ formatGatewayAmount(paidOrder.pay_amount, paidOrder.currency) }}</span>
               </div>
-              <div v-if="paidPaymentInfo" class="flex justify-between" data-test="actual-paid-amount">
+              <div v-if="paidFloatingAmount" class="flex justify-between" data-test="actual-paid-amount">
                 <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.actualPaidAmount') }}</span>
-                <span class="font-semibold text-gray-900 dark:text-white">{{ currencySymbol(paidOrder.currency) }}{{ paidPaymentInfo.actual_amount }}</span>
+                <span class="font-semibold text-gray-900 dark:text-white">{{ currencySymbol(paidOrder.currency) }}{{ paidFloatingAmount }}</span>
               </div>
             </div>
           </div>
@@ -256,7 +256,7 @@ import { isMobileDevice } from '@/utils/device'
 import { getPaymentPopupFeatures, isBuiltInAlipayMethod, isBuiltInWxpayMethod } from '@/components/payment/providerConfig'
 import { currencySymbol, formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
 import type { PaymentInfo, PaymentOrder } from '@/types/payment'
-import { normalizePaymentInfo, safeCashierUrl } from './paymentFlow'
+import { getFloatingPaymentAmount, normalizePaymentInfo, safeCashierUrl } from './paymentFlow'
 import Icon from '@/components/icons/Icon.vue'
 import QRCode from 'qrcode'
 import alipayIcon from '@/assets/icons/alipay.svg'
@@ -319,7 +319,7 @@ const cashierUrl = computed(() => {
 const remainingSeconds = ref(0)
 const cancelling = ref(false)
 const paidOrder = ref<PaymentOrder | null>(null)
-const paidPaymentInfo = computed(() => normalizePaymentInfo(paidOrder.value?.payment_info))
+const paidFloatingAmount = computed(() => getFloatingPaymentAmount(paidOrder.value?.pay_amount, paidOrder.value?.payment_info))
 const deepLinkState = ref<AlipayDeepLinkState>('idle')
 const deepLinkFallbackVisible = ref(false)
 const paymentCurrency = computed(() => normalizePaymentCurrency(serverOrder.value?.currency ?? props.currency))

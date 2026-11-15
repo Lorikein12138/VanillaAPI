@@ -54,6 +54,70 @@ func TestSanitizeAdminPaymentOrderForResponseAddsCurrency(t *testing.T) {
 	}
 }
 
+func TestSanitizeAdminPaymentOrderForResponseIncludesReadOnlyPaymentInfo(t *testing.T) {
+	cashierURL := "https://gateway.example/cashier"
+	expiresAt := time.Now().Add(time.Hour)
+	order := &dbent.PaymentOrder{
+		ID:           1,
+		PayAmount:    100,
+		PayURL:       &cashierURL,
+		Status:       service.OrderStatusPending,
+		ExpiresAt:    expiresAt,
+		RefundAmount: 2,
+		ProviderSnapshot: map[string]any{
+			"private_value": "snapshot-secret",
+			"payment_info": map[string]any{
+				"version":          1,
+				"actual_amount":    "99.99",
+				"requires_cashier": false,
+				"qr_content":       "extension-qr-secret",
+				"qr_image_url":     "https://gateway.example/extension-qr.png",
+				"expires_at":       expiresAt.Format(time.RFC3339Nano),
+			},
+		},
+	}
+
+	for name, result := range map[string]*AdminPaymentOrderResult{
+		"detail": sanitizeAdminPaymentOrderForResponse(order),
+		"list":   sanitizeAdminPaymentOrdersForResponse([]*dbent.PaymentOrder{order})[0],
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(result)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(body, &fields))
+			require.JSONEq(t, `{"version":1,"actual_amount":"99.99","requires_cashier":true}`, string(fields["payment_info"]))
+			require.NotContains(t, fields, "provider_snapshot")
+			require.NotContains(t, string(body), "snapshot-secret")
+			require.NotContains(t, string(body), "extension-qr")
+			require.JSONEq(t, `"https://gateway.example/cashier"`, string(fields["pay_url"]))
+			require.Equal(t, "100", string(fields["pay_amount"]))
+			require.Equal(t, "2", string(fields["refund_amount"]))
+		})
+	}
+}
+
+func TestSanitizeAdminPaymentOrderForResponseOmitsUnusablePaymentInfo(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		snapshot map[string]any
+	}{
+		{name: "legacy", snapshot: map[string]any{"schema_version": 2}},
+		{name: "null extension", snapshot: map[string]any{"payment_info": nil}},
+		{name: "invalid amount", snapshot: map[string]any{"payment_info": map[string]any{"version": 1, "actual_amount": "0.00"}}},
+		{name: "unsupported version", snapshot: map[string]any{"payment_info": map[string]any{"version": 2, "actual_amount": "99.99"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			order := &dbent.PaymentOrder{Status: service.OrderStatusPending, ProviderSnapshot: tt.snapshot}
+			body, err := json.Marshal(sanitizeAdminPaymentOrderForResponse(order))
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(body, &fields))
+			require.NotContains(t, fields, "payment_info")
+		})
+	}
+}
+
 func TestAdminSubscriptionPlansForResponseIncludesCompositeGroupInfo(t *testing.T) {
 	weekly := 25.0
 	now := time.Now()

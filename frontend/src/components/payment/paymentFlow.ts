@@ -154,6 +154,17 @@ export function normalizePaymentInfo(value: unknown): PaymentInfo | null | undef
   }
 }
 
+export function getFloatingPaymentAmount(payAmount: unknown, paymentInfo: unknown): string | undefined {
+  if (typeof payAmount !== 'number' || !Number.isFinite(payAmount) || payAmount <= 0) return undefined
+  const ordered = payAmount.toFixed(2)
+  if (ordered === '0.00') return undefined
+
+  const info = normalizePaymentInfo(paymentInfo)
+  if (!info) return undefined
+  const actual = Number(info.actual_amount).toFixed(2)
+  return actual !== ordered ? actual : undefined
+}
+
 export function normalizeVisibleMethod(method: string): VisiblePaymentMethod | '' {
   const normalized = VISIBLE_METHOD_ALIASES[method.trim() as keyof typeof VISIBLE_METHOD_ALIASES]
   return normalized ?? ''

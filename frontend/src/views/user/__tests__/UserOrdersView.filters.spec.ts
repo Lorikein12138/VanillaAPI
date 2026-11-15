@@ -54,9 +54,10 @@ describe('order status filtering', () => {
 })
 
 describe('user order actual, ordered and credited amounts', () => {
-  it.each(['1.01', '0.99', '1.00'])('shows actual %s separately in history and refund details', async (actual) => {
+  it.each(['1.01', '0.99', '1', '1.00', 'invalid'])('shows actual %s separately only when it differs in history and refund details', async (actual) => {
+    const isFloating = actual === '1.01' || actual === '0.99'
     api.getMyOrders.mockResolvedValue({ data: { items: [{
-      id: 42, user_id: 9, amount: 2, pay_amount: 1, currency: 'CNY', fee_rate: 0,
+      id: 50, user_id: 9, amount: 1, pay_amount: 1, currency: 'CNY', fee_rate: 0,
       payment_type: 'alipay', out_trade_no: 'order-42', status: 'COMPLETED', order_type: 'balance',
       created_at: '2026-11-14T00:00:00Z', expires_at: '2026-11-14T00:10:00Z', refund_amount: 0,
       provider_instance_id: 'provider-42', payment_info: { version: 1, actual_amount: actual, requires_cashier: true },
@@ -67,11 +68,25 @@ describe('user order actual, ordered and credited amounts', () => {
       BaseDialog: { props: ['show'], template: '<div v-if="show"><slot /><slot name="footer" /></div>' },
     } } })
     await flushPromises()
-    expect(wrapper.get('[data-test="order-actual-amount"]').text()).toContain('payment.orders.actualPaidAmount: ¥' + actual)
-    expect(wrapper.get('[data-test="order-ordered-amount"]').text()).toContain('payment.orders.orderedAmount: ¥1.00')
-    expect(wrapper.text()).toContain('$2.00')
+    expect(wrapper.text()).toContain('payment.orders.paymentAmount')
+    expect(wrapper.text()).toContain('¥1.00')
+    if (isFloating) {
+      expect(wrapper.get('[data-test="order-actual-amount"]').text()).toContain('payment.orders.actualPaidAmount: ¥' + actual)
+      expect(wrapper.get('[data-test="order-ordered-amount"]').text()).toContain('payment.orders.orderedAmount: ¥1.00')
+      expect(wrapper.text()).toContain('payment.orders.creditedAmount: $1.00')
+    } else {
+      expect(wrapper.find('[data-test="order-actual-amount"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="order-ordered-amount"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('payment.orders.creditedAmount')
+    }
     await wrapper.findAll('button').find(button => button.text() === 'payment.orders.requestRefund')!.trigger('click')
-    expect(wrapper.get('[data-test="refund-actual-amount"]').text()).toContain('¥' + actual)
-    expect(wrapper.get('[data-test="refund-ordered-amount"]').text()).toContain('¥1.00')
+    if (isFloating) {
+      expect(wrapper.get('[data-test="refund-actual-amount"]').text()).toContain('¥' + actual)
+      expect(wrapper.get('[data-test="refund-ordered-amount"]').text()).toContain('¥1.00')
+    } else {
+      expect(wrapper.find('[data-test="refund-actual-amount"]').exists()).toBe(false)
+      expect(wrapper.find('[data-test="refund-ordered-amount"]').exists()).toBe(false)
+      expect(wrapper.text()).toContain('payment.orders.amount')
+    }
   })
 })
