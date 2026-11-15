@@ -23,7 +23,7 @@
           <span>{{ t('payment.orders.createdAt') }}</span>
           <span>{{ t('payment.orders.orderType') }}</span>
           <span>{{ t('payment.orders.paymentMethod') }}</span>
-          <span class="text-right">{{ t(hasPaymentInfo ? 'payment.orders.paymentAmount' : 'payment.orders.payAmount') }}</span>
+          <span class="text-right">{{ t('payment.orders.paymentAmount') }}</span>
           <span class="text-right">{{ t('payment.orders.creditedAmount') }}</span>
           <span class="text-right">{{ t('payment.orders.status') }}</span>
         </div>
@@ -53,6 +53,7 @@
               <div class="flex shrink-0 flex-col items-end gap-1">
                 <span class="text-sm tabular-nums text-gray-950 dark:text-dark-50">{{ row.actual ? t(actualPaymentLabelKey(row.status)) + ': ' + row.actual : row.pay }}</span>
                 <span v-if="row.actual" class="text-xs text-gray-500">{{ t('payment.orders.orderedAmount') }}: {{ row.pay }}</span>
+                <span v-if="row.credited" class="text-xs text-gray-500">{{ t('payment.orders.creditedAmount') }}: {{ row.credited }}</span>
                 <OrderStatusBadge :status="row.status" />
               </div>
             </div>
@@ -70,7 +71,7 @@ import { paymentAPI } from '@/api/payment'
 import type { OrderStatus, PaymentOrder } from '@/types/payment'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
 import { currencySymbol, formatPaymentAmount } from '@/components/payment/currency'
-import { actualPaymentLabelKey, normalizePaymentInfo } from './paymentFlow'
+import { actualPaymentLabelKey, getFloatingPaymentAmount } from './paymentFlow'
 import { formatDateTimeToMinute } from '@/utils/format'
 
 const props = withDefaults(defineProps<{
@@ -87,23 +88,25 @@ const { t } = useI18n()
 const orders = ref<PaymentOrder[]>([])
 const loading = ref(true)
 const failed = ref(false)
-const hasPaymentInfo = computed(() => orders.value.some(order => normalizePaymentInfo(order.payment_info)))
 
 const gridClass = 'grid-cols-[1.3fr_1fr_1fr_1fr_1fr_0.9fr] gap-4'
 
 // 余额已入账（含部分退款、退款处理中）的状态才显示到账金额，其余显示破折号
 const CREDITED_STATUSES: OrderStatus[] = ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUND_REQUESTED', 'REFUND_FAILED']
 
-const rows = computed(() => orders.value.map((order) => ({
-  id: order.id,
-  status: order.status,
-  time: formatDateTimeToMinute(order.created_at),
-  type: order.order_type === 'subscription' ? t('payment.admin.subscriptionOrder') : t('payment.admin.balanceOrder'),
-  method: t('payment.methods.' + order.payment_type, order.payment_type),
-  pay: formatPaymentAmount(order.pay_amount, order.currency),
-  actual: normalizePaymentInfo(order.payment_info) ? currencySymbol(order.currency) + normalizePaymentInfo(order.payment_info)!.actual_amount : '',
-  credited: order.order_type === 'balance' && CREDITED_STATUSES.includes(order.status) ? '+$' + order.amount.toFixed(2) : '',
-})))
+const rows = computed(() => orders.value.map((order) => {
+  const actual = getFloatingPaymentAmount(order.pay_amount, order.payment_info)
+  return {
+    id: order.id,
+    status: order.status,
+    time: formatDateTimeToMinute(order.created_at),
+    type: order.order_type === 'subscription' ? t('payment.admin.subscriptionOrder') : t('payment.admin.balanceOrder'),
+    method: t('payment.methods.' + order.payment_type, order.payment_type),
+    pay: formatPaymentAmount(order.pay_amount, order.currency),
+    actual: actual ? currencySymbol(order.currency) + actual : '',
+    credited: order.order_type === 'balance' && CREDITED_STATUSES.includes(order.status) ? '+$' + order.amount.toFixed(2) : '',
+  }
+}))
 
 onMounted(async () => {
   try {

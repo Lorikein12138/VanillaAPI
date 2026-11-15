@@ -61,17 +61,17 @@
             <span class="font-mono text-gray-900 dark:text-white">#{{ refundTarget.id }}</span>
           </div>
           <div class="mt-2 flex justify-between text-sm">
-            <span class="text-gray-500 dark:text-gray-400">{{ t(refundPaymentInfo ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
+            <span class="text-gray-500 dark:text-gray-400">{{ t(refundFloatingAmount ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
             <span class="text-gray-900 dark:text-white">${{ refundTarget.amount.toFixed(2) }}</span>
           </div>
-          <template v-if="refundPaymentInfo">
+          <template v-if="refundFloatingAmount">
             <div class="mt-2 flex justify-between text-sm" data-test="refund-ordered-amount">
               <span>{{ t('payment.orders.orderedAmount') }}</span>
               <span>{{ currencySymbol(refundTarget.currency) }}{{ refundTarget.pay_amount.toFixed(2) }}</span>
             </div>
             <div class="mt-2 flex justify-between text-sm" data-test="refund-actual-amount">
               <span>{{ t(actualPaymentLabelKey(refundTarget.status)) }}</span>
-              <span>{{ currencySymbol(refundTarget.currency) }}{{ refundPaymentInfo.actual_amount }}</span>
+              <span>{{ currencySymbol(refundTarget.currency) }}{{ refundFloatingAmount }}</span>
             </div>
           </template>
         </div>
@@ -104,7 +104,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OrderTable from '@/components/payment/OrderTable.vue'
-import { actualPaymentLabelKey, normalizePaymentInfo } from '@/components/payment/paymentFlow'
+import { actualPaymentLabelKey, getFloatingPaymentAmount } from '@/components/payment/paymentFlow'
 import { currencySymbol } from '@/components/payment/currency'
 
 const { t } = useI18n()
@@ -118,7 +118,7 @@ const refundEligibleProviders = ref<Set<string>>(new Set())
 const currentFilter = ref('')
 const cancelTargetId = ref<number | null>(null)
 const refundTarget = ref<PaymentOrder | null>(null)
-const refundPaymentInfo = computed(() => normalizePaymentInfo(refundTarget.value?.payment_info))
+const refundFloatingAmount = computed(() => getFloatingPaymentAmount(refundTarget.value?.pay_amount, refundTarget.value?.payment_info))
 const refundReason = ref('')
 const pagination = reactive({ page: 1, page_size: 20, total: 0 })
 

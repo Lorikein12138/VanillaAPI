@@ -168,6 +168,16 @@ describe('versioned QR deadlines and authoritative recovery', () => {
     }
   })
 
+  it('uses the regular paid amount after settlement when actual and ordered amounts match', async () => {
+    mocks.poll.mockResolvedValue(order({ status: 'COMPLETED', payment_info: { ...info, actual_amount: '1.00' } }))
+    const wrapper = open()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(wrapper.text()).toContain('payment.orders.payAmount')
+    expect(wrapper.text()).not.toContain('payment.orders.orderedAmount')
+    expect(wrapper.find('[data-test="actual-paid-amount"]').exists()).toBe(false)
+  })
+
   it('keeps recovery blocked until verified PENDING, then uses verified amount/code/URL rather than cache or stale auth read', async () => {
     let resolve!: (value: { data: PaymentOrder }) => void
     mocks.verify.mockReturnValue(new Promise(done => { resolve = done }))

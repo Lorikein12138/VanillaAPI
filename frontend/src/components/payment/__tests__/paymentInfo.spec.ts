@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CreateOrderResult, PaymentInfo } from '@/types/payment'
 import {
   decidePaymentLaunch,
+  getFloatingPaymentAmount,
   normalizePaymentInfo,
   readPaymentRecoverySnapshot,
   safeCashierUrl,
@@ -64,6 +65,27 @@ describe('versioned payment info validation', () => {
 
   it.each(['https://cashier.example/42', 'http://cashier.example/42?key=a%20b'])('accepts safe absolute URLs: %s', (url) => {
     expect(safeCashierUrl(url)).toBe(url)
+  })
+})
+
+describe('floating payment display', () => {
+  it.each([
+    ['19.5', 19.5, undefined],
+    ['19.50', 19.5, undefined],
+    ['19.50', 19.501, undefined],
+    ['19.5', 19.49, '19.50'],
+    ['19.49', 19.5, '19.49'],
+    ['19.501', 19.5, undefined],
+  ])('compares actual %s and ordered %s at display precision', (actual, ordered, expected) => {
+    expect(getFloatingPaymentAmount(ordered, { ...info, actual_amount: actual })).toBe(expected)
+  })
+
+  it.each([undefined, null, '1.00', 0, 0.001, -1, NaN, Infinity])('requires a valid original amount (%s)', (ordered) => {
+    expect(getFloatingPaymentAmount(ordered, info)).toBeUndefined()
+  })
+
+  it('does not treat legacy orders as floating', () => {
+    expect(getFloatingPaymentAmount(1, undefined)).toBeUndefined()
   })
 })
 

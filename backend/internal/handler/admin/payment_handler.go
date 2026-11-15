@@ -116,6 +116,13 @@ func (h *PaymentHandler) RetryFulfillment(c *gin.Context) {
 	response.Success(c, gin.H{"message": "fulfillment retried"})
 }
 
+// adminPaymentOrderInfo is a read-only amount snapshot for administrators.
+type adminPaymentOrderInfo struct {
+	Version         int    `json:"version"`
+	ActualAmount    string `json:"actual_amount"`
+	RequiresCashier bool   `json:"requires_cashier"`
+}
+
 type AdminPaymentOrderResult struct {
 	ID                  int64      `json:"id"`
 	UserID              int64      `json:"user_id"`
@@ -158,6 +165,8 @@ type AdminPaymentOrderResult struct {
 	SrcURL              *string    `json:"src_url,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
+
+	PaymentInfo *adminPaymentOrderInfo `json:"payment_info,omitempty"`
 }
 
 func sanitizeAdminPaymentOrdersForResponse(orders []*dbent.PaymentOrder) []*AdminPaymentOrderResult {
@@ -173,6 +182,14 @@ func sanitizeAdminPaymentOrdersForResponse(orders []*dbent.PaymentOrder) []*Admi
 func sanitizeAdminPaymentOrderForResponse(order *dbent.PaymentOrder) *AdminPaymentOrderResult {
 	if order == nil {
 		return nil
+	}
+	var paymentInfo *adminPaymentOrderInfo
+	if info := service.PaymentOrderPaymentPresentation(order).PaymentInfo; info != nil && info.ActualAmount != "" {
+		paymentInfo = &adminPaymentOrderInfo{
+			Version:         info.Version,
+			ActualAmount:    info.ActualAmount,
+			RequiresCashier: true,
+		}
 	}
 	return &AdminPaymentOrderResult{
 		ID:                  order.ID,
@@ -216,6 +233,7 @@ func sanitizeAdminPaymentOrderForResponse(order *dbent.PaymentOrder) *AdminPayme
 		SrcURL:              order.SrcURL,
 		CreatedAt:           order.CreatedAt,
 		UpdatedAt:           order.UpdatedAt,
+		PaymentInfo:         paymentInfo,
 	}
 }
 
