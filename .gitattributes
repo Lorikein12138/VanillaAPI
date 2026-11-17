@@ -4,6 +4,7 @@
 /backend/migrations/testdata/baseline_v0219_prior_migrations.sha256 text eol=lf
 /backend/migrations/testdata/baseline_v0220_prior_migrations.sha256 text eol=lf
 /backend/migrations/testdata/baseline_v0221_prior_migrations.sha256 text eol=lf
+/backend/migrations/testdata/baseline_v0222_prior_migrations.sha256 text eol=lf
 
 # 确保所有 SQL 迁移文件使用 LF 换行符
 backend/migrations/*.sql text eol=lf
