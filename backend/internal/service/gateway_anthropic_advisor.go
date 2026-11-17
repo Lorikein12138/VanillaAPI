@@ -145,6 +145,13 @@ func isAnthropicAdvisorBlock(block gjson.Result) bool {
 	}
 }
 
+func (a *anthropicAdvisorResponse) restoreString(c *gin.Context, line, payload string) string {
+	if a == nil {
+		return reverseToolNamesIfPresentString(c, line)
+	}
+	return string(a.restore(c, []byte(line), payload))
+}
+
 // Restore the existing client tool names outside advisor-owned JSON spans.
 // The same code handles a buffered JSON body and a framed SSE data line.
 func (a *anthropicAdvisorResponse) restore(c *gin.Context, data []byte, payload string) []byte {
@@ -268,7 +275,7 @@ func (s *GatewayService) recordAdvisorUsages(ctx context.Context, input *recordU
 			params.AccountRateMultiplier, parent.BillingType, false, cost)
 		if input.APIKey.GroupID != nil {
 			applyAccountStatsCost(ctx, log, s.channelService, s.billingService, input.Account.ID, *input.APIKey.GroupID,
-				model, advisor.requestedModel, tokens, cost.TotalCost, pricingAt, accountStatsLongContextPricingEnabled(nil))
+				model, advisor.requestedModel, tokens, cost.TotalCost, pricingAt, accountStatsLongContextPricingEnabled(nil), 1)
 		}
 		params.Cost = cost
 		if err := s.settleRecordUsage(ctx, log, &params, logOnly, false); err != nil {

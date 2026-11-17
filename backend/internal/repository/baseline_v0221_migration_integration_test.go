@@ -54,7 +54,7 @@ func TestBaselineV0221Migrations(t *testing.T) {
 			require.NoError(t, ApplyMigrations(ctx, fixture.db))
 			after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 			require.NoError(t, err)
-			require.Len(t, after, 309)
+			require.Len(t, after, baselineV0222MigrationCount)
 			for name, entry := range before {
 				require.Equal(t, entry, after[name], "%s checksum/applied_at", name)
 			}

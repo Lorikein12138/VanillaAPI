@@ -41,7 +41,7 @@ func TestBaselineV0219AccountStatsUsesRequestedKeyAndKeepsCacheTokensAndCustomer
 	usageLog := &UsageLog{UpstreamModel: &upstreamModel, ActualCost: 123.45}
 	applyAccountStatsCost(context.Background(), usageLog, channelService, nil,
 		1, 10, upstreamModel, "client-key",
-		UsageTokens{InputTokens: 50, CacheReadTokens: 25}, 999, time.Time{}, true,
+		UsageTokens{InputTokens: 50, CacheReadTokens: 25}, 999, time.Time{}, true, 1,
 	)
 	// Pricing rates are per token for account stats (not the customer bill).
 	require.NotNil(t, usageLog.AccountStatsCost)

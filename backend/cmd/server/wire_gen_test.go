@@ -97,6 +97,7 @@ func newMinimalCleanup(rdb *redis.Client, channelSvc *service.ChannelService, tl
 		emailQueueSvc,
 		billingCacheSvc,
 		&service.UsageRecordWorkerPool{},
+		nil, // usageBillingLanes
 		service.ProvideBalanceNotifyService(nil, nil, nil, nil),
 		service.NewDigestSessionStore(),
 		&service.SubscriptionService{},

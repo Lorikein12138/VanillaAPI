@@ -8,6 +8,7 @@ import (
 
 // resolveAccountStatsCostForModels keeps the client model key separate from the upstream model.
 // Pricing lookup uses the requested key when available; longContextPricingEnabled preserves upstream cost semantics.
+// upstreamPriceFactor applies only to default model pricing.
 func resolveAccountStatsCostForModels(
 	ctx context.Context,
 	channelService *ChannelService,
@@ -22,6 +23,7 @@ func resolveAccountStatsCostForModels(
 	serviceTier string,
 	pricingAt time.Time,
 	longContextPricingEnabled bool,
+	upstreamPriceFactor float64,
 	reasoningEfforts ...string,
 ) *float64 {
 	reasoningEffort := ""
@@ -63,7 +65,11 @@ func resolveAccountStatsCostForModels(
 
 	// 优先级 3：模型定价文件（LiteLLM）默认价格
 	if billingService != nil {
-		return tryModelFilePricing(billingService, model, tokens, serviceTier, pricingAt, longContextPricingEnabled, reasoningEffort)
+		cost := tryModelFilePricing(billingService, model, tokens, serviceTier, pricingAt, longContextPricingEnabled, reasoningEffort)
+		if cost != nil && upstreamPriceFactor > 0 {
+			*cost *= upstreamPriceFactor
+		}
+		return cost
 	}
 
 	return nil
@@ -273,6 +279,7 @@ func applyAccountStatsCost(
 	totalCost float64,
 	pricingAt time.Time,
 	longContextPricingEnabled bool,
+	upstreamPriceFactor float64,
 ) {
 	requestCount := 1
 	if usageLog != nil && usageLog.ImageCount > 0 {
@@ -288,7 +295,7 @@ func applyAccountStatsCost(
 	}
 	usageLog.AccountStatsCost = resolveAccountStatsCostForModels(
 		ctx, cs, bs, accountID, groupID, requestedModel, upstreamModel, tokens,
-		requestCount, totalCost, serviceTier, pricingAt, longContextPricingEnabled, reasoningEffort,
+		requestCount, totalCost, serviceTier, pricingAt, longContextPricingEnabled, upstreamPriceFactor, reasoningEffort,
 	)
 }
 
