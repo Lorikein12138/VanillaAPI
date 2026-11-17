@@ -7327,11 +7327,15 @@
                 <label for="model-plaza-show-official-pricing" class="text-sm font-medium text-gray-700 dark:text-gray-300">
                   {{ t('admin.settings.features.modelPlaza.showOfficialPricing') }}
                 </label>
-                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                <p id="model-plaza-show-official-pricing-hint" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
                   {{ t('admin.settings.features.modelPlaza.showOfficialPricingHint') }}
                 </p>
               </div>
-              <Toggle id="model-plaza-show-official-pricing" v-model="form.model_plaza_show_official_pricing" />
+              <Toggle
+                id="model-plaza-show-official-pricing"
+                aria-describedby="model-plaza-show-official-pricing-hint"
+                v-model="form.model_plaza_show_official_pricing"
+              />
             </div>
 
             <div v-if="form.model_plaza_enabled">
@@ -7937,19 +7941,25 @@
                 </div>
                 <Toggle v-model="form.payment_enabled" />
               </div>
-              <div class="flex items-center justify-between gap-4">
-                <div>
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
                   <label for="site-display-currency" class="font-medium text-gray-900 dark:text-white">
                     {{ t("admin.settings.payment.siteDisplayCurrency") }}
                   </label>
-                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                  <p id="site-display-currency-hint" class="text-sm text-gray-500 dark:text-gray-400">
                     {{ t("admin.settings.payment.siteDisplayCurrencyHint") }}
                   </p>
                 </div>
-                <select id="site-display-currency" v-model="form.site_display_currency" class="input w-auto">
-                  <option value="USD">USD ($)</option>
-                  <option value="CNY">CNY (¥)</option>
-                </select>
+                <div class="w-full shrink-0 sm:w-56">
+                  <Select
+                    id="site-display-currency"
+                    :aria-label="t('admin.settings.payment.siteDisplayCurrency')"
+                    aria-describedby="site-display-currency-hint"
+                    :modelValue="form.site_display_currency"
+                    :options="siteDisplayCurrencyOptions"
+                    @update:modelValue="form.site_display_currency = $event as SystemSettings['site_display_currency']"
+                  />
+                </div>
               </div>
               <template v-if="form.payment_enabled">
                 <!-- Row 1: Product name -->
@@ -11309,6 +11319,11 @@ function findDuplicateDefaultSubscription(
     return false;
   });
 }
+
+const siteDisplayCurrencyOptions: SelectOption[] = [
+  { value: "USD", label: "USD ($)" },
+  { value: "CNY", label: "CNY (¥)" },
+];
 
 // 站点类型：由 subscription_enabled 与 payment_balance_disabled 两个开关派生的单选，
 // 保存时同时写回两者，避免出现「既无充值也无订阅」的组合。

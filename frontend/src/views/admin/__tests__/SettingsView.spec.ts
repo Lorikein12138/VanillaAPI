@@ -322,7 +322,8 @@ const SelectStub = defineComponent({
     },
   },
   emits: ["update:modelValue", "change"],
-  setup(props, { emit }) {
+  inheritAttrs: false,
+  setup(props, { attrs, emit }) {
     const onChange = (event: Event) => {
       const target = event.target as HTMLSelectElement;
       emit("update:modelValue", target.value);
@@ -337,7 +338,8 @@ const SelectStub = defineComponent({
       h(
         "select",
         {
-          class: "select-stub",
+          ...attrs,
+          class: ["select-stub", attrs.class],
           value: props.modelValue ?? "",
           "data-placeholder": props.placeholder,
           onChange,
@@ -804,12 +806,24 @@ describe("admin SettingsView payment visible method controls", () => {
 
     await openFeaturesTab(wrapper);
     const toggle = wrapper.get<HTMLInputElement>("#model-plaza-show-official-pricing");
+    expect(toggle.attributes("aria-describedby")).toBe("model-plaza-show-official-pricing-hint");
+    expect(wrapper.get("#model-plaza-show-official-pricing-hint").exists()).toBe(true);
     expect(toggle.element.checked).toBe(false);
     await toggle.setValue(true);
 
     await openPaymentTab(wrapper);
     const currency = wrapper.get<HTMLSelectElement>("#site-display-currency");
+    expect(currency.classes()).toContain("select-stub");
+    expect(Array.from(currency.element.options, (option) => [option.value, option.text])).toEqual([
+      ["USD", "USD ($)"],
+      ["CNY", "CNY (¥)"],
+    ]);
+    expect(currency.attributes("aria-label")).toBe(
+      wrapper.get('label[for="site-display-currency"]').text(),
+    );
+    expect(currency.attributes("aria-describedby")).toBe("site-display-currency-hint");
     expect(currency.element.value).toBe("CNY");
+    expect(wrapper.get("#site-display-currency-hint").exists()).toBe(true);
     expect(wrapper.find('[data-testid="payment-quick-amounts-editor"]').exists()).toBe(false);
     await currency.setValue("USD");
     await wrapper.get("form").trigger("submit.prevent");
@@ -825,6 +839,16 @@ describe("admin SettingsView payment visible method controls", () => {
     await openFeaturesTab(wrapper);
     expect(wrapper.get<HTMLInputElement>("#model-plaza-show-official-pricing").element.checked).toBe(false);
     wrapper.unmount();
+
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      model_plaza_enabled: false,
+    });
+    const plazaDisabled = mountView();
+    await flushPromises();
+    await openFeaturesTab(plazaDisabled);
+    expect(plazaDisabled.find("#model-plaza-show-official-pricing").exists()).toBe(false);
+    plazaDisabled.unmount();
   });
 
   it("loads and saves the open button visibility for each custom menu", async () => {
@@ -1266,6 +1290,12 @@ describe("admin SettingsView payment visible method controls", () => {
     const legacy = mountView();
     await flushPromises();
     await openPaymentTab(legacy);
+    const currency = legacy.get<HTMLSelectElement>("#site-display-currency");
+    expect(Array.from(currency.element.options, (option) => [option.value, option.text])).toEqual([
+      ["USD", "USD ($)"],
+      ["CNY", "CNY (¥)"],
+    ]);
+    expect(currency.element.value).toBe("USD");
     expect(legacy.findAll('[data-testid="payment-quick-amount-row"]')).toHaveLength(9);
     legacy.unmount();
 
