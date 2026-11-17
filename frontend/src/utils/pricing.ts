@@ -1,5 +1,8 @@
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
+import type { UserPricingInterval } from '@/api/channels'
+
 /**
- * formatScaled formats a per-token (or per-request) USD price scaled by `scale`.
+ * formatScaled formats a per-token (or per-request) price scaled by `scale`.
  *
  *   formatScaled(0.000003, 1_000_000)    → "$3"      // per 1M tokens
  *   formatScaled(0.5,        1)          → "$0.5"    // per request
@@ -8,22 +11,28 @@
  *   formatScaled(1.25e-8,  1_000_000, 2) → "$0.0125" // longer decimals kept as-is
  *
  * Uses toPrecision(10) then strips trailing zeros to avoid IEEE 754 display noise.
- * `minFractionDigits` pads the result back up to a minimum number of decimals.
+ * A number in the third argument pads to that many decimals. Pass a symbol there
+ * to override the site currency, with optional padding in the fourth argument.
  */
-export function formatScaled(value: number | null, scale: number, minFractionDigits = 0): string {
+export function formatScaled(
+  value: number | null,
+  scale: number,
+  symbolOrMinFractionDigits?: string | number,
+  minFractionDigits = 0
+): string {
   if (value == null) return '-'
+  const symbol = typeof symbolOrMinFractionDigits === 'string' ? symbolOrMinFractionDigits : getSiteCurrencySymbol()
+  const fractionDigits = typeof symbolOrMinFractionDigits === 'number' ? symbolOrMinFractionDigits : minFractionDigits
   let s = Number((value * scale).toPrecision(10)).toString()
-  if (minFractionDigits > 0 && !s.includes('e')) {
+  if (fractionDigits > 0 && !s.includes('e')) {
     const dot = s.indexOf('.')
     const digits = dot === -1 ? 0 : s.length - dot - 1
-    if (digits < minFractionDigits) {
-      s = (dot === -1 ? `${s}.` : s) + '0'.repeat(minFractionDigits - digits)
+    if (digits < fractionDigits) {
+      s = (dot === -1 ? `${s}.` : s) + '0'.repeat(fractionDigits - digits)
     }
   }
-  return `$${s}`
+  return `${symbol}${s}`
 }
-
-import type { UserPricingInterval } from '@/api/channels'
 
 type TokenPrices = Pick<UserPricingInterval, 'input_price' | 'output_price' | 'cache_write_price' | 'cache_write_1h_price' | 'cache_write_12h_price' | 'cache_read_price'>
 

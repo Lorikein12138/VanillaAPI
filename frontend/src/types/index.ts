@@ -208,6 +208,8 @@ export interface LoginAgreementDocument {
   content_md: string
 }
 
+export type SiteDisplayCurrency = 'USD' | 'CNY'
+
 export interface PublicSettings {
   registration_enabled: boolean
   email_verify_enabled: boolean
@@ -233,6 +235,7 @@ export interface PublicSettings {
   aliyun_captcha_prefix?: string
   aliyun_captcha_region?: string
   site_name: string
+  site_display_currency: SiteDisplayCurrency
   site_logo: string
   site_subtitle: string
   api_base_url: string
@@ -283,6 +286,7 @@ export interface PublicSettings {
   payment_balance_disabled: boolean
   model_plaza_enabled: boolean
   model_plaza_require_auth: boolean
+  model_plaza_show_official_pricing: boolean
   plugin_management_enabled: boolean
   service_quota_enabled: boolean
   affiliate_enabled: boolean

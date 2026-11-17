@@ -1,3 +1,4 @@
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 /**
  * 格式化工具函数
  * 参考 CRS 项目的 format.js 实现
@@ -55,23 +56,29 @@ export function formatNumber(num: number | null | undefined): string {
 /**
  * 格式化货币金额
  * @param amount 金额
- * @param currency 货币代码，默认 USD
+ * @param currency 指定原币种。省略时使用站内显示符号
  * @returns 格式化后的字符串，如 "$1.25"
  */
-export function formatCurrency(amount: number | null | undefined, currency: string = 'USD'): string {
-  if (amount === null || amount === undefined) return '$0.00'
+export function formatCurrency(amount: number | null | undefined, currency?: string): string {
+  if (amount === null || amount === undefined) {
+    return currency === undefined ? getSiteCurrencySymbol() + '0.00' : '$0.00'
+  }
 
   const locale = getLocale()
 
   // For very small amounts, show more decimals
   const fractionDigits = amount > 0 && amount < 0.01 ? 6 : 2
 
-  return new Intl.NumberFormat(locale, {
+  const formatter = new Intl.NumberFormat(locale, {
     style: 'currency',
-    currency: currency,
+    currency: currency ?? 'USD',
     minimumFractionDigits: fractionDigits,
     maximumFractionDigits: fractionDigits
-  }).format(amount)
+  })
+  if (currency !== undefined) return formatter.format(amount)
+
+  const symbol = getSiteCurrencySymbol()
+  return formatter.formatToParts(amount).map((part) => part.type === 'currency' ? symbol : part.value).join('')
 }
 
 /**

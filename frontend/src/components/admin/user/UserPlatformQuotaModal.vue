@@ -13,7 +13,7 @@
         {{ t('admin.users.platformQuota.subscriptionWarning') }}
       </div>
       <p class="text-sm text-gray-600 dark:text-gray-400">
-        {{ t('admin.users.platformQuota.subtitle', { email: user.email }) }}
+        {{ t('admin.users.platformQuota.subtitle', { email: user.email, symbol: getSiteCurrencySymbol() }) }}
       </p>
       <div v-if="loading" class="py-10 text-center text-gray-500">{{ t('common.loading') }}</div>
       <div v-else class="overflow-x-auto">
@@ -21,9 +21,9 @@
           <thead>
             <tr class="border-b border-gray-200 text-gray-700 dark:border-dark-700 dark:text-dark-300 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
               <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.platform') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.daily') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.weekly') }}</th>
-              <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.monthly') }}</th>
+              <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.daily', { symbol: getSiteCurrencySymbol() }) }}</th>
+              <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.weekly', { symbol: getSiteCurrencySymbol() }) }}</th>
+              <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.monthly', { symbol: getSiteCurrencySymbol() }) }}</th>
               <th class="px-3 py-2 text-left font-medium">{{ t('admin.users.platformQuota.columns.usage') }}</th>
             </tr>
           </thead>
@@ -115,6 +115,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, reactive, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -192,7 +193,7 @@ function normalize(items: PlatformQuotaItem[]): QuotaRow[] {
 
 function formatUsage(n: number): string {
   if (n == null || Number.isNaN(n)) return '-'
-  return n.toFixed(2)
+  return getSiteCurrencySymbol() + n.toFixed(2)
 }
 
 async function load() {

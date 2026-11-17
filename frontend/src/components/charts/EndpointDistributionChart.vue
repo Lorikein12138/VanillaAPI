@@ -108,13 +108,13 @@
                   {{ formatTokens(item.total_tokens) }}
                 </td>
                 <td class="py-1.5 text-right text-green-600 dark:text-green-400">
-                  ${{ formatCost(item.actual_cost) }}
+                  {{ getSiteCurrencySymbol() }}{{ formatCost(item.actual_cost) }}
                 </td>
                 <td v-if="showAccountCost" class="py-1.5 text-right text-orange-500 dark:text-orange-400">
-                  ${{ formatCost(item.account_cost ?? 0) }}
+                  {{ getSiteCurrencySymbol() }}{{ formatCost(item.account_cost ?? 0) }}
                 </td>
                 <td class="py-1.5 text-right text-gray-400 dark:text-gray-500">
-                  ${{ formatCost(item.cost) }}
+                  {{ getSiteCurrencySymbol() }}{{ formatCost(item.cost) }}
                 </td>
               </tr>
               <tr v-if="expandedKey === item.endpoint">
@@ -138,6 +138,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js'
@@ -262,7 +263,7 @@ const chartData = computed(() => {
   }
 })
 
-const doughnutOptions = computed(() => ({
+const doughnutOptionsForCurrency = (symbol: string) => ({
   responsive: true,
   maintainAspectRatio: false,
   plugins: {
@@ -276,14 +277,16 @@ const doughnutOptions = computed(() => ({
           const total = context.dataset.data.reduce((a: number, b: number) => a + b, 0)
           const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0'
           const formattedValue = props.metric === 'actual_cost'
-            ? `$${formatCost(value)}`
+            ? `${symbol}${formatCost(value)}`
             : formatTokens(value)
           return `${context.label}: ${formattedValue} (${percentage}%)`
         }
       }
     }
   }
-}))
+})
+
+const doughnutOptions = computed(() => doughnutOptionsForCurrency(getSiteCurrencySymbol()))
 
 const formatTokens = (value: number): string => {
   if (value >= 1_000_000_000) {

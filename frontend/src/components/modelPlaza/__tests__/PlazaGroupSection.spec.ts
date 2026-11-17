@@ -138,6 +138,32 @@ function rateText(wrapper: ReturnType<typeof mountRealSection>): string {
 const NOTE = 'modelPlaza.detail.longContextDisabledNote'
 
 describe('PlazaGroupSection 长上下文说明', () => {
+  it('removes official pricing columns, headings, hints and sort order when switched off', async () => {
+    const expensive = ladderModel(2)
+    expensive.name = 'alpha'
+    const cheaper = tokenModel('zulu', 'openai')
+    const wrapper = mountRealSection(group({
+      long_context_pricing_enabled: false,
+      models: [expensive, cheaper]
+    }))
+
+    expect(wrapper.findAll('colgroup col')).toHaveLength(8)
+    expect(wrapper.findAll('thead tr:last-child th')).toHaveLength(6)
+    expect(wrapper.findAll('tbody tr').map(row => row.findAll('td').length)).toEqual([8, 8])
+    expect(wrapper.text()).toContain('modelPlaza.table.officialPrice')
+    expect(wrapper.text()).toContain(NOTE)
+    expect(rowNames(wrapper)).toEqual(['alpha', 'zulu'])
+
+    await wrapper.setProps({ showOfficialPricing: false })
+    expect(wrapper.findAll('colgroup col')).toHaveLength(5)
+    expect(wrapper.findAll('thead tr:last-child th')).toHaveLength(3)
+    expect(wrapper.findAll('tbody tr').map(row => row.findAll('td').length)).toEqual([5, 5])
+    expect(wrapper.text()).not.toContain('modelPlaza.table.officialPrice')
+    expect(wrapper.text()).not.toContain(NOTE)
+    expect(rowNames(wrapper)).toEqual(['zulu', 'alpha'])
+    wrapper.unmount()
+  })
+
   it('passes video-specific rates to the pricing table', () => {
     const wrapper = mountSection(group({ video_rate_independent: true, video_rate_multiplier: 0 }))
     expect(wrapper.findComponent(PlazaModelPricingTable).props()).toMatchObject({

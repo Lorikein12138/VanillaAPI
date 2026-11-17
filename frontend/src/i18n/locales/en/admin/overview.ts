@@ -50,7 +50,7 @@ export default {
       accountCost: 'Cost',
       noDataAvailable: 'No data available',
       recentUsage: 'Recent Usage',
-      actualSpending: 'Actual spending ($)',
+      actualSpending: 'Actual spending ({symbol})',
       viewModelDistribution: 'Model Distribution',
       viewSpendingRanking: 'User Spending Ranking',
       spendingRankingTitle: 'User Spending Ranking',
@@ -810,12 +810,12 @@ export default {
       platformQuota: {
         menuItem: 'Platform Quotas',
         title: 'Platform Quotas',
-        subtitle: 'Configure daily / weekly / monthly USD usage limits for each upstream platform for user {email}',
+        subtitle: 'Configure daily / weekly / monthly usage limits ({symbol}) for each upstream platform for user {email}',
         columns: {
           platform: 'Platform',
-          daily: 'Daily (USD)',
-          weekly: 'Weekly (USD)',
-          monthly: 'Monthly (USD, 30-day rolling)',
+          daily: 'Daily ({symbol})',
+          weekly: 'Weekly ({symbol})',
+          monthly: 'Monthly ({symbol}, 30-day rolling)',
           usage: 'Current Usage',
         },
         placeholder: 'unlimited',
@@ -1069,9 +1069,9 @@ export default {
         typeNotEditable: 'Billing type cannot be changed after group creation.',
         standard: 'Standard (Balance)',
         subscription: 'Subscription (Quota)',
-        dailyLimit: 'Daily Limit (USD)',
-        weeklyLimit: 'Weekly Limit (USD)',
-        monthlyLimit: 'Monthly Limit (USD)',
+        dailyLimit: 'Daily Limit ({symbol})',
+        weeklyLimit: 'Weekly Limit ({symbol})',
+        monthlyLimit: 'Monthly Limit ({symbol})',
         defaultValidityDays: 'Default Validity (Days)',
         validityHint: 'Number of days the subscription is valid when assigned to a user',
         noLimit: 'No limit'
@@ -1096,7 +1096,7 @@ export default {
       videoPricing: {
         title: 'Video Generation Pricing',
         description:
-          'Configure Grok video generation prices in USD per second of output video. Leave empty to use the default per-second rates (grok-imagine-video: $0.05/s 480p, $0.07/s 720p; video-1.5: $0.08/s 480p, $0.14/s 720p, $0.25/s 1080p).',
+          'Configure Grok video generation prices in {symbol} per second of output video. Leave empty to use the default per-second rates (grok-imagine-video: $0.05/s 480p, $0.07/s 720p; video-1.5: $0.08/s 480p, $0.14/s 720p, $0.25/s 1080p).',
         modelOverridesTitle: 'Per-model video price overrides',
         modelOverridesDescription: 'Each populated cell overrides the flat resolution price for that model family. Preview and legacy aliases for video-1.5 use the same family; empty cells fall back to the flat resolution price.',
         independentMultiplier: 'Use independent video multiplier',
@@ -1108,8 +1108,8 @@ export default {
       },
       explicitPricing: {
         title: 'Grok Search & Voice Pricing',
-        description: 'Optional per-group prices for web_search (per 1k calls) and Voice realtime / TTS / STT (USD). Leave empty if unused.',
-        searchPricePer1k: 'Search price per 1k calls (USD)',
+        description: 'Optional per-group prices for web_search (per 1k calls) and Voice realtime / TTS / STT ({symbol}). Leave empty if unused.',
+        searchPricePer1k: 'Search price per 1k calls ({symbol})',
         pricePlaceholder: 'optional'
       },
       modelPricing: {
@@ -1122,16 +1122,16 @@ export default {
       voicePricing: {
         title: 'Grok Voice Pricing',
         description: 'Optional per-group prices for Voice realtime / TTS / STT (USD). Leave empty to leave unpriced.',
-        audioRealtimePerMin: 'Realtime price per minute (USD)',
-        audioTtsPerMillionChars: 'TTS price per million chars (USD)',
-        audioSttPerHour: 'STT price per hour (USD)',
+        audioRealtimePerMin: 'Realtime price per minute ({symbol})',
+        audioTtsPerMillionChars: 'TTS price per million chars ({symbol})',
+        audioSttPerHour: 'STT price per hour ({symbol})',
         pricePlaceholder: 'optional'
       },
       webSearchPricing: {
         title: 'Codex Web Search Pricing',
-        pricePerCall: 'Price per search call (USD)',
+        pricePerCall: 'Price per search call ({symbol})',
         pricePerCallHint:
-          'Leave empty to use the default $0.01 per call (official pricing: $10 per 1,000 calls); 0 means free. The group rate multiplier is applied on top.',
+          'Leave empty to use the default {symbol}0.01 per call (official pricing: $10 per 1,000 calls); 0 means free. The group rate multiplier is applied on top.',
         finalPricePreview: 'Per-call price after current multiplier: {price}'
       },
       peakRate: {

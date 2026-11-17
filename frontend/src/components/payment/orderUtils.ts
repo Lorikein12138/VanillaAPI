@@ -3,6 +3,9 @@
  * Used by AdminOrderDetail, AdminOrderTable, AdminRefundDialog, AdminOrdersView, etc.
  */
 
+import type { PaymentOrder } from '@/types/payment'
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
+
 const STATUS_BADGE_MAP: Record<string, string> = {
   PENDING: 'badge-warning',
   PAID: 'badge-info',
@@ -27,6 +30,11 @@ export function statusBadgeClass(status: string): string {
 
 export function canRefund(status: string): boolean {
   return REFUNDABLE_STATUSES.includes(status)
+}
+
+export function orderCreditSymbol(orderType?: PaymentOrder['order_type']): string {
+  // Order responses store the gateway currency but do not snapshot the subscription plan currency.
+  return orderType === 'balance' ? getSiteCurrencySymbol() : ''
 }
 
 export function formatOrderDateTime(dateStr: string): string {

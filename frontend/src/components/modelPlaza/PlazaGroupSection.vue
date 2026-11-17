@@ -56,6 +56,7 @@
       <PlazaModelPricingTable
         v-if="group.models.length > 0"
         :models="group.models"
+        :show-official-pricing="showOfficialPricing"
         :platform="group.platform"
         :rate-multiplier="group.rate_multiplier"
         :user-rate-multiplier="group.user_rate_multiplier ?? null"
@@ -85,9 +86,10 @@ import { platformBorderStrongClass } from '@/utils/platformColors'
 import { hasPeakRate, formatPeakRateWindow, serverTimezoneLabel } from '@/utils/peak-rate'
 import { useAppStore } from '@/stores/app'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   group: ModelPlazaGroup
-}>()
+  showOfficialPricing?: boolean
+}>(), { showOfficialPricing: true })
 
 const { t } = useI18n()
 const appStore = useAppStore()
@@ -114,7 +116,7 @@ const peakNote = computed(() => {
  * 官方阶梯仅供参考。字段缺失(旧后端)不提示。
  */
 const longContextNote = computed(() => {
-  if (props.group.long_context_pricing_enabled !== false) return ''
+  if (!props.showOfficialPricing || props.group.long_context_pricing_enabled !== false) return ''
   const hasOfficialLadder = props.group.models.some(
     (m) => (m.official_pricing?.intervals?.length ?? 0) > 1
   )

@@ -69,13 +69,13 @@
               </div>
             </div>
             <p class="text-2xl font-serif font-normal text-gray-950 dark:text-dark-50">
-              ${{ formatCost(stats.summary.total_cost) }}
+              {{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.total_cost) }}
             </p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.stats.accumulatedCost') }}
               <span class="text-gray-400 dark:text-gray-500">
-                ({{ t('usage.userBilled') }}: ${{ formatCost(stats.summary.total_user_cost) }} ·
-                {{ t('admin.accounts.stats.standardCost') }}: ${{
+                ({{ t('usage.userBilled') }}: {{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.total_user_cost) }} ·
+                {{ t('admin.accounts.stats.standardCost') }}: {{ getSiteCurrencySymbol() }}{{
                   formatCost(stats.summary.total_standard_cost)
                 }})
               </span>
@@ -120,7 +120,7 @@
               </div>
             </div>
             <p class="text-2xl font-serif font-normal text-gray-950 dark:text-dark-50">
-              ${{ formatCost(stats.summary.avg_daily_cost) }}
+              {{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.avg_daily_cost) }}
             </p>
              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
               {{
@@ -129,7 +129,7 @@
                 })
               }}
               <span class="text-gray-400 dark:text-gray-500">
-                ({{ t('usage.userBilled') }}: ${{ formatCost(stats.summary.avg_daily_user_cost) }})
+                ({{ t('usage.userBilled') }}: {{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.avg_daily_user_cost) }})
               </span>
             </p>
           </div>
@@ -195,13 +195,13 @@
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.accountBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.today?.cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.today?.cost || 0) }}</span
                 >
               </div>
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.userBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.today?.user_cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.today?.user_cost || 0) }}</span
                 >
               </div>
               <div class="flex items-center justify-between">
@@ -250,13 +250,13 @@
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.accountBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-950 dark:text-dark-50"
-                  >${{ formatCost(stats.summary.highest_cost_day?.cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.highest_cost_day?.cost || 0) }}</span
                 >
               </div>
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.userBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.highest_cost_day?.user_cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.highest_cost_day?.user_cost || 0) }}</span
                 >
               </div>
               <div class="flex items-center justify-between">
@@ -305,13 +305,13 @@
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.accountBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.highest_request_day?.cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.highest_request_day?.cost || 0) }}</span
                 >
               </div>
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.userBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.highest_request_day?.user_cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.highest_request_day?.user_cost || 0) }}</span
                 >
               </div>
             </div>
@@ -415,13 +415,13 @@
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.accountBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.today?.cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.today?.cost || 0) }}</span
                 >
               </div>
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.userBilled') }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white"
-                  >${{ formatCost(stats.summary.today?.user_cost || 0) }}</span
+                  >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.summary.today?.user_cost || 0) }}</span
                 >
               </div>
             </div>
@@ -484,6 +484,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
@@ -550,7 +551,7 @@ const trendChartData = computed(() => {
     labels: stats.value.history.map((h) => h.label),
     datasets: [
       {
-        label: t('usage.accountBilled') + ' (USD)',
+        label: t('usage.accountBilled') + ` (${getSiteCurrencySymbol()})`,
         data: stats.value.history.map((h) => h.actual_cost),
         borderColor: '#628ab9',
         backgroundColor: 'rgba(98, 138, 185, 0.1)',
@@ -559,7 +560,7 @@ const trendChartData = computed(() => {
         yAxisID: 'y'
       },
       {
-        label: t('usage.userBilled') + ' (USD)',
+        label: t('usage.userBilled') + ` (${getSiteCurrencySymbol()})`,
         data: stats.value.history.map((h) => h.user_cost),
         borderColor: '#7aaa8f',
         backgroundColor: 'rgba(122, 170, 143, 0.08)',
@@ -582,7 +583,7 @@ const trendChartData = computed(() => {
 })
 
 // Line chart options with dual Y-axis
-const lineChartOptions = computed(() => ({
+const lineChartOptionsForCurrency = (symbol: string) => ({
   responsive: true,
   maintainAspectRatio: false,
   interaction: {
@@ -607,8 +608,8 @@ const lineChartOptions = computed(() => ({
         label: (context: any) => {
           const label = context.dataset.label || ''
           const value = context.raw
-          if (label.includes('USD')) {
-            return `${label}: $${formatCost(value)}`
+          if (context.dataset.yAxisID === 'y') {
+            return `${label}: ${symbol}${formatCost(value)}`
           }
           return `${label}: ${formatNumber(value)}`
         }
@@ -641,11 +642,11 @@ const lineChartOptions = computed(() => ({
         font: {
           size: 10
         },
-        callback: (value: string | number) => '$' + formatCost(Number(value))
+        callback: (value: string | number) => symbol + formatCost(Number(value))
       },
       title: {
         display: true,
-        text: t('usage.accountBilled') + ' (USD)',
+        text: t('usage.accountBilled') + ` (${symbol})`,
         color: '#628ab9',
         font: {
           size: 11
@@ -676,7 +677,9 @@ const lineChartOptions = computed(() => ({
       }
     }
   }
-}))
+})
+
+const lineChartOptions = computed(() => lineChartOptionsForCurrency(getSiteCurrencySymbol()))
 
 // Load stats when modal opens
 watch(

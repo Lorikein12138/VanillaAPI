@@ -1,8 +1,10 @@
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createPinia } from "pinia";
+import { nextTick } from "vue";
 import { createI18n } from "vue-i18n";
 import type { SubscriptionPlan } from "@/types/payment";
+import { setSiteDisplayCurrency } from "@/utils/siteCurrency";
 import SubscriptionPlanCard from "../SubscriptionPlanCard.vue";
 
 const i18n = createI18n({
@@ -52,6 +54,17 @@ const mountPlanCard = (groupPlatform: string, overrides: Partial<SubscriptionPla
   });
 
 describe("SubscriptionPlanCard", () => {
+  afterEach(() => setSiteDisplayCurrency("USD"));
+
+  it("updates site quota without relabeling the explicit plan price", async () => {
+    const wrapper = mountPlanCard("openai", { daily_limit_usd: 2.125, price: 10, currency: "EUR" });
+    expect(wrapper.text()).toContain("$2.125");
+    setSiteDisplayCurrency("CNY");
+    await nextTick();
+    expect(wrapper.text()).toContain("¥2.125");
+    expect(wrapper.text()).toContain("€10EUR");
+    wrapper.unmount();
+  });
   it("does not show Antigravity model scopes for OpenAI plans", () => {
     const text = mountPlanCard("openai").text();
 

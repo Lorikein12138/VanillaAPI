@@ -110,12 +110,12 @@ func NewModelPlazaService(
 //   - 同分组同名模型「先见者胜」，仅当已存条目无定价而新条目有定价时升级替换；
 //   - token 模型的单价与阶梯按实收口径合成（见 ResolveContextPricingSchedule），
 //     图片计费模型的档位价按实收口径合成（见 plazaImageDisplayPricing）；
-//   - 每个模型附带官方参考价（查不到为 nil）；
+//   - 开启展示时附带官方参考价（查不到为 nil）；
 //   - 白名单过滤后只返回 Models 非空的分组；分组按 RateMultiplier 升序（同倍率按名称），
 //     组内模型按名称排序。
 //
 // 可见性过滤（专属分组）不在此层做，由 handler 按登录态裁剪。
-func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error) {
+func (s *ModelPlazaService) ListGroups(ctx context.Context, showOfficialPricing bool) ([]PlazaGroup, error) {
 	channels, err := s.channelRepo.ListAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
@@ -233,7 +233,10 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		}
 	}
 
-	officialMemo := make(map[string]*PlazaOfficialPricing)
+	var officialMemo map[string]*PlazaOfficialPricing
+	if showOfficialPricing {
+		officialMemo = make(map[string]*PlazaOfficialPricing)
+	}
 	out := make([]PlazaGroup, 0, len(order))
 	for _, gid := range order {
 		pg := byGroup[gid]
@@ -248,8 +251,11 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 		})
 		g := groupEnt[gid]
 		for j := range pg.Models {
+			// The paid price can use catalog prices as its billing base.
 			s.fillDisplayPricing(ctx, &pg.Models[j], g)
-			pg.Models[j].OfficialPricing = s.lookupOfficialPricing(ctx, pg.Models[j].Name, officialMemo)
+			if showOfficialPricing {
+				pg.Models[j].OfficialPricing = s.lookupOfficialPricing(ctx, pg.Models[j].Name, officialMemo)
+			}
 		}
 		out = append(out, *pg)
 	}

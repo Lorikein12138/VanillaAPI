@@ -785,6 +785,48 @@ describe("admin SettingsView payment visible method controls", () => {
     adminSettingsFetch.mockResolvedValue(undefined);
   });
 
+  it("loads, submits and reflects both display settings when payment is disabled", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      payment_enabled: false,
+      model_plaza_enabled: true,
+      model_plaza_show_official_pricing: false,
+      site_display_currency: "CNY",
+    });
+    updateSettings.mockImplementationOnce(async (payload) => ({
+      ...baseSettingsResponse,
+      ...payload,
+      model_plaza_show_official_pricing: false,
+      site_display_currency: "CNY",
+    }));
+    const wrapper = mountView();
+    await flushPromises();
+
+    await openFeaturesTab(wrapper);
+    const toggle = wrapper.get<HTMLInputElement>("#model-plaza-show-official-pricing");
+    expect(toggle.element.checked).toBe(false);
+    await toggle.setValue(true);
+
+    await openPaymentTab(wrapper);
+    const currency = wrapper.get<HTMLSelectElement>("#site-display-currency");
+    expect(currency.element.value).toBe("CNY");
+    expect(wrapper.find('[data-testid="payment-quick-amounts-editor"]').exists()).toBe(false);
+    await currency.setValue("USD");
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      payment_enabled: false,
+      model_plaza_show_official_pricing: true,
+      site_display_currency: "USD",
+    }));
+    expect(fetchPublicSettings).toHaveBeenCalledWith(true);
+    expect(currency.element.value).toBe("CNY");
+    await openFeaturesTab(wrapper);
+    expect(wrapper.get<HTMLInputElement>("#model-plaza-show-official-pricing").element.checked).toBe(false);
+    wrapper.unmount();
+  });
+
   it("loads and saves the open button visibility for each custom menu", async () => {
     const menuItems = [
       { id: "docs", label: "Docs", url: "https://example.com/docs", icon_svg: "", visibility: "user", sort_order: 0 },

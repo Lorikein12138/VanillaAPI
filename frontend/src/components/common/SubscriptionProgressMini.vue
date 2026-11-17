@@ -178,6 +178,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
@@ -258,7 +259,7 @@ function getProgressWidth(used: number | undefined, limit: number | null | undef
 function formatUsage(used: number | undefined, limit: number | null | undefined): string {
   const usedValue = (used || 0).toFixed(2)
   const limitValue = limit?.toFixed(2) || '∞'
-  return `$${usedValue}/$${limitValue}`
+  return `${getSiteCurrencySymbol()}${usedValue}/${getSiteCurrencySymbol()}${limitValue}`
 }
 
 function formatDaysRemaining(expiresAt: string): string {

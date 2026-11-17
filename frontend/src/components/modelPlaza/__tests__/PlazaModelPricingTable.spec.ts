@@ -1,14 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import PlazaModelPricingTable from '../PlazaModelPricingTable.vue'
 import type { PlazaModel } from '@/api/modelPlaza'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: (key: string, params?: { currency?: string }) =>
+        key === 'modelPlaza.table.unitPerMillion' ? `${params?.currency} / 1M tokens` : key
     })
   }
 })
@@ -58,6 +61,30 @@ function mountTable(
 }
 
 describe('PlazaModelPricingTable', () => {
+  it('reactively uses CNY for site units and prices while preserving official USD and price precision', async () => {
+    const model = tokenModel()
+    model.pricing!.input_price = 1.25e-8
+    const wrapper = mountTable([model], 1)
+    try {
+      expect(wrapper.findAll('tbody td')[1].text()).toBe('$0.0125')
+
+      setSiteDisplayCurrency('CNY')
+      await nextTick()
+
+      const cells = wrapper.findAll('tbody td')
+      expect(cells[1].text()).toBe('¥0.0125')
+      expect(cells[2].text()).toBe('¥15.00')
+      expect(cells[4].text()).toBe('$3.00')
+      expect(wrapper.findAll('thead tr:first-child th[colspan]').map(header => header.text())).toEqual([
+        'modelPlaza.table.paidPrice ¥ / 1M tokens',
+        'modelPlaza.table.officialPrice $ / 1M tokens'
+      ])
+    } finally {
+      wrapper.unmount()
+      setSiteDisplayCurrency('USD')
+    }
+  })
+
   it('uses the client model key as the displayed model name', () => {
     const wrapper = mountTable([tokenModel({ name: 'client-name' })], 1)
     expect(wrapper.find('tbody tr').text()).toContain('client-name')
@@ -933,7 +960,7 @@ describe('PlazaModelPricingTable Max 与 AG thinking 分组响应', () => {
 
   it('token 行单位保持每百万 token，thinking 行不出现按次或按秒单位', () => {
     const text = mountTable([maxBase(), agThinking()], 1).text()
-    expect(text).toContain('modelPlaza.table.unitPerMillion')
+    expect(text).toContain('$ / 1M tokens')
     expect(text).not.toContain('modelPlaza.table.perUnitRequest')
     expect(text).not.toContain('modelPlaza.table.perUnitSecond')
   })

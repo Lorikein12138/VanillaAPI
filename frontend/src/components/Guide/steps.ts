@@ -1,3 +1,4 @@
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { DriveStep } from 'driver.js'
 
 /**
@@ -6,7 +7,7 @@ import { DriveStep } from 'driver.js'
  * @param t 国际化函数
  * @param isSimpleMode 是否为简易模式（简易模式下会过滤分组相关步骤）
  */
-export const getAdminSteps = (t: (key: string) => string, isSimpleMode = false): DriveStep[] => {
+export const getAdminSteps = (t: (key: string, params?: Record<string, string>) => string, isSimpleMode = false): DriveStep[] => {
   const allSteps: DriveStep[] = [
   // ========== 欢迎介绍 ==========
   {
@@ -64,7 +65,7 @@ export const getAdminSteps = (t: (key: string) => string, isSimpleMode = false):
     element: '[data-tour="group-form-multiplier"]',
     popover: {
       title: t('onboarding.admin.groupMultiplier.title'),
-      description: t('onboarding.admin.groupMultiplier.description'),
+      description: t('onboarding.admin.groupMultiplier.description', { symbol: getSiteCurrencySymbol() }),
       side: 'right',
       align: 'start',
       showButtons: ['next', 'previous']

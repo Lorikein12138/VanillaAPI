@@ -246,6 +246,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { usePaymentStore } from '@/stores/payment'
@@ -324,7 +325,9 @@ const deepLinkState = ref<AlipayDeepLinkState>('idle')
 const deepLinkFallbackVisible = ref(false)
 const paymentCurrency = computed(() => normalizePaymentCurrency(serverOrder.value?.currency ?? props.currency))
 const creditedAmount = computed(() => serverOrder.value?.amount ?? props.amount ?? 0)
-const creditedAmountSymbol = currencySymbol('USD')
+const creditedAmountSymbol = computed(() =>
+  (serverOrder.value?.order_type ?? props.orderType) === 'subscription' ? currencySymbol('USD') : getSiteCurrencySymbol()
+)
 const localeCode = computed(() => {
   const raw = i18n.locale as unknown
   if (typeof raw === 'string') return raw

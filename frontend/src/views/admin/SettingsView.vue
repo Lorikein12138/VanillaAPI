@@ -4012,9 +4012,9 @@
                     <thead>
                       <tr class="text-left text-gray-500 dark:text-dark-400 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
                         <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.platform") }}</th>
-                        <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.daily") }}</th>
-                        <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.weekly") }}</th>
-                        <th class="pb-2 font-medium">{{ t("admin.settings.platformQuota.monthly") }}</th>
+                        <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.daily", { symbol: getSiteCurrencySymbol() }) }}</th>
+                        <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.weekly", { symbol: getSiteCurrencySymbol() }) }}</th>
+                        <th class="pb-2 font-medium">{{ t("admin.settings.platformQuota.monthly", { symbol: getSiteCurrencySymbol() }) }}</th>
                       </tr>
                     </thead>
                     <tbody class="space-y-2">
@@ -4347,9 +4347,9 @@
                           <thead>
                             <tr class="text-left text-gray-500 dark:text-dark-400 font-mono text-[11px] uppercase tracking-[0.08em] [&>th]:font-medium">
                               <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.platform") }}</th>
-                              <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.daily") }}</th>
-                              <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.weekly") }}</th>
-                              <th class="pb-2 font-medium">{{ t("admin.settings.platformQuota.monthly") }}</th>
+                              <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.daily", { symbol: getSiteCurrencySymbol() }) }}</th>
+                              <th class="pb-2 pr-4 font-medium">{{ t("admin.settings.platformQuota.weekly", { symbol: getSiteCurrencySymbol() }) }}</th>
+                              <th class="pb-2 font-medium">{{ t("admin.settings.platformQuota.monthly", { symbol: getSiteCurrencySymbol() }) }}</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -7322,6 +7322,18 @@
               <Toggle v-model="form.model_plaza_require_auth" />
             </div>
 
+            <div v-if="form.model_plaza_enabled" class="flex items-center justify-between">
+              <div>
+                <label for="model-plaza-show-official-pricing" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.modelPlaza.showOfficialPricing') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.modelPlaza.showOfficialPricingHint') }}
+                </p>
+              </div>
+              <Toggle id="model-plaza-show-official-pricing" v-model="form.model_plaza_show_official_pricing" />
+            </div>
+
             <div v-if="form.model_plaza_enabled">
               <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {{ t('admin.settings.features.modelPlaza.priceDescription') }}
@@ -7925,6 +7937,20 @@
                 </div>
                 <Toggle v-model="form.payment_enabled" />
               </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <label for="site-display-currency" class="font-medium text-gray-900 dark:text-white">
+                    {{ t("admin.settings.payment.siteDisplayCurrency") }}
+                  </label>
+                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.payment.siteDisplayCurrencyHint") }}
+                  </p>
+                </div>
+                <select id="site-display-currency" v-model="form.site_display_currency" class="input w-auto">
+                  <option value="USD">USD ($)</option>
+                  <option value="CNY">CNY (¥)</option>
+                </select>
+              </div>
               <template v-if="form.payment_enabled">
                 <!-- Row 1: Product name -->
                 <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -8045,6 +8071,7 @@
                       {{
                         t(
                           "admin.settings.payment.balanceRechargeMultiplierHint",
+                          { symbol: getSiteCurrencySymbol() },
                         )
                       }}
                     </p>
@@ -8053,6 +8080,7 @@
                     >
                       {{
                         t("admin.settings.payment.balanceRechargePreview", {
+                          symbol: getSiteCurrencySymbol(),
                           usd: formatBalanceRechargeMultiplier(
                             Number(form.payment_balance_recharge_multiplier) ||
                               1,
@@ -8753,7 +8781,7 @@
                 <div class="relative">
                   <span
                     class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-                    >$</span
+                    >{{ getSiteCurrencySymbol() }}</span
                   >
                   <input
                     v-model.number="form.balance_low_notify_threshold"
@@ -8979,6 +9007,7 @@ import type {
   Proxy,
 } from "@/types";
 import type { ProviderInstance } from "@/types/payment";
+import { getSiteCurrencySymbol } from "@/utils/siteCurrency";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import Icon from "@/components/icons/Icon.vue";
 import Select, { type SelectOption } from "@/components/common/Select.vue";
@@ -9794,6 +9823,7 @@ const form = reactive<SettingsForm>({
   backend_mode_enabled: false,
   hide_ccs_import_button: false,
   payment_enabled: false,
+  site_display_currency: "USD",
   risk_control_enabled: false,
   cyber_policy_user_allowlist: "",
   cyber_session_block_enabled: false,
@@ -10039,6 +10069,7 @@ const form = reactive<SettingsForm>({
   // Model Plaza feature switches + description
   model_plaza_enabled: false,
   model_plaza_require_auth: false,
+  model_plaza_show_official_pricing: true,
   model_plaza_description: '',
   // Plugin management menu visibility; plugin runtime is unaffected.
   plugin_management_enabled: false,
@@ -11701,6 +11732,7 @@ async function saveSettings() {
       ),
       // Payment configuration
       payment_enabled: form.payment_enabled,
+      site_display_currency: form.site_display_currency,
       risk_control_enabled: form.risk_control_enabled,
       cyber_policy_user_allowlist: form.cyber_policy_user_allowlist,
       cyber_session_block_enabled: form.cyber_session_block_enabled,
@@ -11799,6 +11831,7 @@ async function saveSettings() {
       // Model Plaza feature switches + description
       model_plaza_enabled: form.model_plaza_enabled,
       model_plaza_require_auth: form.model_plaza_require_auth,
+      model_plaza_show_official_pricing: form.model_plaza_show_official_pricing,
       model_plaza_description: form.model_plaza_description,
       plugin_management_enabled: form.plugin_management_enabled,
       // Affiliate (邀请返利) feature switch

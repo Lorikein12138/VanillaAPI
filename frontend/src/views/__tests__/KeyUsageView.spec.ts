@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 
 import KeyUsageView from '../KeyUsageView.vue'
 
@@ -169,6 +170,7 @@ describe('KeyUsageView daily detail', () => {
   })
 
   afterEach(() => {
+    setSiteDisplayCurrency('USD')
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
@@ -210,6 +212,12 @@ describe('KeyUsageView daily detail', () => {
     expect(text).toContain('30')
     expect(text).toContain('10')
     expect(text).toContain('$0.12')
+
+    setSiteDisplayCurrency('CNY')
+    await nextTick()
+    expect(wrapper.text()).toContain('¥0.12')
+    expect(wrapper.text()).toContain('¥1.00 / ¥10.00')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
 
     wrapper.unmount()
   })
