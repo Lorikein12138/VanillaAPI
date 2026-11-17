@@ -101,7 +101,7 @@
             </span>
           </template>
           <template #cell-amount="{ row }">
-            <AmountText :value="row.amount" strong />
+            <AmountText :value="row.amount" :symbol="row.action === 'withdraw' ? '$' : undefined" strong />
           </template>
           <template #cell-balance_after="{ row }">
             <NullableAmountText :value="row.balance_after" />
@@ -160,8 +160,8 @@
           <OverviewStat :label="t('admin.affiliates.overview.rebateRate')" :value="formatPercent(selectedOverview.rebate_rate_percent)" />
           <OverviewStat :label="t('admin.affiliates.overview.invitedCount')" :value="String(selectedOverview.invited_count)" />
           <OverviewStat :label="t('admin.affiliates.overview.rebatedInviteeCount')" :value="String(selectedOverview.rebated_invitee_count)" />
-          <OverviewStat :label="t('admin.affiliates.overview.availableQuota')" :value="'$' + formatAmount(selectedOverview.available_quota)" />
-          <OverviewStat :label="t('admin.affiliates.overview.historyQuota')" :value="'$' + formatAmount(selectedOverview.history_quota)" />
+          <OverviewStat :label="t('admin.affiliates.overview.availableQuota')" :value="getSiteCurrencySymbol() + formatAmount(selectedOverview.available_quota)" />
+          <OverviewStat :label="t('admin.affiliates.overview.historyQuota')" :value="getSiteCurrencySymbol() + formatAmount(selectedOverview.history_quota)" />
         </div>
       </div>
     </BaseDialog>
@@ -169,6 +169,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { computed, defineComponent, h, onMounted, reactive, ref, type PropType } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -399,13 +400,14 @@ const AmountText = defineComponent({
   props: {
     value: { type: Number, default: 0 },
     strong: { type: Boolean, default: false },
+    symbol: String,
   },
   setup(amountProps) {
     return () => h('span', {
       class: amountProps.strong
         ? 'text-sm font-semibold text-emerald-600 dark:text-emerald-400'
         : 'text-sm text-gray-900 dark:text-white',
-    }, `$${formatAmount(amountProps.value)}`)
+    }, `${amountProps.symbol ?? getSiteCurrencySymbol()}${formatAmount(amountProps.value)}`)
   },
 })
 

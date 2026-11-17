@@ -106,8 +106,9 @@ type modelPlazaGroup struct {
 
 // modelPlazaResponse 广场页响应。
 type modelPlazaResponse struct {
-	Description string            `json:"description"`
-	Groups      []modelPlazaGroup `json:"groups"`
+	ModelPlazaShowOfficialPricing bool              `json:"model_plaza_show_official_pricing"`
+	Description                   string            `json:"description"`
+	Groups                        []modelPlazaGroup `json:"groups"`
 }
 
 // Get 返回模型广场数据。
@@ -129,7 +130,7 @@ func (h *ModelPlazaHandler) Get(c *gin.Context) {
 		return
 	}
 
-	groups, err := h.plazaService.ListGroups(c.Request.Context())
+	groups, err := h.plazaService.ListGroups(c.Request.Context(), rt.ShowOfficialPricing)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -161,8 +162,9 @@ func (h *ModelPlazaHandler) Get(c *gin.Context) {
 	c.Writer.Header().Add("Vary", "Accept-Language")
 	out := toLocalizedModelPlazaGroups(visible, userRates, c.GetHeader("Accept-Language"))
 	response.Success(c, modelPlazaResponse{
-		Description: rt.Description,
-		Groups:      out,
+		ModelPlazaShowOfficialPricing: rt.ShowOfficialPricing,
+		Description:                   rt.Description,
+		Groups:                        out,
 	})
 }
 

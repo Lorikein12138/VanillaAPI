@@ -9,6 +9,7 @@ import PaymentStatusPanel from '@/components/payment/PaymentStatusPanel.vue'
 import { isMobileDevice } from '@/utils/device'
 import en from '@/i18n/locales/en'
 import zh from '@/i18n/locales/zh'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 import type { CheckoutInfoResponse, MethodLimit, SubscriptionPlan } from '@/types/payment'
 
 const routeState = vi.hoisted(() => ({
@@ -384,7 +385,7 @@ describe('PaymentView subscription plan grid', () => {
 })
 
 describe('PaymentView recharge rate preview', () => {
-  it('uses the selected payment method currency in both locale templates', async () => {
+  it('passes the selected gateway currency and updates the site credit symbol', async () => {
     translate.mockClear()
     routeState.path = '/purchase'
     routeState.query = {}
@@ -414,9 +415,23 @@ describe('PaymentView recharge rate preview', () => {
     expect(translate).toHaveBeenCalledWith('payment.rechargeRatePreview', {
       currency: 'USD',
       usd: '0.50',
+      symbol: '$',
     })
-    expect(en.payment.rechargeRatePreview).toBe('Current rate: 1 {currency} = {usd} USD')
-    expect(zh.payment.rechargeRatePreview).toBe('当前倍率：1 {currency} = {usd} USD')
+    try {
+      translate.mockClear()
+      setSiteDisplayCurrency('CNY')
+      await flushPromises()
+      expect(translate).toHaveBeenCalledWith('payment.rechargeRatePreview', {
+        currency: 'USD',
+        usd: '0.50',
+        symbol: '¥',
+      })
+      expect(en.payment.rechargeRatePreview).toContain('1 {currency}')
+      expect(zh.payment.rechargeRatePreview).toContain('1 {currency}')
+    } finally {
+      wrapper.unmount()
+      setSiteDisplayCurrency('USD')
+    }
   })
 })
 

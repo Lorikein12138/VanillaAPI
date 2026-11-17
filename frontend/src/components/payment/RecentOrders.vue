@@ -65,6 +65,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { paymentAPI } from '@/api/payment'
@@ -104,7 +105,7 @@ const rows = computed(() => orders.value.map((order) => {
     method: t('payment.methods.' + order.payment_type, order.payment_type),
     pay: formatPaymentAmount(order.pay_amount, order.currency),
     actual: actual ? currencySymbol(order.currency) + actual : '',
-    credited: order.order_type === 'balance' && CREDITED_STATUSES.includes(order.status) ? '+$' + order.amount.toFixed(2) : '',
+    credited: order.order_type === 'balance' && CREDITED_STATUSES.includes(order.status) ? '+' + getSiteCurrencySymbol() + order.amount.toFixed(2) : '',
   }
 }))
 

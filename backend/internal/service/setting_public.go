@@ -237,6 +237,8 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyAvailableChannelsEnabled,
 		SettingKeySubscriptionEnabled,
 		SettingKeyModelPlazaEnabled,
+		SettingKeyModelPlazaShowOfficialPricing,
+		SettingKeySiteDisplayCurrency,
 		SettingKeyModelPlazaRequireAuth,
 		SettingKeyPluginManagementEnabled,
 		SettingKeyAffiliateEnabled,
@@ -369,9 +371,11 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 
 		SubscriptionEnabled: !isFalseSettingValue(settings[SettingKeySubscriptionEnabled]),
 
-		ModelPlazaEnabled:       settings[SettingKeyModelPlazaEnabled] == "true",
-		ModelPlazaRequireAuth:   settings[SettingKeyModelPlazaRequireAuth] == "true",
-		PluginManagementEnabled: settings[SettingKeyPluginManagementEnabled] == "true",
+		ModelPlazaEnabled:             settings[SettingKeyModelPlazaEnabled] == "true",
+		ModelPlazaShowOfficialPricing: settings[SettingKeyModelPlazaShowOfficialPricing] != "false",
+		SiteDisplayCurrency:           parseSiteDisplayCurrency(settings[SettingKeySiteDisplayCurrency]),
+		ModelPlazaRequireAuth:         settings[SettingKeyModelPlazaRequireAuth] == "true",
+		PluginManagementEnabled:       settings[SettingKeyPluginManagementEnabled] == "true",
 
 		AffiliateEnabled: settings[SettingKeyAffiliateEnabled] == "true",
 
@@ -512,9 +516,10 @@ func (s *SettingService) GetAvailableChannelsRuntime(ctx context.Context) Availa
 // ModelPlazaRuntime is the lightweight view of the model-plaza feature consumed
 // by the public plaza handler.
 type ModelPlazaRuntime struct {
-	Enabled     bool
-	RequireAuth bool
-	Description string
+	ShowOfficialPricing bool
+	Enabled             bool
+	RequireAuth         bool
+	Description         string
 }
 
 // GetModelPlazaRuntime reads the model-plaza feature switches directly from the
@@ -523,16 +528,18 @@ type ModelPlazaRuntime struct {
 func (s *SettingService) GetModelPlazaRuntime(ctx context.Context) ModelPlazaRuntime {
 	vals, err := s.settingRepo.GetMultiple(ctx, []string{
 		SettingKeyModelPlazaEnabled,
+		SettingKeyModelPlazaShowOfficialPricing,
 		SettingKeyModelPlazaRequireAuth,
 		SettingKeyModelPlazaDescription,
 	})
 	if err != nil {
-		return ModelPlazaRuntime{Enabled: false}
+		return ModelPlazaRuntime{ShowOfficialPricing: true}
 	}
 	return ModelPlazaRuntime{
-		Enabled:     vals[SettingKeyModelPlazaEnabled] == "true",
-		RequireAuth: vals[SettingKeyModelPlazaRequireAuth] == "true",
-		Description: vals[SettingKeyModelPlazaDescription],
+		Enabled:             vals[SettingKeyModelPlazaEnabled] == "true",
+		RequireAuth:         vals[SettingKeyModelPlazaRequireAuth] == "true",
+		Description:         vals[SettingKeyModelPlazaDescription],
+		ShowOfficialPricing: vals[SettingKeyModelPlazaShowOfficialPricing] != "false",
 	}
 }
 
@@ -635,16 +642,18 @@ type PublicSettingsInjectionPayload struct {
 	// monitors; fail-closed (absent/false = hidden). Admin UI always shows it.
 	// ChannelMonitorHideUserRanking hides the user ranking tab and /users payload
 	// from non-admin channel-monitor v2 viewers; default false (visible).
-	ChannelMonitorHideUserRanking bool `json:"channel_monitor_hide_user_ranking"`
-	ChannelMonitorShowQuota       bool `json:"channel_monitor_show_quota"`
-	AvailableChannelsEnabled      bool `json:"available_channels_enabled"`
-	SubscriptionEnabled           bool `json:"subscription_enabled"`
-	ModelPlazaEnabled             bool `json:"model_plaza_enabled"`
-	ModelPlazaRequireAuth         bool `json:"model_plaza_require_auth"`
-	PluginManagementEnabled       bool `json:"plugin_management_enabled"`
-	AffiliateEnabled              bool `json:"affiliate_enabled"`
-	RiskControlEnabled            bool `json:"risk_control_enabled"`
-	AllowUserViewErrorRequests    bool `json:"allow_user_view_error_requests"`
+	ChannelMonitorHideUserRanking bool   `json:"channel_monitor_hide_user_ranking"`
+	ChannelMonitorShowQuota       bool   `json:"channel_monitor_show_quota"`
+	AvailableChannelsEnabled      bool   `json:"available_channels_enabled"`
+	SubscriptionEnabled           bool   `json:"subscription_enabled"`
+	ModelPlazaEnabled             bool   `json:"model_plaza_enabled"`
+	ModelPlazaShowOfficialPricing bool   `json:"model_plaza_show_official_pricing"`
+	SiteDisplayCurrency           string `json:"site_display_currency"`
+	ModelPlazaRequireAuth         bool   `json:"model_plaza_require_auth"`
+	PluginManagementEnabled       bool   `json:"plugin_management_enabled"`
+	AffiliateEnabled              bool   `json:"affiliate_enabled"`
+	RiskControlEnabled            bool   `json:"risk_control_enabled"`
+	AllowUserViewErrorRequests    bool   `json:"allow_user_view_error_requests"`
 }
 
 // GetPublicSettingsForInjection returns public settings in a format suitable for HTML injection.
@@ -725,6 +734,8 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 		AvailableChannelsEnabled:             settings.AvailableChannelsEnabled,
 		SubscriptionEnabled:                  settings.SubscriptionEnabled,
 		ModelPlazaEnabled:                    settings.ModelPlazaEnabled,
+		ModelPlazaShowOfficialPricing:        settings.ModelPlazaShowOfficialPricing,
+		SiteDisplayCurrency:                  settings.SiteDisplayCurrency,
 		ModelPlazaRequireAuth:                settings.ModelPlazaRequireAuth,
 		PluginManagementEnabled:              settings.PluginManagementEnabled,
 		AffiliateEnabled:                     settings.AffiliateEnabled,

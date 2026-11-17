@@ -56,7 +56,7 @@
               class="checkbox"
               :data-test="`enable-${field.key}`"
             />
-            {{ t(field.label) }}
+            {{ t(field.label, { symbol: getSiteCurrencySymbol() }) }}
           </label>
           <div v-if="enabled[field.key]">
             <input
@@ -66,7 +66,7 @@
               step="any"
               required
               class="input"
-              :aria-label="t(field.label)"
+              :aria-label="t(field.label, { symbol: getSiteCurrencySymbol() })"
               :data-test="`${field.key}-input`"
             />
             <p class="input-hint">{{ t('keys.bulkEdit.limitHint') }}</p>
@@ -149,6 +149,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { keysAPI } from '@/api'

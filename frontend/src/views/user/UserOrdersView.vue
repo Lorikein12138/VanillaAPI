@@ -62,7 +62,7 @@
           </div>
           <div class="mt-2 flex justify-between text-sm">
             <span class="text-gray-500 dark:text-gray-400">{{ t(refundFloatingAmount ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
-            <span class="text-gray-900 dark:text-white">${{ refundTarget.amount.toFixed(2) }}</span>
+            <span class="text-gray-900 dark:text-white">{{ getSiteCurrencySymbol() }}{{ refundTarget.amount.toFixed(2) }}</span>
           </div>
           <template v-if="refundFloatingAmount">
             <div class="mt-2 flex justify-between text-sm" data-test="refund-ordered-amount">
@@ -91,6 +91,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'

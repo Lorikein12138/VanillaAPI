@@ -57,7 +57,7 @@
                 </div>
                 <div class="shrink-0 text-right">
                   <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('payment.currentBalance') }}</p>
-                  <p class="font-serif text-[22px] leading-tight tabular-nums text-gray-950 dark:text-dark-50">${{ user?.balance?.toFixed(2) || '0.00' }}</p>
+                  <p class="font-serif text-[22px] leading-tight tabular-nums text-gray-950 dark:text-dark-50">{{ getSiteCurrencySymbol() }}{{ user?.balance?.toFixed(2) || '0.00' }}</p>
                 </div>
               </div>
               <div class="card py-16 text-center">
@@ -118,7 +118,7 @@
                       </div>
                       <div class="shrink-0 text-right">
                         <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('payment.currentBalance') }}</p>
-                        <p class="font-serif text-[22px] leading-tight tabular-nums text-gray-950 dark:text-dark-50">${{ user?.balance?.toFixed(2) || '0.00' }}</p>
+                        <p class="font-serif text-[22px] leading-tight tabular-nums text-gray-950 dark:text-dark-50">{{ getSiteCurrencySymbol() }}{{ user?.balance?.toFixed(2) || '0.00' }}</p>
                       </div>
                     </div>
                     <div v-if="validAmount > 0" class="flex flex-col gap-2.5 border-t border-gray-200 pt-5 text-sm dark:border-dark-700">
@@ -136,15 +136,15 @@
                       </div>
                       <div v-if="showBonusRow" class="flex justify-between gap-3" data-testid="recharge-bonus-row">
                         <span class="text-gray-500 dark:text-dark-400">{{ t('payment.rechargeBonus.amountLabelWithPercent', { percent: formatRechargeBonusNumber(bonusQuote.percent) }) }}</span>
-                        <span class="tabular-nums text-primary-600 dark:text-primary-300">+${{ bonusQuote.bonus.toFixed(2) }}</span>
+                        <span class="tabular-nums text-primary-600 dark:text-primary-300">+{{ getSiteCurrencySymbol() }}{{ bonusQuote.bonus.toFixed(2) }}</span>
                       </div>
                       <div class="flex justify-between gap-3" data-testid="recharge-credited-row">
                         <span class="text-gray-500 dark:text-dark-400">{{ t('payment.creditedBalance') }}</span>
-                        <span class="tabular-nums text-gray-950 dark:text-dark-50">+${{ creditedAmount.toFixed(2) }}</span>
+                        <span class="tabular-nums text-gray-950 dark:text-dark-50">+{{ getSiteCurrencySymbol() }}{{ creditedAmount.toFixed(2) }}</span>
                       </div>
                       <div class="flex justify-between gap-3" data-testid="recharge-balance-after-row">
                         <span class="text-gray-500 dark:text-dark-400">{{ t('payment.balanceAfterRecharge') }}</span>
-                        <span class="font-medium tabular-nums text-gray-950 dark:text-dark-50">${{ balanceAfterRecharge.toFixed(2) }}</span>
+                        <span class="font-medium tabular-nums text-gray-950 dark:text-dark-50">{{ getSiteCurrencySymbol() }}{{ balanceAfterRecharge.toFixed(2) }}</span>
                       </div>
                     </div>
                     <div class="flex items-baseline justify-between gap-3 border-t border-gray-200 pt-5 dark:border-dark-700">
@@ -166,7 +166,7 @@
                         <span v-else>{{ t('payment.createOrder') }} {{ formatSelectedPaymentAmount(totalAmount) }}</span>
                       </button>
                       <p v-if="balanceRechargeMultiplier !== 1" class="text-center text-xs tabular-nums text-gray-500 dark:text-dark-400">
-                        {{ t('payment.rechargeRatePreview', { currency: selectedCurrency, usd: formatBalanceRechargeMultiplier(balanceRechargeMultiplier) }) }}
+                        {{ t('payment.rechargeRatePreview', { currency: selectedCurrency, usd: formatBalanceRechargeMultiplier(balanceRechargeMultiplier), symbol: getSiteCurrencySymbol() }) }}
                       </p>
                     </div>
                   </div>
@@ -223,15 +223,15 @@
                   </div>
                   <div v-if="selectedPlan.daily_limit_usd != null">
                     <span class="text-xs text-gray-400 dark:text-gray-500">{{ t('payment.planCard.dailyLimit') }}</span>
-                    <div class="text-lg font-semibold text-gray-800 dark:text-gray-200">${{ selectedPlan.daily_limit_usd }}</div>
+                    <div class="text-lg font-semibold text-gray-800 dark:text-gray-200">{{ getSiteCurrencySymbol() }}{{ selectedPlan.daily_limit_usd }}</div>
                   </div>
                   <div v-if="selectedPlan.weekly_limit_usd != null">
                     <span class="text-xs text-gray-400 dark:text-gray-500">{{ t('payment.planCard.weeklyLimit') }}</span>
-                    <div class="text-lg font-semibold text-gray-800 dark:text-gray-200">${{ selectedPlan.weekly_limit_usd }}</div>
+                    <div class="text-lg font-semibold text-gray-800 dark:text-gray-200">{{ getSiteCurrencySymbol() }}{{ selectedPlan.weekly_limit_usd }}</div>
                   </div>
                   <div v-if="selectedPlan.monthly_limit_usd != null">
                     <span class="text-xs text-gray-400 dark:text-gray-500">{{ t('payment.planCard.monthlyLimit') }}</span>
-                    <div class="text-lg font-semibold text-gray-800 dark:text-gray-200">${{ selectedPlan.monthly_limit_usd }}</div>
+                    <div class="text-lg font-semibold text-gray-800 dark:text-gray-200">{{ getSiteCurrencySymbol() }}{{ selectedPlan.monthly_limit_usd }}</div>
                   </div>
                   <div v-if="selectedPlan.daily_limit_usd == null && selectedPlan.weekly_limit_usd == null && selectedPlan.monthly_limit_usd == null">
                     <span class="text-xs text-gray-400 dark:text-gray-500">{{ t('payment.planCard.quota') }}</span>
@@ -346,6 +346,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'

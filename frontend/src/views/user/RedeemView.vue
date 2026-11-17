@@ -11,7 +11,7 @@
           </div>
           <p class="font-mono text-[11px] font-medium uppercase tracking-[0.08em] text-gray-500 dark:text-dark-400">{{ t('redeem.currentBalance') }}</p>
           <p class="mt-2 font-serif text-4xl font-normal text-gray-950 dark:text-dark-50">
-            ${{ user?.balance?.toFixed(2) || '0.00' }}
+            {{ getSiteCurrencySymbol() }}{{ user?.balance?.toFixed(2) || '0.00' }}
           </p>
           <p class="mt-2 text-sm text-gray-500 dark:text-dark-400">
             {{ t('redeem.concurrency') }}: {{ user?.concurrency || 0 }} {{ t('redeem.requests') }}
@@ -99,7 +99,7 @@
                   <p>{{ redeemResult.message }}</p>
                   <div class="mt-3 space-y-1">
                     <p v-if="redeemResult.type === 'balance'" class="font-medium">
-                      {{ t('redeem.added') }}: ${{ redeemResult.value.toFixed(2) }}
+                      {{ t('redeem.added') }}: {{ getSiteCurrencySymbol() }}{{ redeemResult.value.toFixed(2) }}
                     </p>
                     <p v-else-if="redeemResult.type === 'concurrency'" class="font-medium">
                       {{ t('redeem.added') }}: {{ redeemResult.value }}
@@ -116,7 +116,7 @@
                     </p>
                     <p v-if="redeemResult.new_balance !== undefined">
                       {{ t('redeem.newBalance') }}:
-                      <span class="font-semibold">${{ redeemResult.new_balance.toFixed(2) }}</span>
+                      <span class="font-semibold">{{ getSiteCurrencySymbol() }}{{ redeemResult.new_balance.toFixed(2) }}</span>
                     </p>
                     <p v-if="redeemResult.new_concurrency !== undefined">
                       {{ t('redeem.newConcurrency') }}:
@@ -366,6 +366,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -437,7 +438,7 @@ const getHistoryItemTitle = (item: RedeemHistoryItem) => {
 const formatHistoryValue = (item: RedeemHistoryItem) => {
   if (isBalanceType(item.type)) {
     const sign = item.value >= 0 ? '+' : ''
-    return `${sign}$${item.value.toFixed(2)}`
+    return `${sign}${getSiteCurrencySymbol()}${item.value.toFixed(2)}`
   } else if (isSubscriptionType(item.type)) {
     // 订阅类型显示有效天数和分组名称
     const days = item.validity_days || Math.round(item.value)

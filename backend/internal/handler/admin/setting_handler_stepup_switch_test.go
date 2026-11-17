@@ -208,3 +208,70 @@ func TestUpdateSettingsRejectsInvalidForwardedClientIPHeader(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.JSONEq(t, `["X-Existing-IP"]`, repo.values[service.SettingKeyForwardedClientIPHeaders])
 }
+
+func TestDisplaySettingsAdminRoundTripAndAudit(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{})
+	ctx := context.Background()
+	showKey := service.SettingKeyModelPlazaShowOfficialPricing
+	currencyKey := service.SettingKeySiteDisplayCurrency
+	assertResponse := func(rec *httptest.ResponseRecorder, show bool, currency string) {
+		t.Helper()
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var envelope struct {
+			Data map[string]any
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+		require.Equal(t, show, envelope.Data[showKey])
+		require.Equal(t, currency, envelope.Data[currencyKey])
+	}
+	get := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings", nil)
+		h.GetSettings(c)
+		return rec
+	}
+
+	assertResponse(get(), true, "USD")
+	before, err := h.settingService.GetAllSettings(ctx)
+	require.NoError(t, err)
+
+	invalidations := 0
+	h.settingService.SetOnUpdateCallback(func() { invalidations++ })
+	assertResponse(doUpdateSettings(t, h, map[string]any{showKey: false, currencyKey: "CNY"}, nil), false, "CNY")
+	require.Equal(t, "false", repo.values[showKey])
+	require.Equal(t, "CNY", repo.values[currencyKey])
+	require.Equal(t, 1, invalidations)
+	assertResponse(get(), false, "CNY")
+	after, err := h.settingService.GetAllSettings(ctx)
+	require.NoError(t, err)
+	changed := diffSettings(before, after, nil, nil, UpdateSettingsRequest{})
+	require.Contains(t, changed, showKey)
+	require.Contains(t, changed, currencyKey)
+
+	assertResponse(doUpdateSettings(t, h, map[string]any{"site_name": "Renamed"}, nil), false, "CNY")
+	require.NotContains(t, repo.lastUpdates, showKey)
+	require.NotContains(t, repo.lastUpdates, currencyKey)
+	afterPartial, err := h.settingService.GetAllSettings(ctx)
+	require.NoError(t, err)
+	changed = diffSettings(after, afterPartial, nil, nil, UpdateSettingsRequest{})
+	require.NotContains(t, changed, showKey)
+	require.NotContains(t, changed, currencyKey)
+
+	assertResponse(doUpdateSettings(t, h, map[string]any{currencyKey: "USD"}, nil), false, "USD")
+	require.NotContains(t, repo.lastUpdates, showKey)
+	assertResponse(doUpdateSettings(t, h, map[string]any{showKey: true}, nil), true, "USD")
+	require.NotContains(t, repo.lastUpdates, currencyKey)
+	assertResponse(get(), true, "USD")
+}
+
+func TestDisplaySettingsRejectInvalidCurrencyBeforeAnyWrite(t *testing.T) {
+	currencyKey := service.SettingKeySiteDisplayCurrency
+	for _, value := range []any{"EUR", "", "cny", " USD ", nil, 123} {
+		h, repo := newStepUpSwitchTestHandler(t, map[string]string{currencyKey: "CNY"})
+		rec := doUpdateSettings(t, h, map[string]any{currencyKey: value, "site_name": "Must not be saved"}, nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "value %v: %s", value, rec.Body.String())
+		require.Zero(t, repo.setCalls)
+		require.Equal(t, map[string]string{currencyKey: "CNY"}, repo.values)
+	}
+}

@@ -356,9 +356,11 @@ type UpdateSettingsRequest struct {
 	SubscriptionEnabled *bool `json:"subscription_enabled"`
 
 	// Model Plaza feature switches + description
-	ModelPlazaEnabled     *bool   `json:"model_plaza_enabled"`
-	ModelPlazaRequireAuth *bool   `json:"model_plaza_require_auth"`
-	ModelPlazaDescription *string `json:"model_plaza_description"`
+	ModelPlazaEnabled             *bool   `json:"model_plaza_enabled"`
+	ModelPlazaShowOfficialPricing *bool   `json:"model_plaza_show_official_pricing"`
+	SiteDisplayCurrency           *string `json:"site_display_currency"`
+	ModelPlazaRequireAuth         *bool   `json:"model_plaza_require_auth"`
+	ModelPlazaDescription         *string `json:"model_plaza_description"`
 
 	// Plugin management menu visibility switch; plugin runtime is unaffected.
 	PluginManagementEnabled *bool `json:"plugin_management_enabled"`
@@ -505,6 +507,17 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	auditReq := settingsAuditRequest(req)
 	omitted := omittedSettingKeys(sentFields)
+	if req.ModelPlazaShowOfficialPricing == nil {
+		omitted[service.SettingKeyModelPlazaShowOfficialPricing] = struct{}{}
+	}
+	if _, sent := sentFields[service.SettingKeySiteDisplayCurrency]; sent || req.SiteDisplayCurrency != nil {
+		if err := service.ValidateSiteDisplayCurrency(stringSetting(req.SiteDisplayCurrency, "")); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	} else {
+		omitted[service.SettingKeySiteDisplayCurrency] = struct{}{}
+	}
 	if req.PaymentQuickAmounts != nil {
 		if _, err := service.NormalizePaymentQuickAmounts(*req.PaymentQuickAmounts); err != nil {
 			response.ErrorFrom(c, infraerrors.BadRequest("INVALID_PAYMENT_QUICK_AMOUNTS", err.Error()))
@@ -1996,6 +2009,8 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.SubscriptionEnabled
 		}(),
+		ModelPlazaShowOfficialPricing: boolValueOrDefault(req.ModelPlazaShowOfficialPricing, previousSettings.ModelPlazaShowOfficialPricing),
+		SiteDisplayCurrency:           stringSetting(req.SiteDisplayCurrency, previousSettings.SiteDisplayCurrency),
 		ModelPlazaEnabled: func() bool {
 			if req.ModelPlazaEnabled != nil {
 				return *req.ModelPlazaEnabled
@@ -2462,10 +2477,12 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		AvailableChannelsEnabled: updatedSettings.AvailableChannelsEnabled,
 		SubscriptionEnabled:      updatedSettings.SubscriptionEnabled,
 
-		ModelPlazaEnabled:       updatedSettings.ModelPlazaEnabled,
-		ModelPlazaRequireAuth:   updatedSettings.ModelPlazaRequireAuth,
-		ModelPlazaDescription:   updatedSettings.ModelPlazaDescription,
-		PluginManagementEnabled: updatedSettings.PluginManagementEnabled,
+		ModelPlazaEnabled:             updatedSettings.ModelPlazaEnabled,
+		ModelPlazaShowOfficialPricing: updatedSettings.ModelPlazaShowOfficialPricing,
+		SiteDisplayCurrency:           updatedSettings.SiteDisplayCurrency,
+		ModelPlazaRequireAuth:         updatedSettings.ModelPlazaRequireAuth,
+		ModelPlazaDescription:         updatedSettings.ModelPlazaDescription,
+		PluginManagementEnabled:       updatedSettings.PluginManagementEnabled,
 
 		AffiliateEnabled: updatedSettings.AffiliateEnabled,
 

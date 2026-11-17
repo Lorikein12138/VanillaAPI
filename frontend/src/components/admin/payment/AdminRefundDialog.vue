@@ -34,8 +34,8 @@
           <span class="font-mono text-gray-900 dark:text-white">#{{ order?.id }}</span>
         </div>
         <div class="mt-1 flex justify-between text-sm">
-          <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.creditedAmount') }}</span>
-          <span class="font-medium text-gray-900 dark:text-white">{{ creditedAmountSymbol }}{{ order?.amount?.toFixed(2) }}</span>
+          <span class="text-gray-500 dark:text-gray-400">{{ t(order?.order_type === 'balance' ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}</span>
+          <span class="font-medium text-gray-900 dark:text-white">{{ orderAmountSymbol }}{{ order?.amount?.toFixed(2) }}</span>
         </div>
         <div class="mt-1 flex justify-between text-sm">
           <span class="text-gray-500 dark:text-gray-400">{{ t(refundFloatingAmount ? 'payment.orders.orderedAmount' : 'payment.orders.payAmount') }}</span>
@@ -45,9 +45,9 @@
           <span class="text-gray-500 dark:text-gray-400">{{ t(actualPaymentLabelKey(order.status)) }}</span>
           <span class="font-medium text-gray-900 dark:text-white">{{ paymentAmountSymbol }}{{ refundFloatingAmount }}</span>
         </div>
-        <div v-if="actuallyRefunded > 0" class="mt-1 flex justify-between text-sm">
-          <span class="text-gray-500 dark:text-gray-400">{{ t('payment.admin.alreadyRefunded') }}</span>
-          <span class="font-medium text-red-600 dark:text-red-400">{{ creditedAmountSymbol }}{{ actuallyRefunded.toFixed(2) }}</span>
+        <div v-if="finalizedRefundCredit > 0" class="mt-1 flex justify-between text-sm">
+          <span class="text-gray-500 dark:text-gray-400">{{ t('payment.orders.refundCreditAmount') }}</span>
+          <span class="font-medium text-red-600 dark:text-red-400">{{ orderAmountSymbol }}{{ finalizedRefundCredit.toFixed(2) }}</span>
         </div>
       </div>
 
@@ -74,7 +74,7 @@
           </div>
           <div class="rounded-lg bg-gray-50 p-3 text-sm dark:bg-dark-700">
             <div class="text-gray-500 dark:text-gray-400">{{ t('payment.admin.orderAmount') }}</div>
-            <div class="mt-1 font-semibold text-gray-900 dark:text-white">{{ creditedAmountSymbol }}{{ order?.amount?.toFixed(2) }}</div>
+            <div class="mt-1 font-semibold text-gray-900 dark:text-white">{{ orderAmountSymbol }}{{ order?.amount?.toFixed(2) }}</div>
           </div>
         </div>
 
@@ -83,7 +83,7 @@
           v-if="form.deduct_balance && balanceInsufficient"
           class="mt-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300"
         >
-          {{ t('payment.admin.insufficientBalance') }}
+          {{ t('payment.admin.insufficientBalance', { symbol: getSiteCurrencySymbol() }) }}
         </div>
 
         <!-- No deduction info -->
@@ -97,21 +97,22 @@
 
       <!-- Refund Amount -->
       <div>
-        <label class="input-label">{{ t('payment.admin.refundAmount') }}</label>
+        <label class="input-label">{{ t('payment.orders.refundCreditAmount') }}</label>
         <div class="relative">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">{{ creditedAmountSymbol }}</span>
+          <span v-if="orderAmountSymbol" class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">{{ orderAmountSymbol }}</span>
           <input
             v-model.number="form.amount"
             type="number"
             step="0.01"
             min="0.01"
             :max="maxRefundable"
-            class="input pl-7"
+            class="input"
+            :class="{ 'pl-7': orderAmountSymbol }"
             required
           />
         </div>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          {{ t('payment.admin.maxRefundable') }}: {{ creditedAmountSymbol }}{{ maxRefundable.toFixed(2) }}
+          {{ t('payment.admin.maxRefundable') }}: {{ orderAmountSymbol }}{{ maxRefundable.toFixed(2) }}
         </p>
       </div>
 
@@ -168,11 +169,12 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { PaymentOrder } from '@/types/payment'
-import { formatOrderDateTime } from '@/components/payment/orderUtils'
+import { formatOrderDateTime, orderCreditSymbol } from '@/components/payment/orderUtils'
 import { currencySymbol } from '@/components/payment/currency'
 import { actualPaymentLabelKey, getFloatingPaymentAmount } from '@/components/payment/paymentFlow'
 
@@ -192,7 +194,8 @@ const emit = defineEmits<{
   (e: 'cancel'): void
 }>()
 
-const creditedAmountSymbol = currencySymbol('USD')
+const creditedAmountSymbol = computed(getSiteCurrencySymbol)
+const orderAmountSymbol = computed(() => orderCreditSymbol(props.order?.order_type))
 
 const paymentAmountSymbol = computed(() => currencySymbol(props.order?.currency))
 const refundFloatingAmount = computed(() => getFloatingPaymentAmount(props.order?.pay_amount, props.order?.payment_info))
@@ -204,9 +207,8 @@ const form = reactive({
   force: false,
 })
 
-// In REFUND_REQUESTED / REFUND_PENDING status, refund_amount is requested/pending, not actually refunded.
-// Only PARTIALLY_REFUNDED / REFUNDED have real refund amounts.
-const actuallyRefunded = computed(() => {
+// Pending requests also carry refund_amount. Only finalized refunds reduce the available order credit here.
+const finalizedRefundCredit = computed(() => {
   if (!props.order) return 0
   const s = props.order.status
   if (s === 'PARTIALLY_REFUNDED' || s === 'REFUNDED') return props.order.refund_amount || 0
@@ -215,7 +217,7 @@ const actuallyRefunded = computed(() => {
 
 const maxRefundable = computed(() => {
   if (!props.order) return 0
-  return props.order.amount - actuallyRefunded.value
+  return props.order.amount - finalizedRefundCredit.value
 })
 
 const balanceInsufficient = computed(() => {

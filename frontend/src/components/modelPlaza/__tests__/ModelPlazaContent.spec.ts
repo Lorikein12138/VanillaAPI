@@ -17,7 +17,8 @@ const messages = { en: enMessages, zh: zhMessages }
 const PlazaGroupSectionStub = defineComponent({
   name: 'PlazaGroupSection',
   props: {
-    group: { type: Object as PropType<ModelPlazaGroup>, required: true }
+    group: { type: Object as PropType<ModelPlazaGroup>, required: true },
+    showOfficialPricing: Boolean
   },
   setup(props) {
     return () => h('article', { 'data-group-id': String(props.group.id) }, [
@@ -63,7 +64,7 @@ function plazaGroup(
 }
 
 function response(groups: ModelPlazaGroup[]): ModelPlazaResponse {
-  return { description: '', groups }
+  return { description: '', model_plaza_show_official_pricing: true, groups }
 }
 
 function mountContent(
@@ -118,6 +119,16 @@ afterEach(() => {
 })
 
 describe('ModelPlazaContent filter integration', () => {
+  it('passes the official pricing switch from the response to each group', async () => {
+    const data = response([plazaGroup(1, 'OpenAI group', 'openai', 1, ['model'])])
+    const { wrapper } = mountContent(data)
+    expect(wrapper.getComponent(PlazaGroupSectionStub).props('showOfficialPricing')).toBe(true)
+
+    await wrapper.setProps({ response: { ...data, model_plaza_show_official_pricing: false } })
+    expect(wrapper.getComponent(PlazaGroupSectionStub).props('showOfficialPricing')).toBe(false)
+    wrapper.unmount()
+  })
+
   it('uses effective rates, real FilterBar events, per-dimension resets, and stable result sorting', async () => {
     const getModelPlaza = vi.spyOn(modelPlazaAPI, 'getModelPlaza')
     const data = response([

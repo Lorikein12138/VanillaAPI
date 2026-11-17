@@ -19,6 +19,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
@@ -123,7 +124,7 @@ const chartData = computed(() => {
   }
 })
 
-const lineOptions = computed(() => ({
+const lineOptionsForCurrency = (symbol: string) => ({
   responsive: true,
   maintainAspectRatio: false,
   interaction: {
@@ -155,7 +156,7 @@ const lineOptions = computed(() => ({
           const dataIndex = tooltipItems[0]?.dataIndex
           if (dataIndex !== undefined && props.trendData[dataIndex]) {
             const data = props.trendData[dataIndex]
-            return `Actual: $${formatCost(data.actual_cost)} | Standard: $${formatCost(data.cost)}`
+            return `Actual: ${symbol}${formatCost(data.actual_cost)} | Standard: ${symbol}${formatCost(data.cost)}`
           }
           return ''
         }
@@ -202,7 +203,9 @@ const lineOptions = computed(() => ({
       }
     }
   }
-}))
+})
+
+const lineOptions = computed(() => lineOptionsForCurrency(getSiteCurrencySymbol()))
 
 const formatTokens = (value: number): string => {
   if (value >= 1_000_000_000) {

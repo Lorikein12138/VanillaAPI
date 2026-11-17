@@ -155,3 +155,51 @@ func TestSettingHandler_GetPublicSettings_ExposesWeChatOAuthModeCapabilities(t *
 	require.True(t, resp.Data.WeChatOAuthOpenEnabled)
 	require.True(t, resp.Data.WeChatOAuthMPEnabled)
 }
+
+func TestDisplaySettingsPublicAPIAndInjectionAgree(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+	showKey := service.SettingKeyModelPlazaShowOfficialPricing
+	currencyKey := service.SettingKeySiteDisplayCurrency
+	for _, tc := range []struct {
+		name     string
+		stored   map[string]string
+		show     bool
+		currency string
+	}{
+		{name: "legacy database", show: true, currency: "USD"},
+		{name: "historical invalid values", stored: map[string]string{showKey: "invalid", currencyKey: "JPY"}, show: true, currency: "USD"},
+		{name: "explicit disabled and CNY", stored: map[string]string{showKey: "false", currencyKey: "CNY"}, currency: "CNY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := service.NewSettingService(&settingHandlerPublicRepoStub{values: tc.stored}, &config.Config{})
+			h := NewSettingHandler(svc, "test-version")
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+			h.GetPublicSettings(c)
+			require.Equal(t, http.StatusOK, rec.Code)
+			var envelope struct {
+				Data map[string]any
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+			require.Equal(t, tc.show, envelope.Data[showKey])
+			require.Equal(t, tc.currency, envelope.Data[currencyKey])
+
+			public, err := svc.GetPublicSettings(ctx)
+			require.NoError(t, err)
+			require.Equal(t, tc.show, public.ModelPlazaShowOfficialPricing)
+			require.Equal(t, tc.currency, public.SiteDisplayCurrency)
+			require.Equal(t, tc.show, svc.GetModelPlazaRuntime(ctx).ShowOfficialPricing)
+
+			payload, err := svc.GetPublicSettingsForInjection(ctx)
+			require.NoError(t, err)
+			raw, err := json.Marshal(payload)
+			require.NoError(t, err)
+			var injected map[string]any
+			require.NoError(t, json.Unmarshal(raw, &injected))
+			require.Equal(t, envelope.Data[showKey], injected[showKey])
+			require.Equal(t, envelope.Data[currencyKey], injected[currencyKey])
+		})
+	}
+}

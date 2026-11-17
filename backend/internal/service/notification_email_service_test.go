@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -700,5 +701,134 @@ func (s *notificationEmailTestSMTPServer) handleConn(conn net.Conn) {
 				return
 			}
 		}
+	}
+}
+
+func TestNotificationEmailSiteDisplayCurrencyPreviews(t *testing.T) {
+	ctx := context.Background()
+	repo := newNotificationEmailMemorySettingRepo()
+	svc := NewNotificationEmailService(repo, nil)
+	for _, tc := range []struct {
+		currency string
+		symbol   string
+	}{
+		{symbol: "$"},
+		{currency: "GBP", symbol: "$"},
+		{currency: "CNY", symbol: "¥"},
+		{currency: "USD", symbol: "$"},
+	} {
+		if tc.currency != "" {
+			require.NoError(t, repo.Set(ctx, SettingKeySiteDisplayCurrency, tc.currency))
+		}
+		for _, locale := range []string{"en", "zh"} {
+			low, err := svc.PreviewTemplate(ctx, NotificationEmailPreviewInput{Event: NotificationEmailEventBalanceLow, Locale: locale})
+			require.NoError(t, err)
+			require.Contains(t, low.HTML, "<strong>"+tc.symbol+"12.34</strong>")
+			require.Contains(t, low.HTML, "<strong>"+tc.symbol+"20.00</strong>")
+
+			recharge, err := svc.PreviewTemplate(ctx, NotificationEmailPreviewInput{Event: NotificationEmailEventBalanceRechargeSuccess, Locale: locale})
+			require.NoError(t, err)
+			require.Contains(t, recharge.HTML, "<strong>"+tc.symbol+"50.00</strong>")
+			require.Contains(t, recharge.HTML, "<strong>"+tc.symbol+"12.34</strong>")
+		}
+	}
+}
+
+type notificationEmailRechargeUserRepo struct {
+	UserRepository
+}
+
+func (notificationEmailRechargeUserRepo) GetByID(context.Context, int64) (*User, error) {
+	return &User{Balance: 73.45}, nil
+}
+
+func TestNotificationEmailSiteDisplayCurrencySendsAndPreservesCustom(t *testing.T) {
+	ctx := context.Background()
+	repo := newNotificationEmailMemorySettingRepo()
+	smtpServer := startNotificationEmailTestSMTPServer(t)
+	require.NoError(t, repo.SetMultiple(ctx, smtpServer.settings()))
+	require.NoError(t, repo.Set(ctx, SettingKeySiteDisplayCurrency, "CNY"))
+	emailSvc := NewEmailService(repo, nil)
+	notificationSvc := NewNotificationEmailService(repo, emailSvc)
+	balanceSvc := NewBalanceNotifyService(emailSvc, repo, nil)
+	recipients := []string{"user@example.com"}
+
+	balanceSvc.sendBalanceLowEmails(ctx, recipients, 42, "User", recipients[0], 3.14, 10, "Site", "")
+	require.Equal(t, int64(1), smtpServer.messageCount())
+	body := smtpServer.lastMessageBody(t)
+	require.Contains(t, body, "¥3.14")
+	require.Contains(t, body, "¥10.00")
+
+	balanceSvc.SetNotificationEmailService(notificationSvc)
+	balanceSvc.sendBalanceLowEmails(ctx, recipients, 42, "User", recipients[0], 3.14, 10, "Site", "")
+	require.Equal(t, int64(2), smtpServer.messageCount())
+	body = smtpServer.lastMessageBody(t)
+	require.Contains(t, body, "<strong>¥3.14</strong>")
+	require.Contains(t, body, "<strong>¥10.00</strong>")
+
+	paymentSvc := &PaymentService{notificationEmailService: notificationSvc, userRepo: notificationEmailRechargeUserRepo{}}
+	order := &dbent.PaymentOrder{ID: 17, UserID: 42, UserEmail: recipients[0], Amount: 50, PayAmount: 6.25}
+	require.NoError(t, paymentSvc.sendBalanceRechargeSuccessNotification(ctx, order))
+	require.Equal(t, int64(3), smtpServer.messageCount())
+	body = smtpServer.lastMessageBody(t)
+	require.Contains(t, body, "<strong>¥50.00</strong>")
+	require.Contains(t, body, "<strong>¥73.45</strong>")
+	require.NotContains(t, body, "6.25")
+
+	_, err := notificationSvc.UpdateTemplate(ctx, NotificationEmailEventBalanceRechargeSuccess, "en",
+		"Amount {{recharge_amount}}", "<p>Credit: ${{recharge_amount}}</p>")
+	require.NoError(t, err)
+	customPreview, err := notificationSvc.PreviewTemplate(ctx, NotificationEmailPreviewInput{Event: NotificationEmailEventBalanceRechargeSuccess, Locale: "en"})
+	require.NoError(t, err)
+	require.Equal(t, "Amount 50.00", customPreview.Subject)
+	require.Equal(t, "<p>Credit: $50.00</p>", customPreview.HTML)
+	order.ID++
+	require.NoError(t, paymentSvc.sendBalanceRechargeSuccessNotification(ctx, order))
+	require.Equal(t, int64(4), smtpServer.messageCount())
+	require.Contains(t, smtpServer.lastMessageBody(t), "<p>Credit: $50.00</p>")
+}
+
+func TestNotificationEmailAccountQuotaUsesSiteDisplayCurrency(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name             string
+		fallback         bool
+		thresholdType    string
+		thresholdDisplay string
+	}{
+		{name: "template amount", thresholdType: thresholdTypeFixed, thresholdDisplay: "¥10.00"},
+		{name: "template percentage", thresholdType: thresholdTypePercentage, thresholdDisplay: "10%"},
+		{name: "fallback amount", fallback: true, thresholdType: thresholdTypeFixed, thresholdDisplay: "¥10.00"},
+		{name: "fallback percentage", fallback: true, thresholdType: thresholdTypePercentage, thresholdDisplay: "10%"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newNotificationEmailMemorySettingRepo()
+			smtpServer := startNotificationEmailTestSMTPServer(t)
+			require.NoError(t, repo.SetMultiple(ctx, smtpServer.settings()))
+			require.NoError(t, repo.Set(ctx, SettingKeySiteDisplayCurrency, SiteDisplayCurrencyCNY))
+			if tc.fallback {
+				key := notificationEmailTemplateKey(NotificationEmailEventAccountQuotaAlert, "en")
+				require.NoError(t, repo.Set(ctx, key, "invalid template JSON"))
+			}
+			emailSvc := NewEmailService(repo, nil)
+			balanceSvc := NewBalanceNotifyService(emailSvc, repo, nil)
+			balanceSvc.SetNotificationEmailService(NewNotificationEmailService(repo, emailSvc))
+
+			balanceSvc.sendQuotaAlertEmails(ctx, []string{"admin@example.com"}, 1, "Upstream", "openai", quotaDim{
+				name: quotaDimDaily, limit: 100, threshold: 10, thresholdType: tc.thresholdType,
+			}, 95, "Site")
+			require.Equal(t, int64(1), smtpServer.messageCount())
+			body := smtpServer.lastMessageBody(t)
+			if tc.fallback {
+				for _, amount := range []string{"¥95.00", "¥100.00", "¥5.00", tc.thresholdDisplay} {
+					require.Contains(t, body, "<span class=\"metric-value\">"+amount+"</span>")
+				}
+			} else {
+				require.Contains(t, body, "<td>95.00 / 100.00</td>")
+				require.Contains(t, body, "<td>5.00</td>")
+				require.Contains(t, body, "<td>"+tc.thresholdDisplay+"</td>")
+			}
+			require.NotContains(t, body, "$")
+		})
 	}
 }

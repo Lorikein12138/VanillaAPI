@@ -128,7 +128,7 @@ func TestListPlazaGroups_GroupCentricAggregation(t *testing.T) {
 		{ID: 20, Name: "g-empty", Platform: "anthropic", RateMultiplier: 0.5},
 	}
 	svc := newPlazaService(channels, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1, "无模型的分组不应返回")
 	require.Equal(t, int64(10), out[0].ID)
@@ -185,7 +185,7 @@ func TestListPlazaGroups_ModelAllowlistFiltersChannelPricingModels(t *testing.T)
 		},
 	}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -218,7 +218,7 @@ func TestListPlazaGroups_AutomaticAccountUnionFiltersExistingChannelCandidates(t
 	channelRepo := &mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return channels, nil }}
 	svc := NewModelPlazaService(channelRepo, &stubGroupRepoForAvailable{activeGroups: groups}, members, nil, nil, nil)
 
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Equal(t, []string{"model-a", "model-c"}, []string{out[0].Models[0].Name, out[0].Models[1].Name})
@@ -232,7 +232,7 @@ func TestListPlazaGroups_MappedKeyDisplayAndPricing(t *testing.T) {
 	groups := []Group{{ID: 10, Platform: PlatformAnthropic, RateMultiplier: 1, ModelAllowlist: GroupModelAllowlist{Enabled: true}}}
 	members := &modelPlazaMembersRepoStub{accountsByGroup: map[int64][]Account{10: {{Platform: PlatformAnthropic, Credentials: map[string]any{"model_mapping": map[string]any{"client-name": "upstream-name"}}}}}}
 	svc := NewModelPlazaService(&mockChannelRepository{listAllFn: func(context.Context) ([]Channel, error) { return channels, nil }}, &stubGroupRepoForAvailable{activeGroups: groups}, members, nil, nil, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Len(t, out[0].Models, 1)
@@ -250,7 +250,7 @@ func TestListPlazaGroups_AutomaticAccountReadFailureFailsClosed(t *testing.T) {
 		&stubGroupRepoForAvailable{activeGroups: groups},
 		&modelPlazaMembersRepoStub{err: sentinel}, nil, nil, nil,
 	)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.Nil(t, out)
 	require.ErrorIs(t, err, sentinel)
 }
@@ -271,7 +271,7 @@ func TestListPlazaGroups_DisabledModelAllowlistKeepsChannelPricingModels(t *test
 		},
 	}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -313,7 +313,7 @@ func TestListPlazaGroups_ModelAllowlistWildcardUsesLexicalMatching(t *testing.T)
 		plazaMemberAccount(PlatformAnthropic, "claude-sonnet-4"),
 	}}}
 
-	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -335,7 +335,7 @@ func TestListPlazaGroups_ModelAllowlistKeepsAllowedUnpricedModel(t *testing.T) {
 		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"model-unpriced", "model-not-declared"}},
 	}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -356,7 +356,7 @@ func TestListPlazaGroups_ModelAllowlistOmitsGroupWhenNoModelsMatch(t *testing.T)
 		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"model-x"}},
 	}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Empty(t, out)
@@ -389,7 +389,7 @@ func TestListPlazaGroups_ExposesIndependentVideoRate(t *testing.T) {
 		},
 	}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -414,7 +414,7 @@ func TestListPlazaGroups_ExposesIndependentVideoRate(t *testing.T) {
 func TestListPlazaGroups_Fable51HasNoImplicitReasoningMultiplier(t *testing.T) {
 	ch := plazaPricedChannel(1, "ch", []int64{10}, "anthropic", "claude-fable-5-1")
 	svc := newPlazaService([]Channel{ch}, []Group{{ID: 10, Platform: "anthropic"}}, nil)
-	groups, err := svc.ListGroups(context.Background())
+	groups, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, groups, 1)
 	require.Len(t, groups[0].Models, 1)
@@ -435,7 +435,7 @@ func TestListPlazaGroups_DedupFirstWinsWithPricingUpgrade(t *testing.T) {
 
 	// alpha(无价)按名称序先于 beta(有价):先见者无价,应被有价条目升级。
 	svc := newPlazaService([]Channel{priced, unpriced}, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Len(t, out[0].Models, 1)
@@ -457,7 +457,7 @@ func TestListPlazaGroups_PlatformIsolation(t *testing.T) {
 		{ID: 20, Name: "g-gpt", Platform: "openai", RateMultiplier: 1},
 	}
 	svc := newPlazaService([]Channel{ch}, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	byName := map[string][]PlazaModel{}
@@ -490,7 +490,7 @@ func TestListPlazaGroups_CompositeIncludesConfiguredConcretePlatforms(t *testing
 		plazaMemberAccount(PlatformOpenAI, "shared-model"),
 	}}}
 
-	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -548,7 +548,7 @@ func TestListPlazaGroups_CommandCodeAndClineUseGroupModelKeysAndPlatformPricing(
 		},
 	}}
 
-	out, err := newPlazaServiceWithMembers([]Channel{channel}, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers([]Channel{channel}, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 3)
@@ -618,7 +618,7 @@ func TestListPlazaGroups_CompositeAndOrdinaryGroupsDoNotLeakPlatforms(t *testing
 		plazaMemberAccount(PlatformOpenAI, "gpt-5"),
 	}
 
-	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -646,7 +646,7 @@ func TestListPlazaGroups_InactiveChannelSkipped(t *testing.T) {
 	inactive.Status = "inactive"
 	groups := []Group{{ID: 10, Name: "g", Platform: "anthropic", RateMultiplier: 1}}
 	svc := newPlazaService([]Channel{inactive}, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Empty(t, out)
 }
@@ -661,7 +661,7 @@ func TestListPlazaGroups_SortedByRateMultiplierAsc(t *testing.T) {
 		{ID: 30, Name: "cheap", Platform: "anthropic", RateMultiplier: 0.5},
 	}
 	svc := newPlazaService(channels, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 3)
 	require.Equal(t, "cheap", out[0].Name, "倍率低者在前")
@@ -689,7 +689,7 @@ func TestListPlazaGroups_OfficialPricingFill(t *testing.T) {
 	// 官方价与计费同源：需要计费服务与解析器（官方参考不查渠道，解析器无需渠道服务）。
 	svc.billingService = NewBillingService(&config.Config{}, pricingSvc)
 	svc.resolver = NewModelPricingResolver(nil, svc.billingService)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Len(t, out[0].Models, 3)
@@ -733,7 +733,7 @@ func TestListPlazaGroups_GroupImagePriceOverridesChannelPricing(t *testing.T) {
 		{ID: 20, Name: "g-plain", Platform: "openai", RateMultiplier: 0.1},
 	}
 	svc := newPlazaService(channels, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	byName := map[string]PlazaGroup{}
@@ -800,7 +800,7 @@ func TestListPlazaGroups_GroupModelImagePricingWinsOverGroupImageTiers(t *testin
 		}},
 	}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	require.Len(t, out[0].Models, 1)
@@ -835,7 +835,7 @@ func TestListPlazaGroups_GroupModelFlatImagePriceWinsOverGroupImageTiers(t *test
 		}},
 	}}
 
-	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background())
+	out, err := newPlazaService(channels, groups, nil).ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	p := out[0].Models[0].Pricing
@@ -851,7 +851,7 @@ func TestListPlazaGroups_GroupImagePriceIgnoredForNonImageModes(t *testing.T) {
 	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10}, "openai", "gpt-5")}
 	groups := []Group{{ID: 10, Name: "g", Platform: "openai", RateMultiplier: 1, ImagePrice1K: &imgPrice}}
 	svc := newPlazaService(channels, groups, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	p := out[0].Models[0].Pricing
@@ -867,7 +867,7 @@ func TestListPlazaGroups_RepoErrorsPropagate(t *testing.T) {
 		listAllFn: func(ctx context.Context) ([]Channel, error) { return nil, sentinel },
 	}
 	svc := NewModelPlazaService(repo, &stubGroupRepoForAvailable{}, nil, nil, nil, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.Nil(t, out)
 	require.ErrorIs(t, err, sentinel)
 
@@ -876,7 +876,7 @@ func TestListPlazaGroups_RepoErrorsPropagate(t *testing.T) {
 		&stubGroupRepoForAvailable{listActiveErr: sentinel},
 		nil, nil, nil, nil,
 	)
-	out2, err2 := svc2.ListGroups(context.Background())
+	out2, err2 := svc2.ListGroups(context.Background(), true)
 	require.Nil(t, out2)
 	require.ErrorIs(t, err2, sentinel)
 }
@@ -914,7 +914,7 @@ func TestListGroups_TokenLadderFollowsGroupToggle(t *testing.T) {
 	}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformOpenAI, 20: PlatformOpenAI},
 		newStubPricingServiceFromJSON(t, openAILadderCatalogJSON))
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 
@@ -954,7 +954,7 @@ func TestListGroups_GeminiCatalogLadderShownWholeRequest(t *testing.T) {
 	groups := []Group{{ID: 10, Name: "g", Platform: PlatformGemini, RateMultiplier: 1, LongContextPricingEnabled: true}}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformGemini},
 		newStubPricingServiceFromJSON(t, geminiLadderCatalogJSON))
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 	m := out[0].Models[0]
@@ -976,7 +976,7 @@ func TestListGroups_GroupTokenCardOverridesChannelPricing(t *testing.T) {
 		ModelPricing: []ChannelModelPricing{{Models: []string{"claude-sonnet-*"}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(1e-6)}},
 	}}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformAnthropic}, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	m := out[0].Models[0]
 	require.InDelta(t, 1e-6, *m.Pricing.InputPrice, 1e-15, "分组价卡优先于渠道平价")
@@ -997,7 +997,7 @@ func TestListGroups_ImageModelKeepsTierSynthesisWithBilling(t *testing.T) {
 		ImagePrice1K: testPtrFloat64(0.02),
 	}}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformOpenAI}, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	m := out[0].Models[0]
 	require.Equal(t, BillingModeImage, m.Pricing.BillingMode)
@@ -1012,7 +1012,7 @@ func TestListGroups_CatalogMissingStillShowsChannelFlatPricing(t *testing.T) {
 	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10}, PlatformAnthropic, "unknown-model-xyz")}
 	groups := []Group{{ID: 10, Name: "g", Platform: PlatformAnthropic, RateMultiplier: 1, LongContextPricingEnabled: true}}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformAnthropic}, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	m := out[0].Models[0]
 	require.NotNil(t, m.Pricing)
@@ -1160,7 +1160,7 @@ func TestOfficialPricingStableSnapshot(t *testing.T) {
 		10: {plazaMemberAccount(PlatformAnthropic, "claude-opus-4-6")},
 		20: {plazaMemberAccount(PlatformAntigravity, "claude-opus-4-6-thinking")},
 	}}
-	isolated, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	isolated, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, isolated, 2)
 	byName := make(map[string][]string, len(isolated))
@@ -1184,7 +1184,7 @@ func TestListGroups_TimePricingPassthrough(t *testing.T) {
 	}}
 	groups := []Group{{ID: 10, Name: "cn", Platform: PlatformDeepseek, RateMultiplier: 1, LongContextPricingEnabled: true}}
 	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformDeepseek}, nil)
-	out, err := svc.ListGroups(context.Background())
+	out, err := svc.ListGroups(context.Background(), true)
 	require.NoError(t, err)
 	m := out[0].Models[0]
 	require.NotNil(t, m.TimePricing)
@@ -1214,7 +1214,7 @@ func TestListPlazaGroups_ThinkingCatalogIsolation(t *testing.T) {
 		},
 	}}
 
-	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 3)
@@ -1232,7 +1232,7 @@ func TestListPlazaGroups_MissingMemberRepositoryFailsClosed(t *testing.T) {
 	channels := []Channel{plazaPricedChannel(1, "ch", []int64{10}, PlatformAnthropic, "claude-sonnet")}
 	groups := []Group{{ID: 10, Name: "g", Platform: PlatformAnthropic, RateMultiplier: 1}}
 
-	out, err := newPlazaServiceWithMembers(channels, groups, nil, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, nil, nil).ListGroups(context.Background(), true)
 
 	require.Nil(t, out)
 	require.ErrorContains(t, err, "account group member repository is unavailable")
@@ -1247,7 +1247,7 @@ func TestListPlazaGroups_DisabledMemberReadFailureFailsClosed(t *testing.T) {
 		ModelAllowlist: GroupModelAllowlist{Enabled: false},
 	}}
 
-	out, err := newPlazaServiceWithMembers(channels, groups, &modelPlazaMembersRepoStub{err: sentinel}, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, &modelPlazaMembersRepoStub{err: sentinel}, nil).ListGroups(context.Background(), true)
 
 	require.Nil(t, out)
 	require.ErrorIs(t, err, sentinel)
@@ -1264,7 +1264,7 @@ func TestListPlazaGroups_GroupWithoutMembersOmitted(t *testing.T) {
 		20: {plazaMemberAccount(PlatformAnthropic, "claude-sonnet")},
 	}}
 
-	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -1285,7 +1285,7 @@ func TestListPlazaGroups_PausedMembersStillDeclare(t *testing.T) {
 		}},
 	}}}
 
-	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -1307,7 +1307,7 @@ func TestListPlazaGroups_CompositeSameNameDeclaredOnlyByOwningPlatform(t *testin
 		plazaMemberAccount(PlatformOpenAI, "other"),
 	}}}
 
-	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers([]Channel{ch}, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -1328,9 +1328,35 @@ func TestListPlazaGroups_ReadsMembersOncePerActiveGroup(t *testing.T) {
 	}
 	members := plazaMembersFromGroups(groups, channels)
 
-	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background())
+	out, err := newPlazaServiceWithMembers(channels, groups, members, nil).ListGroups(context.Background(), true)
 
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	require.Equal(t, map[int64]int{10: 1, 20: 1}, members.calls)
+}
+
+func TestListGroupsOfficialPricingSwitchKeepsCatalogBackedPayablePrices(t *testing.T) {
+	channels := []Channel{{
+		ID: 1, Name: "ch", Status: StatusActive, GroupIDs: []int64{10},
+		ModelMapping: map[string]map[string]string{PlatformGemini: {"gemini-2.5-pro": "gemini-2.5-pro"}},
+	}}
+	groups := []Group{{ID: 10, Name: "g", Platform: PlatformGemini, RateMultiplier: 1.5, LongContextPricingEnabled: true}}
+	svc := newPlazaServiceWithBilling(channels, groups, map[int64]string{10: PlatformGemini},
+		newStubPricingServiceFromJSON(t, geminiLadderCatalogJSON))
+
+	ctx := context.Background()
+	on, err := svc.ListGroups(ctx, true)
+	require.NoError(t, err)
+	require.Len(t, on, 1)
+	require.Len(t, on[0].Models, 1)
+	model := &on[0].Models[0]
+	require.NotNil(t, model.OfficialPricing)
+	require.Len(t, model.OfficialPricing.Intervals, 2)
+	require.Len(t, model.Pricing.Intervals, 2)
+	require.InDelta(t, 2.5e-6, *model.Pricing.Intervals[1].InputPrice, 1e-15)
+
+	off, err := svc.ListGroups(ctx, false)
+	require.NoError(t, err)
+	model.OfficialPricing = nil
+	require.Equal(t, on, off)
 }

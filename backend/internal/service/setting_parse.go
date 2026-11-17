@@ -206,10 +206,12 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeySubscriptionEnabled: "true",
 
 		// Model plaza feature (default disabled; opt-in, public unless require_auth)
-		SettingKeyModelPlazaEnabled:       "false",
-		SettingKeyModelPlazaRequireAuth:   "false",
-		SettingKeyModelPlazaDescription:   "",
-		SettingKeyPluginManagementEnabled: "false",
+		SettingKeyModelPlazaEnabled:             "false",
+		SettingKeyModelPlazaShowOfficialPricing: "true",
+		SettingKeySiteDisplayCurrency:           SiteDisplayCurrencyUSD,
+		SettingKeyModelPlazaRequireAuth:         "false",
+		SettingKeyModelPlazaDescription:         "",
+		SettingKeyPluginManagementEnabled:       "false",
 
 		// Affiliate (邀请返利) feature (default disabled; opt-in)
 		SettingKeyAffiliateEnabled:              "false",
@@ -832,6 +834,8 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 
 	// Model plaza feature (default: disabled; strict true)
 	result.ModelPlazaEnabled = settings[SettingKeyModelPlazaEnabled] == "true"
+	result.ModelPlazaShowOfficialPricing = settings[SettingKeyModelPlazaShowOfficialPricing] != "false"
+	result.SiteDisplayCurrency = parseSiteDisplayCurrency(settings[SettingKeySiteDisplayCurrency])
 	result.ModelPlazaRequireAuth = settings[SettingKeyModelPlazaRequireAuth] == "true"
 	result.ModelPlazaDescription = settings[SettingKeyModelPlazaDescription]
 	result.PluginManagementEnabled = settings[SettingKeyPluginManagementEnabled] == "true"

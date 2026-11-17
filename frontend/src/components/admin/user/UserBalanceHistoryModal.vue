@@ -31,7 +31,7 @@
           <div class="flex-shrink-0 text-right">
             <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.users.currentBalance') }}</p>
             <p class="text-xl font-serif font-normal text-gray-950 dark:text-dark-50">
-              ${{ user.balance?.toFixed(2) || '0.00' }}
+              {{ getSiteCurrencySymbol() }}{{ user.balance?.toFixed(2) || '0.00' }}
             </p>
           </div>
         </div>
@@ -42,7 +42,7 @@
             <template v-else>&nbsp;</template>
           </p>
           <p class="ml-4 flex-shrink-0 text-xs text-gray-500 dark:text-dark-400">
-            {{ t('admin.users.totalRecharged') }}: <span class="font-semibold text-emerald-600 dark:text-emerald-400">${{ totalRecharged.toFixed(2) }}</span>
+            {{ t('admin.users.totalRecharged') }}: <span class="font-semibold text-emerald-600 dark:text-emerald-400">{{ getSiteCurrencySymbol() }}{{ totalRecharged.toFixed(2) }}</span>
           </p>
         </div>
       </div>
@@ -172,6 +172,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI, type BalanceHistoryItem } from '@/api/admin'
@@ -321,7 +322,7 @@ const getItemTitle = (item: BalanceHistoryItem) => {
 const formatValue = (item: BalanceHistoryItem) => {
   if (isBalanceType(item.type)) {
     const sign = item.value >= 0 ? '+' : ''
-    return `${sign}$${item.value.toFixed(2)}`
+    return `${sign}${getSiteCurrencySymbol()}${item.value.toFixed(2)}`
   }
   if (isSubscriptionType(item.type)) {
     const days = item.validity_days || Math.round(item.value)

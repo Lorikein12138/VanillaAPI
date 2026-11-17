@@ -83,6 +83,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { RechargeBonusTier } from '@/types/payment'
@@ -163,7 +164,7 @@ function secondLine(amt: number): string {
   if (props.bonusMode === 'discount' && props.bonusTiers.length > 0) {
     return t('payment.rechargeBonus.payShort', { amount: formatPaymentAmount(quote.payBase, props.currency) })
   }
-  return t('payment.rechargeBonus.creditedShort', { amount: '$' + quote.credited.toFixed(2) })
+  return t('payment.rechargeBonus.creditedShort', { amount: getSiteCurrencySymbol() + quote.credited.toFixed(2) })
 }
 
 const placeholderText = computed(() => {

@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 
 import ModelDistributionChart from '../ModelDistributionChart.vue'
 
@@ -48,6 +50,7 @@ vi.mock('vue-chartjs', () => ({
 }))
 
 describe('ModelDistributionChart', () => {
+  afterEach(() => setSiteDisplayCurrency('USD'))
   const modelStats = [
     {
       model: 'model-a',
@@ -102,7 +105,7 @@ describe('ModelDistributionChart', () => {
     expect(label).toBe('model-a: 1.00K (66.7%)')
   })
 
-  it('uses actual_cost and reorders rows in actual cost mode', () => {
+  it('uses actual_cost and refreshes both the table and tooltip when the currency changes', async () => {
     const wrapper = mount(ModelDistributionChart, {
       props: {
         modelStats,
@@ -130,6 +133,17 @@ describe('ModelDistributionChart', () => {
       dataset: { data: [1.4, 0.2] },
     })
     expect(label).toBe('model-b: $1.40 (87.5%)')
+    setSiteDisplayCurrency('CNY')
+    await nextTick()
+    expect(wrapper.findAll('tbody tr')[0].text()).toContain('¥1.40')
+    const updatedOptions = (wrapper.vm as any).$?.setupState.doughnutOptions
+    expect(updatedOptions).not.toBe(options)
+    expect(updatedOptions.plugins.tooltip.callbacks.label({
+      label: 'model-b',
+      raw: 1.4,
+      dataset: { data: [1.4, 0.2] },
+    })).toBe('model-b: ¥1.40 (87.5%)')
+    wrapper.unmount()
   })
 
   it('can hide account cost for user usage stats without account_cost', () => {

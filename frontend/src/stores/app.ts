@@ -13,6 +13,7 @@ import {
   type ReleaseInfo
 } from '@/api/admin/system'
 import { getPublicSettings as fetchPublicSettingsAPI } from '@/api/auth'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 
 export const useAppStore = defineStore('app', () => {
   // ==================== State ====================
@@ -294,6 +295,7 @@ export const useAppStore = defineStore('app', () => {
       window.__APP_CONFIG__ = { ...config }
     }
     cachedPublicSettings.value = config
+    setSiteDisplayCurrency(config.site_display_currency)
     siteName.value = config.site_name || 'Sub2API'
     siteLogo.value = config.site_logo || ''
     siteVersion.value = config.version || ''
@@ -340,6 +342,7 @@ export const useAppStore = defineStore('app', () => {
         aliyun_captcha_prefix: '',
         aliyun_captcha_region: 'cn',
         site_name: siteName.value,
+        site_display_currency: 'USD',
         site_logo: siteLogo.value,
         site_subtitle: '',
         api_base_url: apiBaseUrl.value,
@@ -375,6 +378,7 @@ export const useAppStore = defineStore('app', () => {
         payment_balance_disabled: false,
         model_plaza_enabled: false,
         model_plaza_require_auth: false,
+        model_plaza_show_official_pricing: true,
         plugin_management_enabled: false,
         risk_control_enabled: false,
         service_quota_enabled: false,
@@ -396,7 +400,7 @@ export const useAppStore = defineStore('app', () => {
 
     const request = apiRequest
       .then((data) => {
-        applySettings(data)
+        if (publicSettingsRequest === request) applySettings(data)
         return data
       })
       .catch((error) => {
@@ -420,6 +424,10 @@ export const useAppStore = defineStore('app', () => {
   function clearPublicSettingsCache(): void {
     publicSettingsLoaded.value = false
     cachedPublicSettings.value = null
+    publicSettingsRequest = null
+    publicSettingsLoading.value = false
+    if (typeof window !== 'undefined') delete window.__APP_CONFIG__
+    setSiteDisplayCurrency(undefined)
   }
 
   /**
@@ -432,6 +440,7 @@ export const useAppStore = defineStore('app', () => {
       applySettings(window.__APP_CONFIG__)
       return true
     }
+    setSiteDisplayCurrency(undefined)
     return false
   }
 

@@ -26,7 +26,7 @@ const (
 
 func TestLocalizedPlazaKeepsGroupCatalogAndPrices(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	router, _, assertSourcesUnchanged := newLocalizedPlazaScenario(t)
+	router, _, assertSourcesUnchanged := newLocalizedPlazaScenario(t, nil)
 
 	zh := requestModelPlaza(t, router, "https://a.example", "zh", false)
 	require.NotEmpty(t, zh.Groups)
@@ -100,10 +100,19 @@ func plazaLanguageInvariants(t *testing.T, groups []modelPlazaGroup) map[int64]s
 	return out
 }
 
-type plazaVarySettingRepo struct{ service.SettingRepository }
+type plazaVarySettingRepo struct {
+	service.SettingRepository
+	values map[string]string
+}
 
-func (plazaVarySettingRepo) GetMultiple(context.Context, []string) (map[string]string, error) {
-	return map[string]string{service.SettingKeyModelPlazaEnabled: "true"}, nil
+func (r plazaVarySettingRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	settings := map[string]string{service.SettingKeyModelPlazaEnabled: "true"}
+	for _, key := range keys {
+		if value, ok := r.values[key]; ok {
+			settings[key] = value
+		}
+	}
+	return settings, nil
 }
 
 // 以下仓储桩与真实仓储一样每次读出新切片：服务对读出副本的就地规范化/排序不算改源对象，
@@ -152,7 +161,7 @@ func (plazaScenarioSubscriptionRepo) ListActiveByUserID(context.Context, int64) 
 	return nil, nil
 }
 
-func newLocalizedPlazaScenario(t *testing.T) (*gin.Engine, *service.BillingService, func(*testing.T)) {
+func newLocalizedPlazaScenario(t *testing.T, settings map[string]string) (*gin.Engine, *service.BillingService, func(*testing.T)) {
 	t.Helper()
 	channelPrice := func(model string, input, output float64) service.ChannelModelPricing {
 		return service.ChannelModelPricing{
@@ -231,7 +240,7 @@ func newLocalizedPlazaScenario(t *testing.T) (*gin.Engine, *service.BillingServi
 	plaza := service.NewModelPlazaService(channelRepo, groupRepo, accountRepo, nil, billing, nil)
 	userRepo := plazaScenarioUserRepo{user: &service.User{AllowedGroups: []int64{plazaPrivateGroupID}}}
 	apiKeys := service.NewAPIKeyService(nil, userRepo, nil, plazaScenarioSubscriptionRepo{}, nil, nil, &config.Config{})
-	handler := NewModelPlazaHandler(plaza, apiKeys, service.NewSettingService(plazaVarySettingRepo{}, &config.Config{}))
+	handler := NewModelPlazaHandler(plaza, apiKeys, service.NewSettingService(plazaVarySettingRepo{values: settings}, &config.Config{}))
 
 	router := gin.New()
 	router.Use(middleware.CORS(config.CORSConfig{AllowedOrigins: []string{"https://a.example", "https://b.example"}}))
@@ -264,6 +273,9 @@ func requestModelPlaza(t *testing.T, router http.Handler, origin, language strin
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &envelope), w.Body.String())
 	require.NotEmpty(t, envelope.Data.Groups, "the real service-to-handler response must contain catalog groups")
+	if !envelope.Data.ModelPlazaShowOfficialPricing {
+		require.Contains(t, w.Body.String(), `"official_pricing":null`)
+	}
 	return envelope.Data
 }
 
@@ -337,10 +349,51 @@ func assertPlazaNoI18nLeak(t *testing.T, response modelPlazaResponse) {
 
 func TestLocalizedPlazaPreservesVaryOrigin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	router, _, assertSourcesUnchanged := newLocalizedPlazaScenario(t)
+	router, _, assertSourcesUnchanged := newLocalizedPlazaScenario(t, nil)
 	for _, origin := range []string{"https://a.example", "https://b.example"} {
 		got := requestModelPlaza(t, router, origin, "en", false)
 		require.Len(t, got.Groups, 2)
 	}
 	assertSourcesUnchanged(t)
+}
+
+func TestModelPlazaOfficialPricingSwitchAppliesOnNextRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	settings := map[string]string{}
+	router, _, assertSourcesUnchanged := newLocalizedPlazaScenario(t, settings)
+
+	for _, tc := range []struct {
+		name       string
+		authorized bool
+		groupCount int
+	}{
+		{name: "authenticated", authorized: true, groupCount: 3},
+		{name: "anonymous", groupCount: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const origin = "https://a.example"
+			key := service.SettingKeyModelPlazaShowOfficialPricing
+			delete(settings, key)
+			on := requestModelPlaza(t, router, origin, "en", tc.authorized)
+			require.True(t, on.ModelPlazaShowOfficialPricing)
+			require.Len(t, on.Groups, tc.groupCount)
+			assertPlazaOfficialPrice(t, plazaGroupsByID(on.Groups)[plazaAlphaGroupID], 0.000003, 0.000015)
+
+			settings[key] = "false"
+			off := requestModelPlaza(t, router, origin, "en", tc.authorized)
+			require.False(t, off.ModelPlazaShowOfficialPricing)
+
+			settings[key] = "true"
+			reopened := requestModelPlaza(t, router, origin, "en", tc.authorized)
+			require.Equal(t, on, reopened)
+
+			for i := range on.Groups {
+				for j := range on.Groups[i].Models {
+					on.Groups[i].Models[j].OfficialPricing = nil
+				}
+			}
+			require.Equal(t, on.Groups, off.Groups)
+			assertSourcesUnchanged(t)
+		})
+	}
 }

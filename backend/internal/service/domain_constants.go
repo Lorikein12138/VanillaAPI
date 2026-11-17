@@ -557,6 +557,9 @@ const (
 	// the Model Plaza page (global pricing notes, exchange rate, promotions, ...).
 	SettingKeyModelPlazaDescription = "model_plaza_description"
 
+	SettingKeyModelPlazaShowOfficialPricing = "model_plaza_show_official_pricing"
+	SettingKeySiteDisplayCurrency           = "site_display_currency"
+
 	// SettingKeyPluginManagementEnabled controls sidebar visibility only; it does
 	// not stop or otherwise change already loaded plugin runtimes.
 	SettingKeyPluginManagementEnabled = "plugin_management_enabled"

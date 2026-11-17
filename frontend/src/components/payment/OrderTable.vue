@@ -21,7 +21,7 @@
         </span>
         <div v-if="floatingAmounts.has(row.id)" class="text-xs text-gray-500" data-test="order-ordered-amount">{{ t('payment.orders.orderedAmount') }}: {{ paymentAmountSymbol(row) }}{{ value.toFixed(2) }}</div>
         <div v-if="floatingAmounts.has(row.id) || row.amount !== row.pay_amount || (row.bonus_amount ?? 0) > 0" class="text-xs text-gray-500">
-          {{ t('payment.orders.creditedAmount') }}: {{ creditedAmountSymbol }}{{ row.amount.toFixed(2) }}
+          {{ t(row.order_type === 'balance' ? 'payment.orders.creditedAmount' : 'payment.orders.amount') }}: {{ orderCreditSymbol(row.order_type) }}{{ row.amount.toFixed(2) }}
           <span v-if="(row.bonus_amount ?? 0) > 0" class="ml-1 text-amber-600 dark:text-amber-400">
             ({{ t('payment.orders.bonusIncluded', { amount: creditedAmountSymbol + (row.bonus_amount ?? 0).toFixed(2) }) }})
           </span>
@@ -44,6 +44,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PaymentOrder } from '@/types/payment'
@@ -52,6 +53,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import OrderStatusBadge from '@/components/payment/OrderStatusBadge.vue'
 import { currencySymbol } from '@/components/payment/currency'
 import { actualPaymentLabelKey, getFloatingPaymentAmount } from './paymentFlow'
+import { orderCreditSymbol } from './orderUtils'
 
 const { t } = useI18n()
 
@@ -63,7 +65,7 @@ const props = defineProps<{
 
 function formatDate(dateStr: string) { return new Date(dateStr).toLocaleString() }
 
-const creditedAmountSymbol = currencySymbol('USD')
+const creditedAmountSymbol = computed(getSiteCurrencySymbol)
 
 function paymentAmountSymbol(order: PaymentOrder): string {
   return currencySymbol(order.currency)

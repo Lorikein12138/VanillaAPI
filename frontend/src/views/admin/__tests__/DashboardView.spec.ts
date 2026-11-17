@@ -1,8 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 
 import type { DashboardStats } from '@/types'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 import DashboardView from '../DashboardView.vue'
 
 const { getSnapshotV2, getUserUsageTrend, getUserSpendingRanking } = vi.hoisted(() => ({
@@ -91,6 +93,7 @@ const createDashboardStats = (): DashboardStats => ({
 })
 
 describe('admin DashboardView', () => {
+  afterEach(() => setSiteDisplayCurrency('USD'))
   beforeEach(() => {
     setActivePinia(createPinia())
 
@@ -138,9 +141,16 @@ describe('admin DashboardView', () => {
     const chart = wrapper.findComponent({ name: 'Line' })
     expect(chart.props('data').datasets[0].data).toEqual([5])
     expect(chart.props('options').scales.y.ticks.callback(5)).toBe('$5.00')
+    setSiteDisplayCurrency('CNY')
+    await nextTick()
+    const options = chart.props('options')
+    expect(options.scales.y.ticks.callback(5)).toBe('¥5.00')
+    expect(options.plugins.tooltip.callbacks.label({ dataset: { label: 'spender' }, raw: 5 })).toBe('spender: ¥5.00')
     resolveTokens({ trend: [{ date: '2026-01-01', user_id: 1, username: 'tokens', email: '', requests: 1, tokens: 100, cost: 1, actual_cost: 1 }] })
     await flushPromises()
     expect(chart.props('data').datasets[0].data).toEqual([5])
+    expect(getUserUsageTrend).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
   })
 
   it('uses last 24 hours as default dashboard range', async () => {

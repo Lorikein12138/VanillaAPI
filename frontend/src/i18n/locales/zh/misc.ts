@@ -183,7 +183,7 @@ export default {
       groupMultiplier: {
         title: '💰 3. 费率倍数',
         description:
-          '<div style="line-height: 1.7;"><p style="margin-bottom: 12px;">设置该分组的计费倍率，控制用户的实际扣费。</p><div style="padding: 8px 12px; background: #fff0df; border-left: 3px solid #dca968; border-radius: 4px; font-size: 13px; margin-bottom: 12px;"><b>⚙️ 计费规则：</b><ul style="margin: 8px 0 0 16px;"><li><b>1.0</b> - 原价计费（成本价）</li><li><b>1.5</b> - 用户消耗 $1，扣除 $1.5</li><li><b>2.0</b> - 用户消耗 $1，扣除 $2</li><li><b>0.8</b> - 补贴模式（亏本运营）</li></ul></div><p style="font-size: 13px; color: #73726c;">建议测试分组设置为 1.0</p></div>',
+          '<div style="line-height: 1.7;"><p style="margin-bottom: 12px;">设置该分组的计费倍率，控制用户的实际扣费。</p><div style="padding: 8px 12px; background: #fff0df; border-left: 3px solid #dca968; border-radius: 4px; font-size: 13px; margin-bottom: 12px;"><b>⚙️ 计费规则：</b><ul style="margin: 8px 0 0 16px;"><li><b>1.0</b> - 原价计费（成本价）</li><li><b>1.5</b> - 用户消耗 {symbol}1，扣除 {symbol}1.5</li><li><b>2.0</b> - 用户消耗 {symbol}1，扣除 {symbol}2</li><li><b>0.8</b> - 补贴模式（亏本运营）</li></ul></div><p style="font-size: 13px; color: #73726c;">建议测试分组设置为 1.0</p></div>',
         nextBtn: '下一步'
       },
       groupExclusive: {
@@ -420,6 +420,7 @@ export default {
       orderType: '订单类型',
       actions: '操作',
       requestRefund: '申请退款',
+      refundCreditAmount: '退款额度',
     },
     result: {
       success: '支付成功',
@@ -445,7 +446,7 @@ export default {
     amountTooLow: '最低金额为 {min}',
     amountTooHigh: '最高金额为 {max}',
     amountNoMethod: '该金额没有可用的支付方式',
-    rechargeRatePreview: '当前倍率：1 {currency} = {usd} USD',
+    rechargeRatePreview: '当前倍率：1 {currency} = {symbol}{usd}',
     refundReason: '退款原因',
     refundReasonPlaceholder: '请描述您的退款原因',
     stripeLoadFailed: '支付组件加载失败，请刷新页面重试',
@@ -581,7 +582,7 @@ export default {
       deductBalanceHint: '从用户余额中扣回充值金额',
       userBalance: '用户余额',
       orderAmount: '订单金额',
-      insufficientBalance: '余额不足，将扣至 $0',
+      insufficientBalance: '余额不足，将扣至 {symbol}0',
       noDeduction: '将不扣除用户余额',
       forceRefund: '强制退款（忽略余额检查）',
       orderCancelled: '订单已取消',

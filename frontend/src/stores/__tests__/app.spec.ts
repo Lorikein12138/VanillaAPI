@@ -3,6 +3,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { getPublicSettings } from '@/api/auth'
 import type { PublicSettings } from '@/types'
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -27,6 +28,7 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
     turnstile_enabled: false,
     turnstile_site_key: '',
     site_name: 'Test Site',
+    site_display_currency: 'USD',
     site_logo: '',
     site_subtitle: '',
     api_base_url: '',
@@ -59,6 +61,7 @@ function createPublicSettings(overrides: Partial<PublicSettings> = {}): PublicSe
     payment_balance_disabled: false,
     model_plaza_enabled: false,
     model_plaza_require_auth: false,
+    model_plaza_show_official_pricing: true,
     plugin_management_enabled: false,
     service_quota_enabled: false,
     affiliate_enabled: false,
@@ -327,6 +330,46 @@ describe('useAppStore', () => {
   // --- 公开设置 ---
 
   describe('公开设置加载', () => {
+    it('从首屏注入和公开 API 同步币种，清除缓存后恢复 USD 并重新请求', async () => {
+      window.__APP_CONFIG__ = createPublicSettings({ site_display_currency: 'CNY' })
+      const store = useAppStore()
+      expect(store.initFromInjectedConfig()).toBe(true)
+      expect(getSiteCurrencySymbol()).toBe('¥')
+
+      vi.mocked(getPublicSettings).mockResolvedValueOnce(createPublicSettings())
+      await store.fetchPublicSettings(true)
+      expect(getSiteCurrencySymbol()).toBe('$')
+
+      const settings = createPublicSettings({
+        site_display_currency: 'CNY',
+        model_plaza_show_official_pricing: false
+      })
+      vi.mocked(getPublicSettings).mockResolvedValue(settings)
+      await store.fetchPublicSettings(true)
+      expect(getSiteCurrencySymbol()).toBe('¥')
+      expect(store.cachedPublicSettings?.model_plaza_show_official_pricing).toBe(false)
+
+      store.clearPublicSettingsCache()
+      expect(getSiteCurrencySymbol()).toBe('$')
+      await store.fetchPublicSettings()
+      expect(getPublicSettings).toHaveBeenCalledTimes(3)
+      expect(getSiteCurrencySymbol()).toBe('¥')
+    })
+
+    it('清除缓存后忽略清除前发出的响应', async () => {
+      const deferred = createDeferred<PublicSettings>()
+      vi.mocked(getPublicSettings).mockReturnValueOnce(deferred.promise)
+      const store = useAppStore()
+      const pending = store.fetchPublicSettings()
+
+      store.clearPublicSettingsCache()
+      deferred.resolve(createPublicSettings({ site_display_currency: 'CNY' }))
+      await pending
+
+      expect(store.cachedPublicSettings).toBeNull()
+      expect(getSiteCurrencySymbol()).toBe('$')
+    })
+
     it('并发调用复用并等待同一个请求，包括 force 调用', async () => {
       const deferred = createDeferred<PublicSettings>()
       vi.mocked(getPublicSettings).mockReturnValue(deferred.promise)

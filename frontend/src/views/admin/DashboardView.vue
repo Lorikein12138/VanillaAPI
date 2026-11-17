@@ -114,19 +114,19 @@
                   <span
                     class="text-green-600 dark:text-green-400"
                     :title="t('admin.dashboard.actual')"
-                    >${{ formatCost(stats.today_actual_cost) }}</span
+                    >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.today_actual_cost) }}</span
                   >
                   <span class="text-gray-400 dark:text-gray-500"> / </span>
                   <span
                     class="text-orange-500 dark:text-orange-400"
                     :title="t('admin.dashboard.accountCost')"
-                    >${{ formatCost(stats.today_account_cost) }}</span
+                    >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.today_account_cost) }}</span
                   >
                   <span class="text-gray-400 dark:text-gray-500"> / </span>
                   <span
                     class="text-gray-400 dark:text-gray-500"
                     :title="t('admin.dashboard.standard')"
-                    >${{ formatCost(stats.today_cost) }}</span
+                    >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.today_cost) }}</span
                   >
                 </p>
               </div>
@@ -150,19 +150,19 @@
                   <span
                     class="text-green-600 dark:text-green-400"
                     :title="t('admin.dashboard.actual')"
-                    >${{ formatCost(stats.total_actual_cost) }}</span
+                    >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.total_actual_cost) }}</span
                   >
                   <span class="text-gray-400 dark:text-gray-500"> / </span>
                   <span
                     class="text-orange-500 dark:text-orange-400"
                     :title="t('admin.dashboard.accountCost')"
-                    >${{ formatCost(stats.total_account_cost) }}</span
+                    >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.total_account_cost) }}</span
                   >
                   <span class="text-gray-400 dark:text-gray-500"> / </span>
                   <span
                     class="text-gray-400 dark:text-gray-500"
                     :title="t('admin.dashboard.standard')"
-                    >${{ formatCost(stats.total_cost) }}</span
+                    >{{ getSiteCurrencySymbol() }}{{ formatCost(stats.total_cost) }}</span
                   >
                 </p>
               </div>
@@ -324,7 +324,7 @@
                 <button v-for="metric in (['tokens', 'actual_cost'] as const)" :key="metric" type="button"
                   class="rounded px-2 py-1 text-xs" :class="userTrendMetric === metric ? 'bg-primary-600 text-white' : 'text-gray-600 dark:text-gray-300'"
                   :aria-pressed="userTrendMetric === metric" @click="setUserTrendMetric(metric)">
-                  {{ t(metric === 'tokens' ? 'admin.dashboard.tokens' : 'admin.dashboard.actualSpending') }}
+                  {{ metric === 'tokens' ? t('admin.dashboard.tokens') : t('admin.dashboard.actualSpending', { symbol: getSiteCurrencySymbol() }) }}
                 </button>
               </div>
             </div>
@@ -348,6 +348,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
@@ -456,7 +457,7 @@ const chartColors = computed(() => ({
 }))
 
 // Line chart options (for user trend chart)
-const lineOptions = computed(() => ({
+const lineOptionsForCurrency = (symbol: string) => ({
   responsive: true,
   maintainAspectRatio: false,
   interaction: {
@@ -484,7 +485,7 @@ const lineOptions = computed(() => ({
       },
       callbacks: {
         label: (context: any) => {
-          return `${context.dataset.label}: ${formatUserTrendValue(Number(context.raw))}`
+          return `${context.dataset.label}: ${formatUserTrendValue(Number(context.raw), symbol)}`
         }
       }
     }
@@ -510,11 +511,13 @@ const lineOptions = computed(() => ({
         font: {
           size: 10
         },
-        callback: (value: string | number) => formatUserTrendValue(Number(value))
+        callback: (value: string | number) => formatUserTrendValue(Number(value), symbol)
       }
     }
   }
-}))
+})
+
+const lineOptions = computed(() => lineOptionsForCurrency(getSiteCurrencySymbol()))
 
 // User trend chart data
 const userTrendChartData = computed(() => {
@@ -579,8 +582,8 @@ const userTrendChartData = computed(() => {
 })
 
 // Format helpers
-const formatUserTrendValue = (value: number): string =>
-  userTrendMetric.value === 'tokens' ? formatTokens(value) : `$${formatCost(value)}`
+const formatUserTrendValue = (value: number, symbol: string): string =>
+  userTrendMetric.value === 'tokens' ? formatTokens(value) : `${symbol}${formatCost(value)}`
 
 const formatTokens = (value: number | undefined): string => {
   if (value === undefined || value === null) return '0'

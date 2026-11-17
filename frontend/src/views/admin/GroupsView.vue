@@ -340,7 +340,7 @@
                   t("admin.groups.usageToday")
                 }}</span>
                 <span class="ml-1 font-medium text-gray-700 dark:text-gray-300"
-                  >${{
+                  >{{ getSiteCurrencySymbol() }}{{
                     formatCost(usageMap.get(row.id)?.today_cost ?? 0)
                   }}</span
                 >
@@ -350,7 +350,7 @@
                   t("admin.groups.usageYesterday")
                 }}</span>
                 <span class="ml-1 font-medium text-gray-700 dark:text-gray-300"
-                  >${{
+                  >{{ getSiteCurrencySymbol() }}{{
                     formatCost(usageMap.get(row.id)?.yesterday_cost ?? 0)
                   }}</span
                 >
@@ -360,7 +360,7 @@
                   t("admin.groups.usageTotal")
                 }}</span>
                 <span class="ml-1 font-medium text-gray-700 dark:text-gray-300"
-                  >${{
+                  >{{ getSiteCurrencySymbol() }}{{
                     formatCost(usageMap.get(row.id)?.total_cost ?? 0)
                   }}</span
                 >
@@ -737,7 +737,7 @@
           >
             <div>
               <label class="input-label">{{
-                t("admin.groups.subscription.dailyLimit")
+                t("admin.groups.subscription.dailyLimit", { symbol: getSiteCurrencySymbol() })
               }}</label>
               <input
                 v-model.number="createForm.daily_limit_usd"
@@ -750,7 +750,7 @@
             </div>
             <div>
               <label class="input-label">{{
-                t("admin.groups.subscription.weeklyLimit")
+                t("admin.groups.subscription.weeklyLimit", { symbol: getSiteCurrencySymbol() })
               }}</label>
               <input
                 v-model.number="createForm.weekly_limit_usd"
@@ -763,7 +763,7 @@
             </div>
             <div>
               <label class="input-label">{{
-                t("admin.groups.subscription.monthlyLimit")
+                t("admin.groups.subscription.monthlyLimit", { symbol: getSiteCurrencySymbol() })
               }}</label>
               <input
                 v-model.number="createForm.monthly_limit_usd"
@@ -970,7 +970,7 @@
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div>
-              <label class="input-label">1K ($)</label>
+              <label class="input-label">1K ({{ getSiteCurrencySymbol() }})</label>
               <input
                 v-model.number="createForm.image_price_1k"
                 type="number"
@@ -981,7 +981,7 @@
               />
             </div>
             <div>
-              <label class="input-label">2K ($)</label>
+              <label class="input-label">2K ({{ getSiteCurrencySymbol() }})</label>
               <input
                 v-model.number="createForm.image_price_2k"
                 type="number"
@@ -992,7 +992,7 @@
               />
             </div>
             <div>
-              <label class="input-label">4K ($)</label>
+              <label class="input-label">4K ({{ getSiteCurrencySymbol() }})</label>
               <input
                 v-model.number="createForm.image_price_4k"
                 type="number"
@@ -1084,7 +1084,7 @@
             {{ t(videoPricingI18nKey("title")) }}
           </label>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-            {{ t(videoPricingI18nKey("description")) }}
+            {{ t(videoPricingI18nKey("description"), { symbol: getSiteCurrencySymbol() }) }}
           </p>
           <div class="mb-4">
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -1114,7 +1114,7 @@
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div>
-              <label class="input-label">480p ($/s)</label>
+              <label class="input-label">480p ({{ getSiteCurrencySymbol() }}/s)</label>
               <input
                 v-model.number="createForm.video_price_480p"
                 type="number"
@@ -1125,7 +1125,7 @@
               />
             </div>
             <div>
-              <label class="input-label">720p ($/s)</label>
+              <label class="input-label">720p ({{ getSiteCurrencySymbol() }}/s)</label>
               <input
                 v-model.number="createForm.video_price_720p"
                 type="number"
@@ -1136,7 +1136,7 @@
               />
             </div>
             <div>
-              <label class="input-label">1080p ($/s)</label>
+              <label class="input-label">1080p ({{ getSiteCurrencySymbol() }}/s)</label>
               <input
                 v-model.number="createForm.video_price_1080p"
                 type="number"
@@ -1172,7 +1172,7 @@
                   class="block"
                 >
                   <span class="mb-1 block text-xs text-gray-500 dark:text-gray-400">
-                    {{ resolution.label }} ($/s)
+                    {{ resolution.label }} ({{ getSiteCurrencySymbol() }}/s)
                   </span>
                   <input
                     v-model.number="createForm.video_model_prices[family.key][resolution.key]"
@@ -1482,7 +1482,7 @@
           </h4>
           <div>
             <label class="input-label">{{
-              t("admin.groups.webSearchPricing.pricePerCall")
+              t("admin.groups.webSearchPricing.pricePerCall", { symbol: getSiteCurrencySymbol() })
             }}</label>
             <input
               v-model.number="createForm.web_search_price_per_call"
@@ -1493,7 +1493,7 @@
               class="input"
             />
             <p class="input-hint">
-              {{ t("admin.groups.webSearchPricing.pricePerCallHint") }}
+              {{ t("admin.groups.webSearchPricing.pricePerCallHint", { symbol: getSiteCurrencySymbol() }) }}
             </p>
             <div
               class="mt-2 rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300"
@@ -1536,11 +1536,11 @@
             {{ t("admin.groups.explicitPricing.title") }}
           </h4>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-            {{ t("admin.groups.explicitPricing.description") }}
+            {{ t("admin.groups.explicitPricing.description", { symbol: getSiteCurrencySymbol() }) }}
           </p>
           <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
             <div>
-              <label class="input-label">{{ t("admin.groups.explicitPricing.searchPricePer1k") }}</label>
+              <label class="input-label">{{ t("admin.groups.explicitPricing.searchPricePer1k", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="createForm.search_price_per_1k"
                 type="number"
@@ -1552,7 +1552,7 @@
               />
             </div>
             <div>
-              <label class="input-label">{{ t("admin.groups.voicePricing.audioRealtimePerMin") }}</label>
+              <label class="input-label">{{ t("admin.groups.voicePricing.audioRealtimePerMin", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="createForm.audio_realtime_price_per_min"
                 type="number"
@@ -1564,7 +1564,7 @@
               />
             </div>
             <div>
-              <label class="input-label">{{ t("admin.groups.voicePricing.audioTtsPerMillionChars") }}</label>
+              <label class="input-label">{{ t("admin.groups.voicePricing.audioTtsPerMillionChars", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="createForm.audio_tts_price_per_million_chars"
                 type="number"
@@ -1576,7 +1576,7 @@
               />
             </div>
             <div>
-              <label class="input-label">{{ t("admin.groups.voicePricing.audioSttPerHour") }}</label>
+              <label class="input-label">{{ t("admin.groups.voicePricing.audioSttPerHour", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="createForm.audio_stt_price_per_hour"
                 type="number"
@@ -2422,7 +2422,7 @@
           >
             <div>
               <label class="input-label">{{
-                t("admin.groups.subscription.dailyLimit")
+                t("admin.groups.subscription.dailyLimit", { symbol: getSiteCurrencySymbol() })
               }}</label>
               <input
                 v-model.number="editForm.daily_limit_usd"
@@ -2435,7 +2435,7 @@
             </div>
             <div>
               <label class="input-label">{{
-                t("admin.groups.subscription.weeklyLimit")
+                t("admin.groups.subscription.weeklyLimit", { symbol: getSiteCurrencySymbol() })
               }}</label>
               <input
                 v-model.number="editForm.weekly_limit_usd"
@@ -2448,7 +2448,7 @@
             </div>
             <div>
               <label class="input-label">{{
-                t("admin.groups.subscription.monthlyLimit")
+                t("admin.groups.subscription.monthlyLimit", { symbol: getSiteCurrencySymbol() })
               }}</label>
               <input
                 v-model.number="editForm.monthly_limit_usd"
@@ -2675,7 +2675,7 @@
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div>
-              <label class="input-label">1K ($)</label>
+              <label class="input-label">1K ({{ getSiteCurrencySymbol() }})</label>
               <input
                 v-model.number="editForm.image_price_1k"
                 type="number"
@@ -2686,7 +2686,7 @@
               />
             </div>
             <div>
-              <label class="input-label">2K ($)</label>
+              <label class="input-label">2K ({{ getSiteCurrencySymbol() }})</label>
               <input
                 v-model.number="editForm.image_price_2k"
                 type="number"
@@ -2697,7 +2697,7 @@
               />
             </div>
             <div>
-              <label class="input-label">4K ($)</label>
+              <label class="input-label">4K ({{ getSiteCurrencySymbol() }})</label>
               <input
                 v-model.number="editForm.image_price_4k"
                 type="number"
@@ -2789,7 +2789,7 @@
             {{ t(videoPricingI18nKey("title")) }}
           </label>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-            {{ t(videoPricingI18nKey("description")) }}
+            {{ t(videoPricingI18nKey("description"), { symbol: getSiteCurrencySymbol() }) }}
           </p>
           <div class="mb-4">
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -2819,7 +2819,7 @@
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div>
-              <label class="input-label">480p ($/s)</label>
+              <label class="input-label">480p ({{ getSiteCurrencySymbol() }}/s)</label>
               <input
                 v-model.number="editForm.video_price_480p"
                 type="number"
@@ -2830,7 +2830,7 @@
               />
             </div>
             <div>
-              <label class="input-label">720p ($/s)</label>
+              <label class="input-label">720p ({{ getSiteCurrencySymbol() }}/s)</label>
               <input
                 v-model.number="editForm.video_price_720p"
                 type="number"
@@ -2841,7 +2841,7 @@
               />
             </div>
             <div>
-              <label class="input-label">1080p ($/s)</label>
+              <label class="input-label">1080p ({{ getSiteCurrencySymbol() }}/s)</label>
               <input
                 v-model.number="editForm.video_price_1080p"
                 type="number"
@@ -2877,7 +2877,7 @@
                   class="block"
                 >
                   <span class="mb-1 block text-xs text-gray-500 dark:text-gray-400">
-                    {{ resolution.label }} ($/s)
+                    {{ resolution.label }} ({{ getSiteCurrencySymbol() }}/s)
                   </span>
                   <input
                     v-model.number="editForm.video_model_prices[family.key][resolution.key]"
@@ -3187,7 +3187,7 @@
           </h4>
           <div>
             <label class="input-label">{{
-              t("admin.groups.webSearchPricing.pricePerCall")
+              t("admin.groups.webSearchPricing.pricePerCall", { symbol: getSiteCurrencySymbol() })
             }}</label>
             <input
               v-model.number="editForm.web_search_price_per_call"
@@ -3198,7 +3198,7 @@
               class="input"
             />
             <p class="input-hint">
-              {{ t("admin.groups.webSearchPricing.pricePerCallHint") }}
+              {{ t("admin.groups.webSearchPricing.pricePerCallHint", { symbol: getSiteCurrencySymbol() }) }}
             </p>
             <div
               class="mt-2 rounded-lg bg-gray-50 p-3 text-xs text-gray-600 dark:bg-dark-700 dark:text-gray-300"
@@ -3251,11 +3251,11 @@
             {{ t("admin.groups.explicitPricing.title") }}
           </h4>
           <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-            {{ t("admin.groups.explicitPricing.description") }}
+            {{ t("admin.groups.explicitPricing.description", { symbol: getSiteCurrencySymbol() }) }}
           </p>
           <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
             <div>
-              <label class="input-label">{{ t("admin.groups.explicitPricing.searchPricePer1k") }}</label>
+              <label class="input-label">{{ t("admin.groups.explicitPricing.searchPricePer1k", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="editForm.search_price_per_1k"
                 type="number"
@@ -3267,7 +3267,7 @@
               />
             </div>
             <div>
-              <label class="input-label">{{ t("admin.groups.voicePricing.audioRealtimePerMin") }}</label>
+              <label class="input-label">{{ t("admin.groups.voicePricing.audioRealtimePerMin", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="editForm.audio_realtime_price_per_min"
                 type="number"
@@ -3279,7 +3279,7 @@
               />
             </div>
             <div>
-              <label class="input-label">{{ t("admin.groups.voicePricing.audioTtsPerMillionChars") }}</label>
+              <label class="input-label">{{ t("admin.groups.voicePricing.audioTtsPerMillionChars", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="editForm.audio_tts_price_per_million_chars"
                 type="number"
@@ -3291,7 +3291,7 @@
               />
             </div>
             <div>
-              <label class="input-label">{{ t("admin.groups.voicePricing.audioSttPerHour") }}</label>
+              <label class="input-label">{{ t("admin.groups.voicePricing.audioSttPerHour", { symbol: getSiteCurrencySymbol() }) }}</label>
               <input
                 v-model.number="editForm.audio_stt_price_per_hour"
                 type="number"
@@ -4375,6 +4375,7 @@
 </template>
 
 <script setup lang="ts">
+import { getSiteCurrencySymbol } from "@/utils/siteCurrency";
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "@/stores/app";
@@ -5590,7 +5591,7 @@ const formatImagePricePreview = (value: number | string | null | undefined) => {
   if (!Number.isFinite(price) || price < 0) {
     return t("admin.groups.imagePricing.notConfigured");
   }
-  return `$${price.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
+  return `${getSiteCurrencySymbol()}${price.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
 };
 
 const formatVideoPricePreview = (value: number | string | null | undefined) => {
@@ -5601,7 +5602,7 @@ const formatVideoPricePreview = (value: number | string | null | undefined) => {
   if (!Number.isFinite(price) || price < 0) {
     return t("admin.groups.videoPricing.notConfigured");
   }
-  return `$${price.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
+  return `${getSiteCurrencySymbol()}${price.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
 };
 
 const buildImageFinalPricePreview = (form: ImagePricingFormState) => {
@@ -5810,7 +5811,7 @@ const formatCost = (cost: number): string => {
 };
 
 const formatUsd = (cost: number | null | undefined): string =>
-  `$${formatCost(cost ?? 0)}`;
+  `${getSiteCurrencySymbol()}${formatCost(cost ?? 0)}`;
 
 const getQuotaUsageClass = (
   used: number,

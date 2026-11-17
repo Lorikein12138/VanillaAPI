@@ -87,6 +87,7 @@ export interface ModelPlazaGroup {
 export interface ModelPlazaResponse {
   /** 管理员配置的全局价格说明（Markdown）。 */
   description: string
+  model_plaza_show_official_pricing: boolean
   groups: ModelPlazaGroup[]
 }
 

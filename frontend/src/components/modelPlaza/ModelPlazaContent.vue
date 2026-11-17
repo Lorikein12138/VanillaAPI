@@ -50,7 +50,12 @@
 
       <!-- 分组分节的模型清单(默认按生效倍率升序) -->
       <div v-if="filteredGroups.length > 0" class="space-y-5">
-        <PlazaGroupSection v-for="g in filteredGroups" :key="g.id" :group="g" />
+        <PlazaGroupSection
+          v-for="g in filteredGroups"
+          :key="g.id"
+          :group="g"
+          :show-official-pricing="response?.model_plaza_show_official_pricing !== false"
+        />
       </div>
       <div
         v-else

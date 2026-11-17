@@ -105,6 +105,13 @@ func (s *SettingService) refreshCachedSettingsAfterWrite(ctx context.Context, se
 }
 
 func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, settings *SystemSettings) (map[string]string, error) {
+	siteDisplayCurrency := settings.SiteDisplayCurrency
+	if siteDisplayCurrency == "" {
+		siteDisplayCurrency = SiteDisplayCurrencyUSD
+	}
+	if err := ValidateSiteDisplayCurrency(siteDisplayCurrency); err != nil {
+		return nil, err
+	}
 	if err := s.validateDefaultSubscriptionGroups(ctx, settings.DefaultSubscriptions); err != nil {
 		return nil, err
 	}
@@ -443,6 +450,8 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 
 	// Model plaza feature switches + description
 	updates[SettingKeyModelPlazaEnabled] = strconv.FormatBool(settings.ModelPlazaEnabled)
+	updates[SettingKeyModelPlazaShowOfficialPricing] = strconv.FormatBool(settings.ModelPlazaShowOfficialPricing)
+	updates[SettingKeySiteDisplayCurrency] = siteDisplayCurrency
 	updates[SettingKeyModelPlazaRequireAuth] = strconv.FormatBool(settings.ModelPlazaRequireAuth)
 	updates[SettingKeyModelPlazaDescription] = settings.ModelPlazaDescription
 	updates[SettingKeyPluginManagementEnabled] = strconv.FormatBool(settings.PluginManagementEnabled)
