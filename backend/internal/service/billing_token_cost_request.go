@@ -34,7 +34,7 @@ func (s *BillingService) CalculateTokenCostForRequest(req TokenCostRequest) (*Co
 	if req.Resolver != nil && req.Group != nil {
 		return s.CalculateCostUnified(s.tokenCostInput(req, resolved))
 	}
-	if req.ReasoningEffort != "" {
+	if req.ReasoningEffort != "" || req.ServiceTier != "" {
 		return s.CalculateCostUnified(s.tokenCostInput(req, resolved))
 	}
 	return s.CalculateCost(req.Model, req.Tokens, req.RateMultiplier)

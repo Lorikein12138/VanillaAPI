@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"maps"
 	"strings"
+	"time"
 )
 
 // PricingSource 定价来源标识
@@ -61,9 +62,10 @@ func NewModelPricingResolver(channelService *ChannelService, billingService *Bil
 
 // PricingInput 定价解析输入
 type PricingInput struct {
-	Model   string
-	GroupID *int64 // nil 表示不检查渠道
-	Group   *Group
+	Model     string
+	GroupID   *int64 // nil 表示不检查渠道
+	Group     *Group
+	PricingAt time.Time
 }
 
 // Resolve 解析模型定价。
@@ -79,7 +81,7 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 			stripped.Intervals = nil
 			groupPricing = &stripped
 		}
-		resolved := r.resolveConfiguredPricing(groupPricing, input.Model, PricingSourceGroup)
+		resolved := r.resolveConfiguredPricing(groupPricing, input.Model, PricingSourceGroup, input.PricingAt)
 		resolved.longContextPricingEnabled = longContextPricingEnabled
 		return resolved
 	}
@@ -106,7 +108,7 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 	}
 
 	// 1. 获取基础定价
-	basePricing, source := r.resolveBasePricing(input.Model)
+	basePricing, source := r.resolveBasePricing(input.Model, input.PricingAt)
 
 	resolved := &ResolvedPricing{
 		Mode:                   BillingModeToken,
@@ -128,7 +130,7 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 	return resolved
 }
 
-func (r *ModelPricingResolver) resolveConfiguredPricing(config *ChannelModelPricing, model, source string) *ResolvedPricing {
+func (r *ModelPricingResolver) resolveConfiguredPricing(config *ChannelModelPricing, model, source string, pricingAt time.Time) *ResolvedPricing {
 	mode := config.BillingMode
 	if mode == "" {
 		mode = BillingModeToken
@@ -138,7 +140,7 @@ func (r *ModelPricingResolver) resolveConfiguredPricing(config *ChannelModelPric
 		r.applyRequestTierOverrides(config, resolved)
 		return resolved
 	}
-	resolved.BasePricing, _ = r.resolveBasePricing(model)
+	resolved.BasePricing, _ = r.resolveBasePricing(model, pricingAt)
 	resolved.SupportsCacheBreakdown = resolved.BasePricing != nil && resolved.BasePricing.SupportsCacheBreakdown
 	r.applyTokenOverrides(config, resolved)
 	return resolved
@@ -168,8 +170,8 @@ func matchGroupModelPricing(group *Group, model string) *ChannelModelPricing {
 }
 
 // resolveBasePricing 从 LiteLLM 或 Fallback 获取基础定价
-func (r *ModelPricingResolver) resolveBasePricing(model string) (*ModelPricing, string) {
-	pricing, err := r.billingService.GetModelPricing(model)
+func (r *ModelPricingResolver) resolveBasePricing(model string, pricingAt time.Time) (*ModelPricing, string) {
+	pricing, err := r.billingService.getModelPricingAt(model, pricingAt)
 	if err != nil {
 		slog.Debug("failed to get model pricing from LiteLLM, using fallback",
 			"model", model, "error", err)
@@ -248,6 +250,7 @@ func (r *ModelPricingResolver) applyTokenOverrides(chPricing *ChannelModelPricin
 	}
 	resolved.BasePricing.FastMultiplier = chPricing.FastMultiplier
 	resolved.BasePricing.FlexMultiplier = chPricing.FlexMultiplier
+	resolved.BasePricing.UltrafastMultiplierOverride = chPricing.UltrafastMultiplier
 	resolved.BasePricing.ReasoningEffortMultipliers = maps.Clone(chPricing.ReasoningEffortMultipliers)
 	applyChannelImagePriceOverrides(chPricing, resolved.BasePricing)
 

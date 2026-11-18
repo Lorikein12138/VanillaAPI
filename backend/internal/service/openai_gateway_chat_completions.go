@@ -869,14 +869,14 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
-	var intervalTicker *time.Ticker
+	var intervalTimer *time.Timer
 	if streamInterval > 0 {
-		intervalTicker = time.NewTicker(streamInterval)
-		defer intervalTicker.Stop()
+		intervalTimer = time.NewTimer(streamInterval)
+		defer intervalTimer.Stop()
 	}
 	var intervalCh <-chan time.Time
-	if intervalTicker != nil {
-		intervalCh = intervalTicker.C
+	if intervalTimer != nil {
+		intervalCh = intervalTimer.C
 	}
 
 	resultWithUsage := func() *OpenAIForwardResult {
@@ -1291,7 +1291,8 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
-			if time.Since(lastRead) < streamInterval {
+			if remaining := streamInterval - time.Since(lastRead); remaining > 0 {
+				intervalTimer.Reset(remaining)
 				continue
 			}
 			if clientDisconnected {
@@ -1302,6 +1303,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				zap.String("model", originalModel),
 				zap.Duration("interval", streamInterval),
 			)
+			if account != nil && account.Platform == PlatformOpenAI && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				_ = resp.Body.Close()
+				return resultWithUsage(), s.openAIStreamIdleFailover(c.Request.Context(), c, account, false, requestID, upstreamModel, resp.Header)
+			}
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
 		case <-keepaliveCh:
@@ -1316,13 +1321,15 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			}
 			// Send SSE comment as keepalive
 			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, ":\n\n"); err != nil {
+			n, err := fmt.Fprint(c.Writer, ":\n\n")
+			if err != nil {
 				logger.L().Info("openai chat_completions stream: client disconnected during keepalive",
 					zap.String("request_id", requestID),
 				)
 				clientDisconnected = true
 				continue
 			}
+			recordOpenAIStreamKeepaliveBytes(c, n)
 			c.Writer.Flush()
 		}
 	}

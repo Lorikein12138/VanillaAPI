@@ -43,7 +43,7 @@ func TestBaselineV0216MigrationIdentity(t *testing.T) {
 	}
 	sort.Strings(current)
 	sort.Strings(historical)
-	require.Len(t, current, baselineV0222MigrationCount)
+	require.Len(t, current, baselineV0223MigrationCount)
 	require.Len(t, historical, 301, "v0.2.16 target plus later frozen migrations remains 301")
 
 	for name, wantHash := range prior {

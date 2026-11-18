@@ -800,6 +800,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	}
 
 	multiplier, imageMultiplier, pricingAt := s.recordUsageMultipliers(ctx, apiKey, user, input.PricingAt)
+	ctx = context.WithValue(ctx, gatewayTokenRequestPricingAtCtxKey{}, pricingAt)
 	billingModel := s.recordUsageBillingModel(ctx, apiKey, result, input.ChannelUsageFields)
 	cacheStorageCost := s.cacheStorageCost(result, billingModel)
 
@@ -859,13 +860,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			account.ID, *apiKey.GroupID, result.UpstreamModel, result.Model,
 			// Anthropic's input_tokens excludes cache_read and cache_creation (billed separately);
 			// OpenAI gateway uses actualInputTokens which also excludes cache_read for the same reason.
-			UsageTokens{
-				InputTokens:         result.Usage.InputTokens,
-				OutputTokens:        result.Usage.OutputTokens,
-				CacheCreationTokens: result.Usage.CacheCreationInputTokens,
-				CacheReadTokens:     result.Usage.CacheReadInputTokens,
-				ImageOutputTokens:   result.Usage.ImageOutputTokens,
-			},
+			result.Usage.billingUsageTokens(),
 			cost.TotalCost-cacheStorageCost, pricingAt,
 			accountStatsLongContextPricingEnabled(nil), result.upstreamPriceFactor(),
 		)
@@ -941,7 +936,10 @@ func (s *GatewayService) recordUsageMultipliers(ctx context.Context, apiKey *API
 	}
 	// 高峰因子按请求时刻现算，不并入 getUserGroupRateMultiplier，以免污染 user:group 倍率缓存。
 	if pricingAt.IsZero() {
-		pricingAt = timezone.Now()
+		pricingAt = GatewayTokenRequestPricingAtFromContext(ctx)
+		if pricingAt.IsZero() {
+			pricingAt = timezone.Now()
+		}
 	}
 	multiplier, imageMultiplier := computePeakAwareMultipliers(apiKey, multiplier, pricingAt)
 	return multiplier, imageMultiplier, pricingAt
@@ -1014,6 +1012,7 @@ func (s *GatewayService) QuoteUsageCost(ctx context.Context, input *RecordUsageI
 		user = input.APIKey.User
 	}
 	multiplier, imageMultiplier, pricingAt := s.recordUsageMultipliers(ctx, input.APIKey, user, input.PricingAt)
+	ctx = context.WithValue(ctx, gatewayTokenRequestPricingAtCtxKey{}, pricingAt)
 	billingModel := s.recordUsageBillingModel(ctx, input.APIKey, input.Result, input.ChannelUsageFields)
 	cost := s.calculateRecordUsageCost(ctx, input.Result, input.APIKey, billingModel, multiplier, imageMultiplier, pricingAt)
 	if cost == nil {
@@ -1080,6 +1079,7 @@ func (s *GatewayService) calculateRecordUsageCost(
 				Ctx: ctx, Model: billingModel, GroupID: &gid, Group: apiKey.Group,
 				UsageUnits: result.AudioUsage.DurationOrUnits, SizeTier: result.AudioUsage.Mode,
 				RateMultiplier: multiplier, Resolver: s.resolver, Resolved: resolved,
+				PricingAt:       GatewayTokenRequestPricingAtFromContext(ctx),
 				ReasoningEffort: optionalStringValue(result.ReasoningEffort),
 			})
 			if err == nil {
@@ -1198,7 +1198,7 @@ func (s *GatewayService) resolveChannelPricing(ctx context.Context, billingModel
 		return nil
 	}
 	gid := apiKey.Group.ID
-	resolved := s.resolver.Resolve(ctx, PricingInput{Model: billingModel, GroupID: &gid, Group: apiKey.Group})
+	resolved := s.resolver.Resolve(ctx, PricingInput{Model: billingModel, PricingAt: GatewayTokenRequestPricingAtFromContext(ctx), GroupID: &gid, Group: apiKey.Group})
 	if resolved.Source == PricingSourceGroup || resolved.Source == PricingSourceChannel {
 		return resolved
 	}
@@ -1225,6 +1225,7 @@ func (s *GatewayService) calculateImageCost(
 			Ctx: ctx, Model: billingModel, GroupID: &gid, Group: apiKey.Group,
 			RequestCount: result.ImageCount, SizeTier: sizeTier,
 			RateMultiplier: multiplier, Resolver: s.resolver, Resolved: resolved,
+			PricingAt:       GatewayTokenRequestPricingAtFromContext(ctx),
 			ReasoningEffort: optionalStringValue(result.ReasoningEffort),
 		})
 		if err == nil {
@@ -1254,6 +1255,7 @@ func (s *GatewayService) calculateImageCost(
 				Tokens:          tokens,
 				RequestCount:    result.ImageCount,
 				SizeTier:        sizeTier,
+				PricingAt:       GatewayTokenRequestPricingAtFromContext(ctx),
 				ReasoningEffort: optionalStringValue(result.ReasoningEffort),
 				RateMultiplier:  multiplier,
 				Resolver:        s.resolver,
@@ -1275,6 +1277,7 @@ func (s *GatewayService) calculateImageCost(
 				Tokens:          tokens,
 				RequestCount:    result.ImageCount,
 				SizeTier:        sizeTier,
+				PricingAt:       GatewayTokenRequestPricingAtFromContext(ctx),
 				ReasoningEffort: optionalStringValue(result.ReasoningEffort),
 				RateMultiplier:  multiplier,
 				Resolver:        s.resolver,
@@ -1292,6 +1295,23 @@ func (s *GatewayService) calculateImageCost(
 	return s.billingService.CalculateImageCost(billingModel, sizeTier, result.ImageCount, groupConfig, multiplier)
 }
 
+func (usage ClaudeUsage) billingUsageTokens() UsageTokens {
+	creationTokens := usage.CacheCreationInputTokens
+	if creationTokens <= 0 {
+		creationTokens = max(usage.CacheCreation5mTokens, 0) + max(usage.CacheCreation1hTokens, 0)
+	}
+	tokens := UsageTokens{
+		InputTokens:           usage.InputTokens,
+		OutputTokens:          usage.OutputTokens,
+		CacheCreationTokens:   creationTokens,
+		CacheReadTokens:       usage.CacheReadInputTokens,
+		CacheCreation5mTokens: usage.CacheCreation5mTokens,
+		CacheCreation1hTokens: usage.CacheCreation1hTokens,
+		ImageOutputTokens:     usage.ImageOutputTokens,
+	}
+	return tokens
+}
+
 // calculateTokenCost 计算 Token 计费：路径选择（分组/渠道定价 → 内置定价）
 // 统一交给 BillingService.CalculateTokenCostForRequest，与模型广场的阶梯表查询同源。
 func (s *GatewayService) calculateTokenCost(
@@ -1305,14 +1325,14 @@ func (s *GatewayService) calculateTokenCost(
 	var resolved *ResolvedPricing
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
-		resolved = s.resolver.Resolve(ctx, PricingInput{Model: billingModel, GroupID: &gid, Group: apiKey.Group})
+		resolved = s.resolver.Resolve(ctx, PricingInput{Model: billingModel, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
 	}
 
 	cost, err := s.billingService.CalculateTokenCostForRequest(TokenCostRequest{
 		Ctx:             ctx,
 		Model:           billingModel,
 		Group:           apiKey.Group,
-		Tokens:          claudeBillingTokens(result.Usage),
+		Tokens:          result.Usage.billingUsageTokens(),
 		RateMultiplier:  multiplier,
 		PricingAt:       pricingAt,
 		ServiceTier:     optionalStringValue(result.ServiceTier),
@@ -1327,19 +1347,6 @@ func (s *GatewayService) calculateTokenCost(
 	return cost
 }
 
-func claudeBillingTokens(usage ClaudeUsage) UsageTokens {
-	return UsageTokens{
-		InputTokens:           usage.InputTokens,
-		OutputTokens:          usage.OutputTokens,
-		CacheCreationTokens:   usage.CacheCreationInputTokens,
-		CacheReadTokens:       usage.CacheReadInputTokens,
-		CacheCreation5mTokens: usage.CacheCreation5mTokens,
-		CacheCreation1hTokens: usage.CacheCreation1hTokens,
-		ImageOutputTokens:     usage.ImageOutputTokens,
-	}
-}
-
-// buildRecordUsageLog 构建使用日志并设置计费模式。
 func (s *GatewayService) buildRecordUsageLog(
 	input *recordUsageCoreInput,
 	result *ForwardResult,

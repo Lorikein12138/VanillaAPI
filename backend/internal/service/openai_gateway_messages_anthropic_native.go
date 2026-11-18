@@ -396,14 +396,14 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
-	var intervalTicker *time.Ticker
+	var intervalTimer *time.Timer
 	if streamInterval > 0 {
-		intervalTicker = time.NewTicker(streamInterval)
-		defer intervalTicker.Stop()
+		intervalTimer = time.NewTimer(streamInterval)
+		defer intervalTimer.Stop()
 	}
 	var intervalCh <-chan time.Time
-	if intervalTicker != nil {
-		intervalCh = intervalTicker.C
+	if intervalTimer != nil {
+		intervalCh = intervalTimer.C
 	}
 
 	keepaliveInterval := time.Duration(0)
@@ -510,7 +510,8 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
-			if time.Since(lastRead) < streamInterval {
+			if remaining := streamInterval - time.Since(lastRead); remaining > 0 {
+				intervalTimer.Reset(remaining)
 				continue
 			}
 			if clientDisconnected {
@@ -593,9 +594,12 @@ func claudeUsageToOpenAIUsage(u *ClaudeUsage) OpenAIUsage {
 		return OpenAIUsage{}
 	}
 	return OpenAIUsage{
-		InputTokens:              u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
-		OutputTokens:             u.OutputTokens,
-		CacheCreationInputTokens: u.CacheCreationInputTokens,
-		CacheReadInputTokens:     u.CacheReadInputTokens,
+		InputTokens:                     u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
+		OutputTokens:                    u.OutputTokens,
+		CacheCreationInputTokens:        u.CacheCreationInputTokens,
+		CacheCreation5mTokens:           u.CacheCreation5mTokens,
+		CacheCreation1hTokens:           u.CacheCreation1hTokens,
+		CacheReadInputTokens:            u.CacheReadInputTokens,
+		cacheCreationInputTokensPresent: u.cacheCreationInputTokensPresent,
 	}
 }

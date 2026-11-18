@@ -413,6 +413,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		h.submitMandatoryUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 				Result:             result,
+				PricingAt:          requestStart,
 				APIKey:             apiKey,
 				User:               apiKey.User,
 				Account:            account,

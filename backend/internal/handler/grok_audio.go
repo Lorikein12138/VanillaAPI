@@ -22,6 +22,7 @@ import (
 // GrokRealtime exposes xAI's native Voice Realtime WebSocket.
 // Only Grok-platform API keys may use this endpoint.
 func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
+	pricingAt := time.Now()
 	if c == nil || c.Request == nil || !isOpenAIWSUpgradeRequest(c.Request) {
 		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
 		return
@@ -152,7 +153,7 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		}
 	}
 	if result := grokRealtimeBillingResult(model, elapsed, audioObserved); result != nil {
-		h.recordGrokVoiceUsage(c, apiKey, selection.Account, subscription, "realtime", nil, result)
+		h.recordGrokVoiceUsage(c, apiKey, selection.Account, subscription, "realtime", nil, result, pricingAt)
 	}
 }
 
@@ -183,6 +184,7 @@ func isExpectedGrokRealtimeClose(err error) bool {
 
 // GrokVoice handles xAI Voice HTTP endpoints. endpoint is "tts", "stt", or "custom-voices".
 func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
+	pricingAt := time.Now()
 	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
 	if !ok || apiKey.Group == nil || apiKey.Group.Platform != service.PlatformGrok {
 		h.errorResponse(c, http.StatusNotFound, "not_found_error", "Voice API is not supported for this platform")
@@ -299,7 +301,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			return h.gatewayService.ForwardGrokVoice(c.Request.Context(), c, account, endpoint, body, contentType)
 		}()
 		if forwardErr == nil {
-			h.recordGrokVoiceUsage(c, apiKey, account, subscription, endpoint, body, result)
+			h.recordGrokVoiceUsage(c, apiKey, account, subscription, endpoint, body, result, pricingAt)
 			return
 		}
 		var failoverErr *service.UpstreamFailoverError
@@ -325,6 +327,7 @@ func (h *OpenAIGatewayHandler) recordGrokVoiceUsage(
 	endpoint string,
 	body []byte,
 	result *service.OpenAIForwardResult,
+	pricingAt time.Time,
 ) {
 	if h == nil || c == nil || apiKey == nil || account == nil || result == nil {
 		return
@@ -357,6 +360,7 @@ func (h *OpenAIGatewayHandler) recordGrokVoiceUsage(
 	h.submitMandatoryUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
 		if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 			Result:             result,
+			PricingAt:          pricingAt,
 			APIKey:             apiKey,
 			User:               apiKey.User,
 			Account:            account,

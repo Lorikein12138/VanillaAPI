@@ -85,7 +85,7 @@ func tryModelFilePricing(billingService *BillingService, model string, tokens Us
 		reasoningEffort = reasoningEfforts[0]
 	}
 	resolver := NewModelPricingResolver(nil, billingService)
-	resolved := resolver.Resolve(context.Background(), PricingInput{Model: model})
+	resolved := resolver.Resolve(context.Background(), PricingInput{Model: model, PricingAt: pricingAt})
 	// 无分组的解析结果默认开启长上下文，CostInput.LongContextBillingEnabled=false 无法否决，
 	// 因此直接覆写解析结果。
 	resolved.longContextPricingEnabled = longContextPricingEnabled
@@ -246,7 +246,7 @@ func calculateTokenStatsCost(pricing *ChannelModelPricing, tokens UsageTokens) *
 	}
 	cacheCreationCost := float64(tokens.CacheCreationTokens) * deref(p.CacheWritePrice)
 	if p.CacheWrite1hPrice != nil {
-		cache5m, cache1h := normalizeCacheCreationBreakdown(tokens)
+		cache5m, cache1h := allocateCacheCreationBillingTokens(tokens)
 		if cache5m > 0 || cache1h > 0 {
 			cacheCreationCost = float64(cache5m)*deref(p.CacheWritePrice) +
 				float64(cache1h)*deref(p.CacheWrite1hPrice)

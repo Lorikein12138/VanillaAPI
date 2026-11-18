@@ -54,7 +54,7 @@ func TestBaselineV0221Migrations(t *testing.T) {
 			require.NoError(t, ApplyMigrations(ctx, fixture.db))
 			after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 			require.NoError(t, err)
-			require.Len(t, after, baselineV0222MigrationCount)
+			require.Len(t, after, baselineV0223MigrationCount)
 			for name, entry := range before {
 				require.Equal(t, entry, after[name], "%s checksum/applied_at", name)
 			}
@@ -97,8 +97,12 @@ func TestBaselineV0221Migrations(t *testing.T) {
 			if mode == "upgrade-from-306" {
 				require.Equal(t, sentinels, baselineV0219BusinessSentinels(t, ctx, fixture.db))
 				var category string
-				require.NoError(t, fixture.db.QueryRowContext(ctx, `SELECT display_category FROM groups WHERE name='baseline v0217'`).Scan(&category))
+				var forceUltraFast bool
+				require.NoError(t, fixture.db.QueryRowContext(ctx, `
+					SELECT display_category, force_openai_ultrafast FROM groups WHERE name='baseline v0217'
+				`).Scan(&category, &forceUltraFast))
 				require.Equal(t, "domestic", category)
+				require.False(t, forceUltraFast, "existing groups must not force Ultra Fast after migration")
 				var short, long int
 				require.NoError(t, fixture.db.QueryRowContext(ctx, `
 					SELECT u.cache_creation_30m_tokens, u.cache_creation_12h_tokens
