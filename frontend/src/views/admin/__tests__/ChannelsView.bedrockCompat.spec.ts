@@ -41,7 +41,8 @@ function mountView() {
           template: '<section v-if="show"><slot /><slot name="footer" /></section>'
         }),
         DataTable: defineComponent({
-          props: ['data'],
+          props: ['columns', 'data', 'loading', 'serverSideSort', 'defaultSortKey', 'defaultSortOrder'],
+          emits: ['sort'],
           template: '<div v-for="row in data" :key="row.id"><slot name="cell-actions" :row="row" /></div>'
         }),
         Pagination: true,

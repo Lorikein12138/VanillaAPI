@@ -64,6 +64,17 @@ func startOpenAISSEKeepalive(c *gin.Context, interval time.Duration) func() {
 		writer: originalWriter,
 		stop:   make(chan struct{}),
 	}
+	// A replay can start a fresh heartbeat after the first attempt has
+	// already written comments. Keep the request-wide byte count.
+	if value, ok := c.Get(openAICompactSSEKeepaliveKey); ok {
+		if previous, valid := value.(*openAICompactSSEKeepalive); valid && previous != nil {
+			previous.mu.Lock()
+			previous.markStoppedLocked()
+			k.bytes = previous.bytes
+			k.started = previous.started
+			previous.mu.Unlock()
+		}
+	}
 	c.Set(openAICompactSSEKeepaliveKey, k)
 	wrappedWriter := &openAICompactKeepaliveWriter{ResponseWriter: originalWriter, k: k}
 	c.Writer = wrappedWriter

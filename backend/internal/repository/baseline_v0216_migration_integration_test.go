@@ -82,7 +82,7 @@ func baselineV0216RequireCurrentMigrationHistory(t *testing.T, ctx context.Conte
 	t.Helper()
 	current, err := baselineV0216ReadMigrationRecords(ctx, db)
 	require.NoError(t, err)
-	require.Len(t, current, baselineV0222MigrationCount)
+	require.Len(t, current, baselineV0223MigrationCount)
 	for name, before := range historical {
 		require.Equal(t, before, current[name], "historical checksum/applied_at must remain unchanged for %s", name)
 	}

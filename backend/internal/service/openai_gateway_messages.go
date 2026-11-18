@@ -1041,14 +1041,14 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
-	var intervalTicker *time.Ticker
+	var intervalTimer *time.Timer
 	if streamInterval > 0 {
-		intervalTicker = time.NewTicker(streamInterval)
-		defer intervalTicker.Stop()
+		intervalTimer = time.NewTimer(streamInterval)
+		defer intervalTimer.Stop()
 	}
 	var intervalCh <-chan time.Time
-	if intervalTicker != nil {
-		intervalCh = intervalTicker.C
+	if intervalTimer != nil {
+		intervalCh = intervalTimer.C
 	}
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -1135,6 +1135,9 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		isTerminalEvent := isOpenAICompatResponsesTerminalEvent(eventType) || isBareErrorEvent
 		if isTerminalEvent {
 			terminalEventType = eventType
+			if event.Usage != nil {
+				usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
+			}
 			if event.Response != nil {
 				if id := strings.TrimSpace(event.Response.ID); id != "" {
 					responseID = id
@@ -1142,9 +1145,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				if event.Response.Usage != nil {
 					usage = copyOpenAIUsageFromResponsesUsage(event.Response.Usage)
 				}
-			}
-			if event.Usage != nil {
-				usage = copyOpenAIUsageFromResponsesUsage(event.Usage)
 			}
 			// cyber_policy 致命不可重试：标记供 handler 事后记录；以 Anthropic SSE error 事件
 			// 回写让客户端感知并停止重试（F4），丢弃后续转换输出。
@@ -1422,7 +1422,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
-			if time.Since(lastRead) < streamInterval {
+			if remaining := streamInterval - time.Since(lastRead); remaining > 0 {
+				intervalTimer.Reset(remaining)
 				continue
 			}
 			if clientDisconnected {
@@ -1433,6 +1434,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				zap.String("model", originalModel),
 				zap.Duration("interval", streamInterval),
 			)
+			if account != nil && account.Platform == PlatformOpenAI && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+				_ = resp.Body.Close()
+				return resultWithUsage(), s.openAIStreamIdleFailover(c.Request.Context(), c, account, false, requestID, upstreamModel, resp.Header)
+			}
 			releaseHeld()
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 

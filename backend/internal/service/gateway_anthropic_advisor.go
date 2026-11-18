@@ -248,7 +248,7 @@ func (s *GatewayService) recordAdvisorUsages(ctx context.Context, input *recordU
 		if input.BillingModelSource == BillingModelSourceRequested || input.BillingModelSource == BillingModelSourceChannelMapped {
 			pricingModel = advisor.requestedModel
 		}
-		tokens := claudeBillingTokens(iteration.usage)
+		tokens := iteration.usage.billingUsageTokens()
 		cost, err := s.calculateAdvisorTokenCost(ctx, input.APIKey, pricingModel, tokens, parent.RateMultiplier, pricingAt, true)
 		if errors.Is(err, ErrModelPricingUnavailable) {
 			slog.Warn("billing.advisor_price_fallback", "advisor_model", pricingModel, "main_model", parentPricingModel, "request_id", requestID)
@@ -289,9 +289,9 @@ func (s *GatewayService) calculateAdvisorTokenCost(ctx context.Context, apiKey *
 	var resolved *ResolvedPricing
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
-		resolved = s.resolver.Resolve(ctx, PricingInput{Model: model, GroupID: &gid, Group: apiKey.Group})
+		resolved = s.resolver.Resolve(ctx, PricingInput{Model: model, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
 		if resolved.Mode != BillingModeToken {
-			catalog := s.resolver.Resolve(ctx, PricingInput{Model: model})
+			catalog := s.resolver.Resolve(ctx, PricingInput{Model: model, PricingAt: pricingAt})
 			catalog.longContextPricingEnabled = resolved.longContextPricingEnabled
 			resolved = catalog
 		}

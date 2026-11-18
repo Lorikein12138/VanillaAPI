@@ -35,7 +35,7 @@ func TestBaselineV0222MigrationsUpgrade(t *testing.T) {
 	for _, name := range []string{baselineV0222UltrafastMigration, baselineV0222NonblockingRollupMigration} {
 		require.NotContains(t, before, name)
 	}
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0222FS(t)))
 	after, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 	require.NoError(t, err)
 	require.Len(t, after, baselineV0222MigrationCount)
@@ -49,7 +49,7 @@ func TestBaselineV0222MigrationsUpgrade(t *testing.T) {
 		require.Equal(t, hex.EncodeToString(sum[:]), after[name].checksum, name)
 	}
 
-	require.NoError(t, ApplyMigrations(ctx, fixture.db))
+	require.NoError(t, applyMigrationsFS(ctx, fixture.db, baselineV0222FS(t)))
 	restarted, err := baselineV0216ReadMigrationRecords(ctx, fixture.db)
 	require.NoError(t, err)
 	require.Equal(t, after, restarted)

@@ -2029,7 +2029,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		flushPendingOutput()
 	}
 
-	scanner := bufio.NewScanner(resp.Body)
+	bodyReader, stopIdleReader := s.openAISynchronousStreamIdleReader(resp, account)
+	defer stopIdleReader()
+	scanner := bufio.NewScanner(bodyReader)
 	maxLineSize := defaultMaxLineSize
 	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.cfg.Gateway.MaxLineSize
@@ -2281,6 +2283,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 	}
 	ensureResponseFailedTerminal()
+	if stopIdleReader() && !sawDone && !sawTerminalEvent && !sawFailedEvent {
+		stopKeepalive()
+		if !clientDisconnected && ctx.Err() == nil && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return resultWithUsage(), s.openAIStreamIdleFailover(ctx, c, account, true, upstreamRequestID, mappedModel, resp.Header)
+		}
+		return resultWithUsage(), fmt.Errorf("stream data interval timeout")
+	}
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account)
