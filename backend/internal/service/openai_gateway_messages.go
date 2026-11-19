@@ -32,7 +32,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	body []byte,
 	promptCacheKey string,
 	defaultMappedModel string,
-) (*OpenAIForwardResult, error) {
+) (adaptiveResult *OpenAIForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveOpenAIResultWithObserver(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr, upstreamResponseModelObserverFromContext(c))
+		}()
+	}
 	// 工具 Schema 清洗必须先于所有分流：下游每条路径（原生 Anthropic 直通、
 	// Chat Completions 转换、Responses 转换）都会把 tools 原样带给上游，而
 	// xAI / Moonshot 等严格校验方会因 input_schema 里的 required:null 或
@@ -502,6 +509,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 				return s.ForwardAsAnthropic(markGrokEncryptedContentStripRetried(ctx), c, account, strippedBody, promptCacheKey, defaultMappedModel)
 			}
 		}
+		observeAdaptiveHTTPFailure(ctx, adaptiveHTTPObservation(ctx), account, upstreamModel, resp.StatusCode, extractOpenAIServiceTierFromBody(responsesBody))
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}

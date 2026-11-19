@@ -271,6 +271,7 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 	platform string,
 ) (*Account, error) {
 	ctx = WithOpenAIProfitControlSuppressed(ctx)
+	ctx = withAdaptiveEligibility(ctx, func(account *Account) bool { return !shouldEstimateOpenAIInputTokensLocally(account) })
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	return s.selectAccountForModelWithExclusions(
 		ctx,
@@ -929,6 +930,9 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 
 	// 3. 按优先级 + LRU 选择最佳账号
 	// Select by priority + LRU
+	if stickyAccountID > 0 {
+		ctx = protectAdaptiveSelection(ctx)
+	}
 	selected, compactBlocked, filterStats := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate)
 
 	if selected == nil {
@@ -1093,6 +1097,7 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		}
 		return s.isBetterAccount(a, b)
 	})
+	rankAdaptivePool(ctx, eligible, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), len(excludedIDs) == 0)
 	return eligible[0], compactBlocked, filterStats
 }
 
@@ -1275,6 +1280,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		parentCacheL2[id] = a
 		return a
 	}
+	if stickyAccountID > 0 {
+		ctx = protectAdaptiveSelection(ctx)
+	}
 	baseCandidateCount := 0
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
 	candidates := make([]*Account, 0, len(accounts))
@@ -1387,6 +1395,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			selectionOrder = append(selectionOrder, available...)
 		}
 
+		rankAdaptivePool(ctx, selectionOrder, adaptiveLoadedAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), stickyAccountID == 0 && len(excludedIDs) == 0)
 		for _, item := range selectionOrder {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
@@ -1426,6 +1435,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if requireCompact {
 			ordered = prioritizeOpenAICompactAccounts(ordered)
 		}
+		rankAdaptivePool(ctx, ordered, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), stickyAccountID == 0 && len(excludedIDs) == 0)
 		for _, acc := range ordered {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
@@ -1476,6 +1486,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	if requireCompact {
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
+	rankAdaptivePool(ctx, candidates, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), false)
 	for _, acc := range candidates {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {

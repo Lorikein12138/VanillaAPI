@@ -996,3 +996,22 @@ func (r *publicBatchImageUserGroupRateRepo) GetByUserAndGroup(_ context.Context,
 
 var _ BatchImageGroupPricingRepository = (*publicBatchImageGroupRepo)(nil)
 var _ BatchImageUserGroupRateRepository = (*publicBatchImageUserGroupRateRepo)(nil)
+
+func TestGatewayAdaptiveBatchStaysWithinProvider(t *testing.T) {
+	svc, _, _, _, _ := newTestBatchImagePublicService(true)
+	model := "gemini-2.5-flash-image"
+	accounts := []Account{testBatchImageAccount(71301, AccountTypeAPIKey), testBatchImageAccount(71302, AccountTypeAPIKey)}
+	accounts[0].Priority = 0
+	accounts[1].Priority = 10
+	svc.AccountRepo = &publicBatchImageAccountRepo{accounts: accounts}
+	ctx := WithGatewayAdaptiveIngress(context.Background(), &SettingService{settingRepo: adaptiveTestSettings{}}, "test_batch_submit", "http")
+	seedAdaptiveTestSamples(t, ctx, model, accounts...)
+	provider, account, err := svc.selectProviderAndAccount(ctx, testBatchImageOwner(), BatchImageProviderGeminiAPI, model)
+	require.NoError(t, err)
+	require.Equal(t, BatchImageProviderGeminiAPI, provider.Name())
+	require.Equal(t, accounts[1].ID, account.ID)
+	accounts[1].Schedulable = false
+	_, account, err = svc.selectProviderAndAccount(ctx, testBatchImageOwner(), BatchImageProviderGeminiAPI, model)
+	require.NoError(t, err)
+	require.Equal(t, accounts[0].ID, account.ID)
+}

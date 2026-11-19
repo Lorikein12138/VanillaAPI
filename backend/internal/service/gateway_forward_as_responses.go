@@ -34,7 +34,14 @@ func (s *GatewayService) ForwardAsResponses(
 	account *Account,
 	body []byte,
 	parsed *ParsedRequest,
-) (*ForwardResult, error) {
+) (adaptiveResult *ForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveGatewayResult(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr)
+		}()
+	}
 	startTime := time.Now()
 
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngressWithConfig(s.cfg, body)
@@ -144,7 +151,9 @@ func (s *GatewayService) ForwardAsResponses(
 		if err != nil {
 			return nil, fmt.Errorf("build upstream request: %w", err)
 		}
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+		resp, err = adaptiveHTTP(upstreamReq.Context(), func() (*http.Response, error) {
+			return s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+		})
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()

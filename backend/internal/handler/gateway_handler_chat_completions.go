@@ -91,6 +91,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	} else if changed {
 		body = cappedBody
 	}
+	attachGatewayAdaptiveInput(c, body)
 	reqStream, ok := parseOpenAICompatibleStream(body)
 	if !ok {
 		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", invalidStreamFieldTypeMessage)
@@ -109,6 +110,11 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
+	if channelMapping.Mapped {
+		if ctx := service.WithAdaptiveChannelModel(c.Request.Context(), channelMapping.MappedModel); ctx != c.Request.Context() {
+			c.Request = c.Request.WithContext(ctx)
+		}
+	}
 
 	// Claude Code only restriction: /v1/chat/completions is never a Claude Code
 	// endpoint. With a fallback group the request continues and account selection

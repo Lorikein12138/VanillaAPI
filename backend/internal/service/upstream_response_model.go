@@ -30,12 +30,15 @@ type upstreamResponseModelObserver struct {
 	terminal string
 	conflict bool
 
-	// firstTier holds the first non-terminal tier declaration; it is discarded
-	// when later non-terminal declarations disagree. terminalTier comes from a
-	// terminal event and always wins.
-	firstTier         string
-	firstTierConflict bool
-	terminalTier      string
+	billingTier  upstreamResponseTierObservation
+	adaptiveTier upstreamResponseTierObservation
+}
+
+// A terminal tier wins over agreeing non-terminal declarations.
+type upstreamResponseTierObservation struct {
+	first    string
+	terminal string
+	conflict bool
 }
 
 func (o *upstreamResponseModelObserver) Observe(model string, terminal bool) {
@@ -83,8 +86,13 @@ func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType 
 	if !terminal && strings.TrimSpace(eventType) != "" {
 		return
 	}
-	tier := normalizeObservedOpenAIServiceTier(firstValidTrimmedGJSONString(payload, "response.service_tier", "service_tier"))
-	o.ObserveServiceTier(tier, terminal)
+	rawTier := firstValidTrimmedGJSONString(payload, "response.service_tier", "service_tier")
+	if strings.EqualFold(rawTier, OpenAIFastTierUltrafast) {
+		// Scheduling needs the reported tier even when billing ignores it.
+		o.adaptiveTier.observe(OpenAIFastTierUltrafast, terminal)
+		return
+	}
+	o.ObserveServiceTier(normalizeObservedOpenAIServiceTier(rawTier), terminal)
 }
 
 func (o *upstreamResponseModelObserver) ObserveAnthropic(payload []byte) {
@@ -103,35 +111,46 @@ func (o *upstreamResponseModelObserver) ObserveAnthropic(payload []byte) {
 // terminal declaration always wins; non-terminal declarations are only trusted
 // when they agree with each other.
 func (o *upstreamResponseModelObserver) ObserveServiceTier(tier string, terminal bool) {
-	if o == nil || tier == "" {
-		return
-	}
-	if terminal {
-		o.terminalTier = tier
-		return
-	}
-	if o.firstTier == "" {
-		o.firstTier = tier
-		return
-	}
-	if o.firstTier != tier {
-		o.firstTierConflict = true
+	if o != nil {
+		o.billingTier.observe(tier, terminal)
+		o.adaptiveTier.observe(tier, terminal)
 	}
 }
 
-// ServiceTier returns the tier the upstream reports having used, or "" when the
-// response never declared one unambiguously.
+func (o *upstreamResponseTierObservation) observe(tier string, terminal bool) {
+	if tier == "" {
+		return
+	}
+	if terminal {
+		o.terminal = tier
+		return
+	}
+	if o.first == "" {
+		o.first = tier
+		return
+	}
+	if o.first != tier {
+		o.conflict = true
+	}
+}
+
+func (o *upstreamResponseTierObservation) value() (tier string, conflict bool) {
+	if o.terminal != "" {
+		return o.terminal, false
+	}
+	if o.conflict {
+		return "", true
+	}
+	return o.first, false
+}
+
+// ServiceTier returns the unambiguous tier used for billing reconciliation.
 func (o *upstreamResponseModelObserver) ServiceTier() string {
 	if o == nil {
 		return ""
 	}
-	if o.terminalTier != "" {
-		return o.terminalTier
-	}
-	if o.firstTierConflict {
-		return ""
-	}
-	return o.firstTier
+	tier, _ := o.billingTier.value()
+	return tier
 }
 
 // normalizeObservedOpenAIServiceTier maps a tier reported by an OpenAI response

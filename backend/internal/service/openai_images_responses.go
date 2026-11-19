@@ -1932,6 +1932,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			}
 			return s.forwardOpenAIImagesOAuth(markAgentIdentityTaskRecoveryTried(ctx), c, account, parsed, channelMappedModel)
 		}
+		observeAdaptiveHTTPFailure(ctx, adaptiveHTTPObservation(ctx), account, upstreamModel, resp.StatusCode)
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 		if !direct && isOpenAIImagesMainModelError(resp.StatusCode, respBody) {
 			return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, upstreamModel)

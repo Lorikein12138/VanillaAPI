@@ -60,7 +60,14 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	body []byte,
 	promptCacheKey string,
 	defaultMappedModel string,
-) (*OpenAIForwardResult, error) {
+) (adaptiveResult *OpenAIForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveOpenAIResultWithObserver(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr, upstreamResponseModelObserverFromContext(c))
+		}()
+	}
 	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
 }
 
@@ -408,6 +415,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 			)
 			return s.forwardAsRawChatCompletionsWithStartTime(ctx, c, account, body, defaultMappedModel, startTime)
 		}
+		observeAdaptiveHTTPFailure(ctx, adaptiveHTTPObservation(ctx), account, upstreamModel, resp.StatusCode, extractOpenAIServiceTierFromBody(responsesBody))
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}

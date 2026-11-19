@@ -100,6 +100,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
+	attachGatewayAdaptiveInput(c, body)
 	requestCtx := c.Request.Context()
 	// 定价上下文无条件装配：/v1/responses 是 token 计费端点，声明生图工具的
 	// 混合请求同样按 token 计费（外加图片部分），其 token 利润保护不因请求体
@@ -113,6 +114,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	// 解析渠道级模型映射
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(requestCtx, apiKey.GroupID, reqModel)
+	if channelMapping.Mapped {
+		requestCtx = service.WithAdaptiveChannelModel(requestCtx, channelMapping.MappedModel)
+		c.Request = c.Request.WithContext(requestCtx)
+	}
 
 	// Claude Code only restriction: /v1/responses is never a Claude Code
 	// endpoint. With a fallback group the request continues and account selection

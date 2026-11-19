@@ -304,7 +304,7 @@ func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, 
 		response.Body, err = projectAccountModelsBody(response.Body, account, group, false)
 		return response, err
 	}
-	results, err := s.fetchPinnedOpenAIModels(ctx, group, fetch)
+	results, err := s.fetchPinnedOpenAIModels(protectAdaptiveSelection(ctx), group, fetch)
 	if err != nil && ctx.Err() == nil && group != nil && group.CodexModelsManifestConfig.FallbackToScheduler {
 		results, err = s.fetchScheduledOpenAIModels(ctx, group, maxAccountSwitches, fetch)
 	}

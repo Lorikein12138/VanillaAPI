@@ -65,6 +65,11 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 		platform = PlatformAnthropic
 	}
 	ctx = s.withGatewayProfitControlGate(ctx, groupID)
+	if route, enabled := gatewayAdaptiveRoute(ctx); enabled && strings.HasSuffix(route.operation, "/messages/count_tokens") {
+		ctx = withAdaptiveEligibility(ctx, func(account *Account) bool {
+			return account.Platform != PlatformAntigravity && !account.IsBedrock() && anthropicMessagesCredentialAllowed(account)
+		})
+	}
 
 	// Claude Code 限制可能已将 groupID 解析为 fallback group，
 	// 渠道限制预检查必须使用解析后的分组。
@@ -477,6 +482,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 				})
 				shuffleWithinSortGroups(routingAvailable)
+				rankAdaptivePool(ctx, routingAvailable, adaptiveLoadedAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, stickyAccountID == 0 && len(excludedIDs) == 0)
 
 				// 4. 尝试获取槽位
 				for _, item := range routingAvailable {
@@ -642,6 +648,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		)
 	}
 
+	if stickyAccountID > 0 {
+		ctx = protectAdaptiveSelection(ctx)
+	}
 	// ============ Layer 2: 负载感知选择 ============
 	slog.Debug("sticky.layer2_fallback",
 		"session", shortSessionHash(sessionHash),
@@ -715,7 +724,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
 	if err != nil {
-		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth); legacyErr != nil {
+		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, requestedModel, preferOAuth, stickyAccountID == 0 && len(excludedIDs) == 0); legacyErr != nil {
 			return nil, legacyErr
 		} else if ok {
 			return result, nil
@@ -750,6 +759,23 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			if selected == nil {
 				break
 			}
+			if _, adaptive := gatewayAdaptiveRoute(ctx); adaptive && len(available) > 1 {
+				pool := available
+				if cfg.PreferSoonestReset {
+					pool = filterBySoonestReset(filterByMinPriority(pool))
+				}
+				pool = append([]accountWithLoad(nil), pool...)
+				for i, candidate := range pool {
+					if candidate.account.ID == selected.account.ID {
+						copy(pool[1:i+1], pool[:i])
+						pool[0] = candidate
+						break
+					}
+				}
+				if rankAdaptivePool(ctx, pool, adaptiveLoadedAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, stickyAccountID == 0 && len(excludedIDs) == 0) {
+					selected = &pool[0]
+				}
+			}
 
 			result, err := s.tryAcquireAccountSlot(ctx, selected.account.ID, selected.account.Concurrency)
 			if err == nil && result.Acquired {
@@ -778,6 +804,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	// ============ Layer 3: 兜底排队 ============
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
+	rankAdaptivePool(ctx, candidates, adaptiveAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, false)
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
@@ -793,9 +820,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	return nil, ErrNoAvailableAccounts
 }
 
-func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
+func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash, requestedModel string, preferOAuth, explore bool) (*AccountSelectionResult, bool, error) {
 	ordered := append([]*Account(nil), candidates...)
 	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
+	rankAdaptivePool(ctx, ordered, adaptiveAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, explore)
 
 	for _, acc := range ordered {
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
@@ -1977,6 +2005,8 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 
 		var selected *Account
+		var adaptiveCandidates []*Account
+		_, useAdaptive := gatewayAdaptiveRoute(ctx)
 		for i := range accounts {
 			acc := &accounts[i]
 			if _, ok := routingSet[acc.ID]; !ok {
@@ -2014,6 +2044,10 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 			if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 				continue
 			}
+			if useAdaptive {
+				adaptiveCandidates = append(adaptiveCandidates, acc)
+			}
+
 			if selected == nil {
 				selected = acc
 				continue
@@ -2037,6 +2071,8 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				}
 			}
 		}
+
+		selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
@@ -2094,6 +2130,8 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	// 因为粘性会话优先保持连接一致性，且 upstream 计费基准极少使用。
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var selected *Account
+	var adaptiveCandidates []*Account
+	_, useAdaptive := gatewayAdaptiveRoute(ctx)
 	for i := range accounts {
 		acc := &accounts[i]
 		if _, excluded := excludedIDs[acc.ID]; excluded {
@@ -2131,6 +2169,10 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 			continue
 		}
+		if useAdaptive {
+			adaptiveCandidates = append(adaptiveCandidates, acc)
+		}
+
 		if selected == nil {
 			selected = acc
 			continue
@@ -2154,6 +2196,8 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 			}
 		}
 	}
+
+	selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
@@ -2239,6 +2283,8 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 
 		var selected *Account
+		var adaptiveCandidates []*Account
+		_, useAdaptive := gatewayAdaptiveRoute(ctx)
 		for i := range accounts {
 			acc := &accounts[i]
 			if _, ok := routingSet[acc.ID]; !ok {
@@ -2280,6 +2326,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 				continue
 			}
+			if useAdaptive {
+				adaptiveCandidates = append(adaptiveCandidates, acc)
+			}
+
 			if selected == nil {
 				selected = acc
 				continue
@@ -2303,6 +2353,8 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				}
 			}
 		}
+
+		selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
@@ -2357,6 +2409,8 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	// needsUpstreamCheck 仅在主选择循环中使用；粘性会话命中时跳过此检查。
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var selected *Account
+	var adaptiveCandidates []*Account
+	_, useAdaptive := gatewayAdaptiveRoute(ctx)
 	for i := range accounts {
 		acc := &accounts[i]
 		if _, excluded := excludedIDs[acc.ID]; excluded {
@@ -2398,6 +2452,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		if !s.isAccountSchedulableForRPM(ctx, acc, false) {
 			continue
 		}
+		if useAdaptive {
+			adaptiveCandidates = append(adaptiveCandidates, acc)
+		}
+
 		if selected == nil {
 			selected = acc
 			continue
@@ -2421,6 +2479,8 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 			}
 		}
 	}
+
+	selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)

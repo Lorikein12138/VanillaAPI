@@ -2117,7 +2117,7 @@ func (s *OpenAIGatewayService) evaluateOpenAIFastPolicy(ctx context.Context, acc
 	if tier == "" {
 		return BetaPolicyActionPass, ""
 	}
-	settings := openAIFastPolicySettingsFromContext(ctx)
+	settings, _ := adaptiveFastPolicySettings(ctx)
 	if settings == nil {
 		fetched, err := s.settingService.GetOpenAIFastPolicySettings(ctx)
 		if err != nil || fetched == nil {

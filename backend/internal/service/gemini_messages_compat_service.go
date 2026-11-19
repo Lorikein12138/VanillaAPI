@@ -341,6 +341,8 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 	useMixedScheduling bool,
 ) *Account {
 	var selected *Account
+	var eligible []*Account
+	_, adaptive := gatewayAdaptiveRoute(ctx)
 	precheckResult := s.buildPreCheckUsageResultMap(ctx, accounts, requestedModel)
 
 	for i := range accounts {
@@ -357,6 +359,9 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 		}
 
 		// 选择最佳账号
+		if adaptive {
+			eligible = append(eligible, acc)
+		}
 		if selected == nil {
 			selected = acc
 			continue
@@ -367,7 +372,7 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 		}
 	}
 
-	return selected
+	return adaptiveGatewayWinner(ctx, selected, eligible, requestedModel, len(excludedIDs) == 0)
 }
 
 func (s *GeminiMessagesCompatService) buildPreCheckUsageResultMap(ctx context.Context, accounts []Account, requestedModel string) map[int64]bool {
@@ -530,7 +535,14 @@ func (s *GeminiMessagesCompatService) HasAntigravityAccounts(ctx context.Context
 	return len(accounts) > 0, nil
 }
 
-func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
+func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (adaptiveResult *ForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveGatewayResult(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr)
+		}()
+	}
 	beginUpstreamResponseModelObservation(c)
 	beginGeminiImageOutputObservation(c)
 	startTime := time.Now()
@@ -738,7 +750,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = adaptiveHTTP(upstreamReq.Context(), func() (*http.Response, error) {
+			return s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		})
 		if err != nil {
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err)
 		}
@@ -886,6 +900,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
+		observeAdaptiveHTTPFailure(originalAdaptiveContext, adaptiveObservation, account, mappedModel, resp.StatusCode)
 		respBody := s.readUpstreamErrorBody(resp)
 		// 统一错误策略：自定义错误码 + 临时不可调度
 		if s.rateLimitService != nil {
@@ -1093,7 +1108,14 @@ func isGeminiSignatureRelatedError(respBody []byte) bool {
 	return strings.Contains(msg, "thought_signature") || strings.Contains(msg, "signature")
 }
 
-func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.Context, account *Account, originalModel string, action string, stream bool, body []byte) (*ForwardResult, error) {
+func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.Context, account *Account, originalModel string, action string, stream bool, body []byte) (adaptiveResult *ForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveGatewayResult(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr)
+		}()
+	}
 	beginUpstreamResponseModelObservation(c)
 	beginGeminiImageOutputObservation(c)
 	startTime := time.Now()
@@ -1295,7 +1317,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = adaptiveHTTP(upstreamReq.Context(), func() (*http.Response, error) {
+			return s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		})
 		if err != nil {
 			transportErr := s.handleUpstreamTransportError(ctx, c, account, err)
 			// countTokens 不因上游链路故障而失败：本地估算兜底，不换号。
@@ -1417,6 +1441,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	isOAuth := account.Type == AccountTypeOAuth
 
 	if resp.StatusCode >= 400 {
+		observeAdaptiveHTTPFailure(originalAdaptiveContext, adaptiveObservation, account, mappedModel, resp.StatusCode)
 		respBody := s.readUpstreamErrorBody(resp)
 		// 引用缓存不存在是请求问题：统一返回 403，不改账号状态、不换号。
 		if isGeminiCachedContentNotFound(resp.StatusCode, respBody) {

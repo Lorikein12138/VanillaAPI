@@ -27,7 +27,14 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 	c *gin.Context,
 	account *Account,
 	body []byte,
-) (*ForwardResult, error) {
+) (adaptiveResult *ForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveGatewayResult(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr)
+		}()
+	}
 	startTime := time.Now()
 
 	var ccReq apicompat.ChatCompletionsRequest
@@ -143,7 +150,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = adaptiveHTTP(upstreamReq.Context(), func() (*http.Response, error) {
+			return s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		})
 		if err != nil {
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err)
 		}

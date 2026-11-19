@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"sort"
 	"strconv"
 	"strings"
@@ -231,6 +232,16 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 		}
 	}
 
+	if route, enabled := gatewayAdaptiveRoute(ctx); enabled {
+		var promptBytes, refs int
+		for _, item := range normalized.Items {
+			promptBytes += len(item.Prompt)
+			refs += len(item.ReferenceImages)
+		}
+		route.inputSize = bits.Len(uint(promptBytes) >> 9)
+		route.effort = fmt.Sprintf("%d/%d/%s/%s", len(normalized.Items), refs, normalized.ImageSize, normalized.AspectRatio)
+		ctx = context.WithValue(ctx, adaptiveRouteKey{}, route)
+	}
 	provider, account, err := s.selectProviderAndAccount(ctx, owner, normalized.Provider, normalized.Model)
 	if err != nil {
 		return nil, err
@@ -350,6 +361,7 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	hbDone := make(chan struct{})
 	go s.runSubmitHeartbeat(hbCtx, job.BatchID, hbDone)
+	upstreamStart := time.Now()
 	providerJob, err := provider.Submit(ctx, job, account, input)
 	hbCancel()
 	<-hbDone
@@ -372,6 +384,7 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 		return nil, ErrBatchImageProviderSubmitFailed
 	}
 
+	observeAdaptiveCompletion(ctx, account, input.Model, upstreamStart, 0, true)
 	if err := s.Repo.UpdateBatchImageJobProviderSubmit(ctx, UpdateBatchImageJobProviderSubmitParams{
 		BatchID:           job.BatchID,
 		ProviderJobName:   providerJob.ProviderJobName,
@@ -951,14 +964,24 @@ func (s *BatchImagePublicService) selectProviderAndAccount(ctx context.Context, 
 			}
 			return accounts[i].ID < accounts[j].ID
 		})
+		var eligible []*Account
+		_, adaptive := gatewayAdaptiveRoute(ctx)
 		for i := range accounts {
 			account := accounts[i]
 			if !account.IsSchedulable() || !account.IsModelSupported(model) {
 				continue
 			}
 			if provider.SupportsAccount(&account) {
-				return provider, &account, nil
+				if !adaptive {
+					return provider, &account, nil
+				}
+				eligible = append(eligible, &accounts[i])
 			}
+		}
+		if len(eligible) > 0 {
+			// The provider API receives input.Model as written, without applying account mappings.
+			rankAdaptivePool(ctx, eligible, adaptiveAccount, func(*Account) string { return model }, adaptiveAnyPeer, true)
+			return provider, eligible[0], nil
 		}
 	}
 	if requestedProvider != "" {

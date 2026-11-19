@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -83,6 +84,7 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	upstreamStart := time.Now()
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 	if err != nil {
 		safeErr := sanitizeUpstreamErrorMessage(err.Error())
@@ -98,6 +100,7 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 		return fmt.Errorf("responses input_tokens: read upstream response: %w", err)
 	}
 
+	observeAdaptiveCompletion(ctx, account, prepared.UpstreamModel, upstreamStart, resp.StatusCode, false)
 	if resp.StatusCode >= 400 {
 		if isOpenAIResponsesInputTokensUnsupported(account, resp.StatusCode, respBody) {
 			writeOpenAIResponsesInputTokensFallback(c, account, prepared, resp.StatusCode, "upstream_unsupported")
@@ -116,6 +119,7 @@ func (s *OpenAIGatewayService) ForwardResponsesInputTokens(
 	}
 
 	inputTokens := gjson.GetBytes(respBody, "input_tokens")
+	observeAdaptiveCompletion(ctx, account, prepared.UpstreamModel, upstreamStart, resp.StatusCode, resp.StatusCode >= 200 && resp.StatusCode < 300 && inputTokens.Type == gjson.Number)
 	if !inputTokens.Exists() {
 		writeOpenAIResponsesInputTokensError(c, http.StatusBadGateway, "upstream_error", "Upstream response missing input_tokens")
 		return fmt.Errorf("responses input_tokens: upstream response missing input_tokens")
@@ -323,6 +327,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	upstreamStart := time.Now()
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 	if err != nil {
 		safeErr := sanitizeUpstreamErrorMessage(err.Error())
@@ -338,6 +343,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 		return fmt.Errorf("read input_tokens response: %w", err)
 	}
 
+	observeAdaptiveCompletion(ctx, account, prepared.UpstreamModel, upstreamStart, resp.StatusCode, false)
 	if resp.StatusCode >= 400 {
 		upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
 		if account.Type == AccountTypeOAuth && isOpenAIOAuthInputTokensUnsupported(resp.StatusCode, respBody) {
@@ -379,6 +385,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 	}
 
 	inputTokens := gjson.GetBytes(respBody, "input_tokens")
+	observeAdaptiveCompletion(ctx, account, prepared.UpstreamModel, upstreamStart, resp.StatusCode, resp.StatusCode >= 200 && resp.StatusCode < 300 && inputTokens.Type == gjson.Number)
 	if !inputTokens.Exists() {
 		writeAnthropicCountTokensError(c, http.StatusBadGateway, "upstream_error", "Upstream response missing input_tokens")
 		return fmt.Errorf("input_tokens response missing input_tokens field")

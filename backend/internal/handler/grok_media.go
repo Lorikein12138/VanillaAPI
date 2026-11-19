@@ -205,7 +205,11 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	// Grok 媒体（图片/视频生成与视频查询）按媒体倍率计费，不在 token 利润门
 	// 范围内：显式豁免，防止 service 层防御性装门按文本 D 误过滤媒体请求，
 	// 也防止已计费的在途视频任务因绑定账号被门排除而查询返回伪 404。
+	attachGatewayAdaptiveInput(c, body)
 	requestCtx := service.WithOpenAIProfitControlSuppressed(c.Request.Context())
+	if isGrokVideoCreateEndpoint(endpoint) && strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		requestCtx = service.WithAdaptiveGrokVideoDuration(requestCtx, requestInfo.DurationSeconds)
+	}
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)

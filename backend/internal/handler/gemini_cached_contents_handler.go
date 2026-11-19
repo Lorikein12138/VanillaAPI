@@ -166,6 +166,7 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 		return
 	}
 
+	attachGatewayAdaptiveInput(c, body)
 	var lastUpstreamErr *service.GeminiCachedContentUpstreamError
 	var ttlRejectedLimit time.Duration
 	for attempts := 0; attempts < geminiCachedContentCreateMaxAttempts; {

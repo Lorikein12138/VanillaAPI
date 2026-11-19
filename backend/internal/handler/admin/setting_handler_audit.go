@@ -425,6 +425,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.CodexCLIOnlyWhitelist != after.CodexCLIOnlyWhitelist {
 		changed = append(changed, "codex_cli_only_whitelist")
 	}
+	if before.GatewayAdaptiveSchedulingEnabled != after.GatewayAdaptiveSchedulingEnabled {
+		changed = append(changed, service.SettingKeyGatewayAdaptiveSchedulingEnabled)
+	}
 	if before.AllowUngroupedKeyScheduling != after.AllowUngroupedKeyScheduling {
 		changed = append(changed, "allow_ungrouped_key_scheduling")
 	}

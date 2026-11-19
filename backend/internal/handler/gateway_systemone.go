@@ -126,6 +126,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 		if failoverClientGone(c) {
 			return
 		}
+		attachGatewayAdaptiveInput(c, body)
 		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, "", model, fs.FailedAccountIDs, "", subject.UserID)
 		if err == nil && (selection == nil || selection.Account == nil) {
 			err = service.ErrNoAvailableAccounts

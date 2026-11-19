@@ -1894,6 +1894,22 @@ func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, requ
 	if state == openAIModelsCacheFresh {
 		return openAIModelsResponseForClient(manifest, ifNoneMatch), nil
 	}
+	if _, adaptive := gatewayAdaptiveRoute(ctx); adaptive {
+		fetchUpstream := fetch
+		fetch = func(fetchCtx context.Context, etag string) (*OpenAIModelsResponse, error) {
+			start := time.Now()
+			response, err := fetchUpstream(fetchCtx, etag)
+			var status int
+			var upstreamError *codexModelsManifestUpstreamError
+			if errors.As(err, &upstreamError) {
+				status = upstreamError.statusCode
+			}
+			// The wrapped closure only runs on an actual shared upstream refresh.
+			account := &Account{ID: request.accountID, Platform: PlatformOpenAI, Type: request.credentialAccount.Type}
+			observeAdaptiveCompletion(ctx, account, "", start, status, err == nil && response != nil && !response.NotModified)
+			return response, err
+		}
+	}
 	resultCh := s.refreshCachedOpenAIModels(cacheKey, request, fetch)
 	if state == openAIModelsCacheStale {
 		return openAIModelsResponseForClient(manifest, ifNoneMatch), nil

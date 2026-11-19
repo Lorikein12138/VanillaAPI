@@ -137,6 +137,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		return
 	}
 
+	attachGatewayAdaptiveInput(c, auditBody)
 	failedAccounts := make(map[int64]struct{})
 	var account *service.Account
 	var accountReleaseFunc func()

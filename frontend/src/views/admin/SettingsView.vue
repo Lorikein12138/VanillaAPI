@@ -4984,6 +4984,25 @@
                 <Toggle v-model="form.allow_ungrouped_key_scheduling" />
               </div>
 
+              <div class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700">
+                <div>
+                  <label
+                    id="gateway-adaptive-scheduling-label"
+                    class="text-sm font-medium text-gray-700 dark:text-gray-300"
+                  >
+                    {{ t("admin.settings.scheduling.gatewayAdaptiveScheduling") }}
+                  </label>
+                  <p id="gateway-adaptive-scheduling-hint" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.scheduling.gatewayAdaptiveSchedulingHint") }}
+                  </p>
+                </div>
+                <Toggle
+                  v-model="form.gateway_adaptive_scheduling_enabled"
+                  aria-labelledby="gateway-adaptive-scheduling-label"
+                  aria-describedby="gateway-adaptive-scheduling-hint"
+                />
+              </div>
+
               <div class="border-t border-gray-100 pt-4 dark:border-dark-700">
                 <div class="mb-3">
                   <label class="font-medium text-gray-900 dark:text-white">
@@ -10014,6 +10033,7 @@ const form = reactive<SettingsForm>({
   max_claude_code_version: "",
   // 分组隔离
   allow_ungrouped_key_scheduling: false,
+  gateway_adaptive_scheduling_enabled: false,
   openai_low_upstream_rate_priority_enabled: false,
   openai_oauth_scheduling_rate_multiplier: 1,
   openai_advanced_scheduler_enabled: false,
@@ -11705,6 +11725,7 @@ async function saveSettings() {
       min_claude_code_version: form.min_claude_code_version,
       max_claude_code_version: form.max_claude_code_version,
       allow_ungrouped_key_scheduling: form.allow_ungrouped_key_scheduling,
+      gateway_adaptive_scheduling_enabled: form.gateway_adaptive_scheduling_enabled,
       openai_ttft_mode:
         form.openai_ttft_mode === "visible" ? "visible" : "semantic",
       enable_fingerprint_unification: form.enable_fingerprint_unification,

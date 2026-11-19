@@ -238,7 +238,8 @@ type UpdateSettingsRequest struct {
 	MaxClaudeCodeVersion string `json:"max_claude_code_version"`
 
 	// 分组隔离
-	AllowUngroupedKeyScheduling bool `json:"allow_ungrouped_key_scheduling"`
+	AllowUngroupedKeyScheduling      bool  `json:"allow_ungrouped_key_scheduling"`
+	GatewayAdaptiveSchedulingEnabled *bool `json:"gateway_adaptive_scheduling_enabled"`
 
 	// Backend Mode
 	BackendModeEnabled bool `json:"backend_mode_enabled"`
@@ -507,6 +508,9 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	auditReq := settingsAuditRequest(req)
 	omitted := omittedSettingKeys(sentFields)
+	if req.GatewayAdaptiveSchedulingEnabled == nil {
+		omitted[service.SettingKeyGatewayAdaptiveSchedulingEnabled] = struct{}{}
+	}
 	if req.ModelPlazaShowOfficialPricing == nil {
 		omitted[service.SettingKeyModelPlazaShowOfficialPricing] = struct{}{}
 	}
@@ -1699,6 +1703,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		MinClaudeCodeVersion:                   req.MinClaudeCodeVersion,
 		MaxClaudeCodeVersion:                   req.MaxClaudeCodeVersion,
 		AllowUngroupedKeyScheduling:            req.AllowUngroupedKeyScheduling,
+		GatewayAdaptiveSchedulingEnabled:       boolValueOrDefault(req.GatewayAdaptiveSchedulingEnabled, previousSettings.GatewayAdaptiveSchedulingEnabled),
 		BackendModeEnabled:                     req.BackendModeEnabled,
 		AllowUserViewErrorRequests: func() bool {
 			if req.AllowUserViewErrorRequests != nil {
@@ -2374,6 +2379,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		MinClaudeCodeVersion:                                   updatedSettings.MinClaudeCodeVersion,
 		MaxClaudeCodeVersion:                                   updatedSettings.MaxClaudeCodeVersion,
 		AllowUngroupedKeyScheduling:                            updatedSettings.AllowUngroupedKeyScheduling,
+		GatewayAdaptiveSchedulingEnabled:                       updatedSettings.GatewayAdaptiveSchedulingEnabled,
 		BackendModeEnabled:                                     updatedSettings.BackendModeEnabled,
 		EnableFingerprintUnification:                           updatedSettings.EnableFingerprintUnification,
 		EnableMetadataPassthrough:                              updatedSettings.EnableMetadataPassthrough,

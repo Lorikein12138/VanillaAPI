@@ -94,6 +94,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 	// Token counting is not billed, so it must not be excluded by the profit gate.
 	c.Request = c.Request.WithContext(service.WithOpenAIProfitControlSuppressed(c.Request.Context()))
 	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+	attachGatewayAdaptiveInput(c, body)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	requestStart := time.Now()
 	account, err := h.gatewayService.SelectAccountForTokenCount(
@@ -264,6 +265,7 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	// count_tokens 不计费：显式豁免利润门，避免高倍率账号池被门排除后连
 	// token 计数都返回 no available accounts。
 	c.Request = c.Request.WithContext(service.WithOpenAIProfitControlSuppressed(c.Request.Context()))
+	attachGatewayAdaptiveInput(c, body)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	currentRoutingModel := routingModel
 	if preferredMappedModel != "" {

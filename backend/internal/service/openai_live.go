@@ -143,6 +143,15 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		return nil, err
 	}
 
+	model := strings.TrimSpace(gjson.GetBytes(request.Session, "model").String())
+	if model == "" {
+		model = "gpt-live"
+	}
+	ctx = WithGatewayAdaptiveIngress(ctx, s.settingService, "openai_live_create", "webrtc_setup")
+	ctx = SetGatewayAdaptiveInput(ctx, request.Session)
+	if _, enabled := gatewayAdaptiveRoute(ctx); enabled {
+		ctx = WithAdaptiveSelectionModel(ctx, model)
+	}
 	excluded := make(map[int64]struct{})
 	// Live 按通话时长计费，不属于 token 利润门的语义范围：显式豁免，避免
 	// 防御性装门按文本 D 过滤 Live 账号池且门与计费时刻不同源。
@@ -195,7 +204,11 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 			return nil, ErrLiveConcurrencyFull
 		}
 
+		upstreamStart := time.Now()
 		created, createErr := s.createUpstreamLiveCall(ctx, account, request, attestation)
+		if createErr == nil && created != nil && created.CallID != "" {
+			observeAdaptiveCompletion(ctx, account, model, upstreamStart, 0, true)
+		}
 		selection.ReleaseFunc()
 		if createErr != nil {
 			s.releaseLiveLease(account.ID, identity.UserID, identity.APIKeyID, leaseID)
@@ -208,10 +221,6 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		}
 
 		now := time.Now()
-		model := strings.TrimSpace(gjson.GetBytes(request.Session, "model").String())
-		if model == "" {
-			model = "gpt-live"
-		}
 		record := &LiveCallRecord{
 			CallID:                created.CallID,
 			CallHash:              hashLiveCallID(created.CallID),
