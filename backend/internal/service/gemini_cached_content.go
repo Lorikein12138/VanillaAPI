@@ -1101,8 +1101,13 @@ func (s *GeminiCachedContentService) CreateUpstream(ctx context.Context, account
 	if err != nil {
 		return nil, err
 	}
+	started := time.Now()
 	respBody, err := s.doUpstream(ctx, account, http.MethodPost, collectionURL, body, geminiCachedContentUpstreamTimeout)
 	if err != nil {
+		var upstreamErr *GeminiCachedContentUpstreamError
+		if errors.As(err, &upstreamErr) {
+			observeAdaptiveCompletion(ctx, account, mappedModel, started, upstreamErr.StatusCode, false)
+		}
 		return nil, err
 	}
 	upstream, err := parseGeminiCachedContentUpstream(respBody)
@@ -1112,6 +1117,7 @@ func (s *GeminiCachedContentService) CreateUpstream(ctx context.Context, account
 	if upstream.TotalTokenCount <= 0 {
 		return nil, &GeminiCachedContentMalformedResponseError{Name: upstream.Name, Err: errors.New("missing usageMetadata.totalTokenCount")}
 	}
+	observeAdaptiveCompletion(ctx, account, mappedModel, started, 0, true)
 	return upstream, nil
 }
 

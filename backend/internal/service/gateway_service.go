@@ -1439,6 +1439,7 @@ func (s *GatewayService) DoGrokNativeResponsesJSON(ctx context.Context, account 
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	started := time.Now()
 	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
 		return nil, &UpstreamFailoverError{StatusCode: http.StatusBadGateway, Reason: GatewayFailureReason("grok_search_transport")}
@@ -1451,6 +1452,7 @@ func (s *GatewayService) DoGrokNativeResponsesJSON(ctx context.Context, account 
 			Reason:     GatewayFailureReason("grok_search_read"),
 		}
 	}
+	observeAdaptiveCompletion(ctx, account, gjson.GetBytes(body, "model").String(), started, resp.StatusCode, resp.StatusCode >= 200 && resp.StatusCode < 300 && gjson.GetBytes(respBytes, "output").IsArray())
 	if resp.StatusCode >= 400 {
 		msg := string(respBytes)
 		if len(msg) > 200 {

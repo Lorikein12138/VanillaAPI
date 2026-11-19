@@ -686,7 +686,14 @@ func (s *OpenAIGatewayService) ForwardImages(
 	body []byte,
 	parsed *OpenAIImagesRequest,
 	channelMappedModel string,
-) (*OpenAIForwardResult, error) {
+) (adaptiveResult *OpenAIForwardResult, adaptiveErr error) {
+	originalAdaptiveContext := ctx
+	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
+	if adaptiveObservation != nil {
+		defer func() {
+			observeAdaptiveOpenAIResult(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr)
+		}()
+	}
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}
@@ -771,6 +778,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		return nil, s.openAIImagesAPIKeyTransportError(c, account, upstreamReq.URL.String(), err)
 	}
 	if resp.StatusCode >= 400 {
+		observeAdaptiveHTTPFailure(ctx, adaptiveHTTPObservation(ctx), account, upstreamModel, resp.StatusCode)
 		return s.handleOpenAIImagesAPIKeyErrorStatus(upstreamCtx, c, account, resp, upstreamReq.URL.String(), upstreamModel)
 	}
 	defer func() { _ = resp.Body.Close() }()

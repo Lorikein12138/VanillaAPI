@@ -62,6 +62,9 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	}
 	defer inflightDone()
 
+	if ctx := service.WithAdaptiveSelectionModel(c.Request.Context(), model); ctx != c.Request.Context() {
+		c.Request = c.Request.WithContext(ctx)
+	}
 	// Keep the HTTP response uncommitted while selecting and probing an account.
 	// Realtime is not an HTTP streaming response; using reqStream=true here would
 	// let the wait queue flush an SSE ping before the WebSocket handshake succeeds.
@@ -236,6 +239,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		}
 	}
 	// 余额模式在途预留（与计费同口径估算；计费任务扣减余额缓存后才释放）。
+	attachGatewayAdaptiveInput(c, body)
 	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, grokVoiceInflightEstimate(endpoint, body))
 	if inflightErr != nil {
 		status, code, message, retryAfter := billingErrorDetails(inflightErr)
@@ -256,6 +260,9 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	var last *service.UpstreamFailoverError
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
+	if ctx := service.WithAdaptiveSelectionModel(c.Request.Context(), strings.SplitN(endpoint, "/", 2)[0]); ctx != c.Request.Context() {
+		c.Request = c.Request.WithContext(ctx)
+	}
 
 	for attempts := 0; attempts < 4; attempts++ {
 		selection, _, selectErr := h.gatewayService.SelectAccountWithSchedulerForCapability(

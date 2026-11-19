@@ -629,6 +629,7 @@ export interface SystemSettings {
 
   // 分组隔离
   allow_ungrouped_key_scheduling: boolean;
+  gateway_adaptive_scheduling_enabled: boolean;
 
   // Gateway forwarding behavior
   openai_ttft_mode: string;
@@ -962,6 +963,7 @@ export interface UpdateSettingsRequest {
   min_claude_code_version?: string;
   max_claude_code_version?: string;
   allow_ungrouped_key_scheduling?: boolean;
+  gateway_adaptive_scheduling_enabled?: boolean;
   openai_ttft_mode?: string;
   enable_fingerprint_unification?: boolean;
   enable_metadata_passthrough?: boolean;

@@ -52,6 +52,7 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	upstreamStart := time.Now()
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
 		return nil, s.handleUpstreamTransportError(ctx, c, account, err, OpsUpstreamErrorEvent{
@@ -62,6 +63,7 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		observeAdaptiveCompletion(ctx, account, typesafe.JevLatestModel, upstreamStart, resp.StatusCode, false)
 		return nil, s.handleSystemOneErrorResponse(ctx, c, account, resp, upstreamURL)
 	}
 
@@ -85,6 +87,7 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 		})
 		return nil, err
 	}
+	observeAdaptiveCompletion(ctx, account, typesafe.JevLatestModel, upstreamStart, resp.StatusCode, true)
 	return &SystemOneForwardResult{
 		ForwardResult: ForwardResult{
 			RequestID:             resp.Header.Get("x-request-id"),

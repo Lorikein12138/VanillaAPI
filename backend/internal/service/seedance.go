@@ -132,6 +132,9 @@ func (s *OpenAIGatewayService) ForwardSeedance(ctx context.Context, c *gin.Conte
 	// Do not retry ambiguous asynchronous creates: the upstream may already have
 	// accepted a billable job. Preserve native error codes and response bodies.
 	if resp.StatusCode >= 300 {
+		if endpoint == SeedanceEndpointCreate {
+			observeAdaptiveCompletion(ctx, account, upstreamModel, started, resp.StatusCode, false)
+		}
 		writeGrokMediaResponse(c, resp, responseBody, s.responseHeaderFilter)
 		return nil, fmt.Errorf("seedance upstream status %d", resp.StatusCode)
 	}
@@ -142,6 +145,7 @@ func (s *OpenAIGatewayService) ForwardSeedance(ctx context.Context, c *gin.Conte
 			return nil, fmt.Errorf("seedance create response missing task ID")
 		}
 		result.ResponseID = SeedanceTaskKey(id)
+		observeAdaptiveCompletion(ctx, account, upstreamModel, started, resp.StatusCode, true)
 	}
 	if endpoint == SeedanceEndpointStatus {
 		result.ResponseID = taskID

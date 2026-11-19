@@ -35,6 +35,16 @@ func RegisterGatewayRoutes(
 	clientRequestID := middleware.ClientRequestID()
 	opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
 	endpointNorm := handler.InboundEndpointMiddleware()
+	adaptiveIngress := func(c *gin.Context) {
+		operation, transport := gatewayAdaptiveIngressRoute(c)
+		if operation != "" {
+			ctx := service.WithGatewayAdaptiveIngress(c.Request.Context(), settingService, operation, transport)
+			if ctx != c.Request.Context() {
+				c.Request = c.Request.WithContext(ctx)
+			}
+		}
+		c.Next()
+	}
 	compositeTarget := compositeTargetPlatformMiddleware(compositeResolver)
 	compositeGeminiTarget := compositeGeminiTargetPlatformMiddleware(compositeResolver)
 
@@ -186,7 +196,7 @@ func RegisterGatewayRoutes(
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(compositeTarget)
-	gateway.Use(requireGroupAnthropic)
+	gateway.Use(requireGroupAnthropic, adaptiveIngress)
 	{
 		// /v1/messages: auto-route based on group platform
 		gateway.POST("/messages", func(c *gin.Context) {
@@ -343,7 +353,7 @@ func RegisterGatewayRoutes(
 	gemini.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
 	gemini.Use(groupModelAllowlist)
 	gemini.Use(compositeGeminiTarget)
-	gemini.Use(requireGroupGoogle)
+	gemini.Use(requireGroupGoogle, adaptiveIngress)
 	{
 		gemini.GET("/models", h.Gateway.GeminiV1BetaListModels)
 		gemini.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
@@ -368,7 +378,7 @@ func RegisterGatewayRoutes(
 	// 根路径别名共用中间件链：白名单准入在 apiKeyAuth 之后、compositeTarget
 	// 之前，避免逐条路由手工维护链导致漏挂。
 	rootRoute := func(method, path string, limit gin.HandlerFunc, handler gin.HandlerFunc) {
-		r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic, handler)
+		r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic, adaptiveIngress, handler)
 	}
 	for _, prefix := range []string{"/api/v3", "/v3", "/v1", ""} {
 		rootRoute(http.MethodPost, prefix+"/contents/generations/tasks", bodyLimit, h.OpenAIGateway.SeedanceTasks)
@@ -385,7 +395,7 @@ func RegisterGatewayRoutes(
 	rootRoute(http.MethodGet, "/models/:model", bodyLimit, h.Gateway.Models)
 	rootRoute(http.MethodPost, "/messages/count_tokens", bodyLimit, countTokensHandler)
 	codexDirect := r.Group("/backend-api/codex")
-	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic)
+	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic, adaptiveIngress)
 	{
 		codexDirect.POST("/realtime/calls", h.OpenAIGateway.Live)
 		codexDirect.GET("/:call_id", h.OpenAIGateway.LiveSideband)
@@ -499,7 +509,7 @@ func RegisterGatewayRoutes(
 	antigravityV1.Use(middleware.ForcePlatform(service.PlatformAntigravity))
 	antigravityV1.Use(gin.HandlerFunc(apiKeyAuth))
 	antigravityV1.Use(groupModelAllowlist)
-	antigravityV1.Use(requireGroupAnthropic)
+	antigravityV1.Use(requireGroupAnthropic, adaptiveIngress)
 	{
 		antigravityV1.POST("/messages", h.Gateway.Messages)
 		antigravityV1.POST("/messages/count_tokens", h.Gateway.CountTokens)
@@ -515,13 +525,75 @@ func RegisterGatewayRoutes(
 	antigravityV1Beta.Use(middleware.ForcePlatform(service.PlatformAntigravity))
 	antigravityV1Beta.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
 	antigravityV1Beta.Use(groupModelAllowlist)
-	antigravityV1Beta.Use(requireGroupGoogle)
+	antigravityV1Beta.Use(requireGroupGoogle, adaptiveIngress)
 	{
 		antigravityV1Beta.GET("/models", h.Gateway.GeminiV1BetaListModels)
 		antigravityV1Beta.GET("/models/:model", h.Gateway.GeminiV1BetaGetModel)
 		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 
+}
+
+func gatewayAdaptiveIngressRoute(c *gin.Context) (operation, transport string) {
+	path := c.FullPath()
+	if c.Request.Method == http.MethodGet {
+		switch {
+		case strings.HasSuffix(path, "/responses"), strings.HasSuffix(path, "/realtime"):
+			return "GET " + path, "ws"
+		case strings.Contains(path, "/v1beta/models"), path == "/backend-api/codex/models":
+			return "GET " + path, "http"
+		case path == "/v1/models" || path == "/models":
+			if c.Query("client_version") != "" {
+				return "GET " + path, "http"
+			}
+			return "openai_standard_models_fallback", "http"
+		case path == "/v1/custom-voices" || path == "/custom-voices":
+			return "GET " + path, "http"
+		}
+		return "", ""
+	}
+	if c.Request.Method != http.MethodPost || strings.Contains(path, "/:") || strings.HasSuffix(path, "/async") {
+		return "", ""
+	}
+	// Resource reads/writes use their owner; these POSTs start a new operation.
+	switch {
+	case strings.HasSuffix(path, "/responses/*subpath"):
+		switch c.Param("subpath") {
+		case "/compact", "/input_tokens":
+			path = strings.TrimSuffix(path, "/*subpath") + c.Param("subpath")
+		default:
+			return "", ""
+		}
+	case strings.HasSuffix(path, "/models/*modelAction"):
+		action := c.Request.URL.Path
+		switch {
+		case strings.HasSuffix(action, ":streamGenerateContent"):
+			return "POST " + path + ":streamGenerateContent", "sse"
+		case strings.HasSuffix(action, ":generateContent"):
+			return "POST " + path + ":generateContent", ""
+		case strings.HasSuffix(action, ":countTokens"):
+			return "POST " + path + ":countTokens", "http"
+		default:
+			return "", ""
+		}
+	default:
+		switch {
+		case strings.HasSuffix(path, "/messages"), strings.HasSuffix(path, "/messages/count_tokens"),
+			strings.HasSuffix(path, "/systemone"), strings.HasSuffix(path, "/responses"),
+			strings.HasSuffix(path, "/chat/completions"), strings.HasSuffix(path, "/embeddings"),
+			strings.HasSuffix(path, "/alpha/search"), strings.HasSuffix(path, "/web_search"),
+			strings.HasSuffix(path, "/x_search"), strings.HasSuffix(path, "/tts"),
+			strings.HasSuffix(path, "/stt"), strings.HasSuffix(path, "/custom-voices"),
+			strings.HasSuffix(path, "/images/generations"), strings.HasSuffix(path, "/images/edits"),
+			strings.HasSuffix(path, "/images/batches"), strings.HasSuffix(path, "/videos"),
+			strings.HasSuffix(path, "/videos/generations"), strings.HasSuffix(path, "/videos/edits"),
+			strings.HasSuffix(path, "/videos/extensions"), strings.HasSuffix(path, "/contents/generations/tasks"),
+			strings.HasSuffix(path, "/cachedContents"):
+		default:
+			return "", ""
+		}
+	}
+	return "POST " + path, ""
 }
 
 func dispatchCodexModelsGateway(c *gin.Context, openAIHandler, generatedHandler gin.HandlerFunc) {

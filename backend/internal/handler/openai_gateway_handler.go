@@ -472,6 +472,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// 使用 gjson 只读提取字段做校验，避免完整 Unmarshal
+	attachGatewayAdaptiveInput(c, body)
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
@@ -1230,6 +1231,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
+	attachGatewayAdaptiveInput(c, body)
+	if ctx := service.WithAdaptiveMessagesFastMode(c.Request.Context(), c.GetHeader("anthropic-beta")); ctx != c.Request.Context() {
+		c.Request = c.Request.WithContext(ctx)
+	}
 	modelResult := gjson.GetBytes(body, "model")
 	if !modelResult.Exists() || modelResult.Type != gjson.String || modelResult.String() == "" {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
@@ -2785,6 +2790,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
+	ctx = service.SetGatewayAdaptiveInput(ctx, firstMessage)
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -3237,6 +3243,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				scheduleModel := turnUpstreamModel
 				if scheduleModel == "" {
 					scheduleModel = turnRequestedModel
+				}
+				if turn == 1 && openAIForwardSucceededForScheduling(result) {
+					service.ObserveAdaptiveOpenAIResult(ctx, account, result, nil)
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, scheduleModel, openAIForwardSucceededForScheduling(result), result.FirstTokenMs)
 				inboundEndpoint := GetInboundEndpoint(c)

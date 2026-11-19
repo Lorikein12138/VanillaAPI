@@ -978,7 +978,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		candidateCount:            len(candidates),
 	}
 	if len(candidates) == 0 {
-		plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
+		plan.selectionOrder = s.buildOpenAISelectionOrder(ctx, req, plan)
 		return plan
 	}
 
@@ -1122,11 +1122,12 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 		plan.topK = 1
 	}
 
-	plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
+	plan.selectionOrder = s.buildOpenAISelectionOrder(ctx, req, plan)
 	return plan
 }
 
 func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
+	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
@@ -1138,8 +1139,40 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		if groupTopK > len(pool) {
 			groupTopK = len(pool)
 		}
-		ranked := selectTopKOpenAICandidates(pool, groupTopK)
+		var ranked []openAIAccountCandidateScore
+		var adaptiveFirst bool
+		if _, enabled := gatewayAdaptiveRoute(ctx); enabled && req.StickyAccountID == 0 && req.StickyPreviousAccountID == 0 && req.GuardianParentAccountID == 0 && !req.PreserveStickyBinding && req.PreviousResponseID == "" {
+			ordered := append([]openAIAccountCandidateScore(nil), pool...)
+			sort.SliceStable(ordered, func(i, j int) bool { return isOpenAIAccountCandidateBetter(ordered[i], ordered[j]) })
+			rateOrder := openAILegacyUpstreamRateOrder{}
+			weights := s.service.openAIWSSchedulerWeightsForRequest(ctx)
+			if req.UseUpstreamTokenCost && weights.UpstreamCost > 0 {
+				accounts := make([]*Account, 0, len(ordered))
+				for _, item := range ordered {
+					accounts = append(accounts, item.account)
+				}
+				rateOrder = newOpenAILegacyUpstreamRateOrder(accounts, time.Now(), s.service.openAIOAuthSchedulingRateMultiplier(ctx))
+			}
+			loads := make(map[int64]int, len(ordered))
+			for _, item := range ordered {
+				loads[item.account.ID] = item.loadInfo.LoadRate
+			}
+			peers := adaptiveOpenAIPeers(req.RequireCompact, rateOrder)
+			adaptiveFirst = rankAdaptivePool(ctx, ordered, func(item openAIAccountCandidateScore) *Account { return item.account },
+				adaptiveOpenAIModel(ctx, req.RequestedModel, req.RequireCompact), func(a, b *Account) bool {
+					return loads[a.ID] < 100 && loads[b.ID] < 100 && peers(a, b)
+				}, len(req.ExcludedIDs) == 0)
+			if adaptiveFirst {
+				ranked = ordered[:groupTopK]
+			}
+		}
+		if !adaptiveFirst {
+			ranked = selectTopKOpenAICandidates(pool, groupTopK)
+		}
 		var primary []openAIAccountCandidateScore
+		if adaptiveFirst {
+			primary = ranked
+		}
 		if req.StickyWeighted {
 			for _, stickyID := range []int64{req.StickyPreviousAccountID, req.StickyAccountID} {
 				if stickyID <= 0 {
@@ -2445,6 +2478,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	if previousResponseID != "" {
+		ctx = protectAdaptiveSelection(ctx)
+	}
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
 	// 分组利润控制：唯一文本调度入口的防御性装门。handler 文本
@@ -2505,6 +2541,13 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				return selection, decision, nil
 			}
 		}
+		if preserveStickyBinding || guardianParentAccountID > 0 {
+			ctx = protectAdaptiveSelection(ctx)
+		}
+		ctx = withAdaptiveEligibility(ctx, func(account *Account) bool {
+			transportOK := requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE || s.isOpenAIAccountTransportCompatible(account, requiredTransport)
+			return transportOK && accountSupportsOpenAICapabilities(account, requiredCapability, requiredImageCapability)
+		})
 		legacySessionHash := sessionHash
 		if preserveStickyBinding {
 			legacySessionHash = ""

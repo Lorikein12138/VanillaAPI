@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gemini"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
@@ -78,7 +79,7 @@ func DeclaredModelsCover(declared []string, model string) bool {
 //
 // Vertex 账号排在所有 AI Studio 兼容账号之后，混合分组始终由 AI Studio 兼容账号应答。
 // 同级账号按 priority、最近使用时间挑选。DeclaredModelIDs 非空时模型接口按声明的模型应答，不经过选号。
-func (s *GeminiMessagesCompatService) SelectAccountForModelsEndpoints(ctx context.Context, groupID *int64) (*Account, error) {
+func (s *GeminiMessagesCompatService) SelectAccountForModelsEndpoints(ctx context.Context, groupID *int64, requestedModel ...string) (*Account, error) {
 	accounts, err := s.listSchedulableAccountsOnce(ctx, groupID, PlatformGemini, true)
 	if err != nil {
 		return nil, fmt.Errorf("query accounts failed: %w", err)
@@ -126,6 +127,21 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelsEndpoints(ctx contex
 
 	if selected == nil {
 		return nil, errors.New("no available Gemini accounts")
+	}
+	if _, enabled := gatewayAdaptiveRoute(ctx); enabled && !selected.IsVertexAPIKey() {
+		model := ""
+		if len(requestedModel) > 0 {
+			model = requestedModel[0]
+		}
+		eligible := []*Account{selected}
+		for i := range accounts {
+			account := &accounts[i]
+			if account.ID != selected.ID && account.IsSchedulable() && !account.IsVertexAPIKey() && modelsEndpointAccountRank(account) == modelsEndpointAccountRank(selected) {
+				eligible = append(eligible, account)
+			}
+		}
+		rankAdaptivePool(ctx, eligible, adaptiveAccount, func(*Account) string { return model }, adaptiveAnyPeer, true)
+		selected = eligible[0]
 	}
 	return s.hydrateSelectedAccount(ctx, selected)
 }
@@ -195,7 +211,7 @@ func (s *GeminiMessagesCompatService) ForwardGetModel(ctx context.Context, accou
 		return nil, errors.New("account is nil")
 	}
 	if !account.IsVertexServiceAccount() {
-		return s.forwardGeminiModelsGET(ctx, account, "/v1beta/models/"+model)
+		return s.forwardGeminiModelsGET(WithAdaptiveSelectionModel(ctx, model), account, "/v1beta/models/"+model)
 	}
 	if account.IsVertexAPIKey() {
 		return geminiModelsJSONResult(http.StatusOK, gemini.FallbackModel(model))
@@ -205,7 +221,7 @@ func (s *GeminiMessagesCompatService) ForwardGetModel(ctx context.Context, accou
 	if isVertexMultiRegion(location) {
 		location = vertexGlobalLocation
 	}
-	modelIDs, failure, err := s.listVertexGeminiModels(ctx, account, location)
+	modelIDs, failure, err := s.listVertexGeminiModels(WithAdaptiveSelectionModel(ctx, model), account, location)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +280,13 @@ func (s *GeminiMessagesCompatService) forwardGeminiModelsGET(ctx context.Context
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}
 
-	return s.doGeminiModelsGET(req, account)
+	start := time.Now()
+	result, err := s.doGeminiModelsGET(req, account)
+	if err == nil && result != nil {
+		success := result.StatusCode >= 200 && result.StatusCode < 300 && json.Valid(result.Body)
+		observeAdaptiveCompletion(ctx, account, adaptiveSelectionModel(ctx, ""), start, result.StatusCode, success)
+	}
+	return result, err
 }
 
 // listVertexGeminiModels 读取 Vertex 服务账号在指定区域可用的 Gemini 模型。
@@ -278,6 +300,7 @@ func (s *GeminiMessagesCompatService) listVertexGeminiModels(ctx context.Context
 		return nil, nil, err
 	}
 
+	start := time.Now()
 	modelIDs, err = listVertexGeminiPublisherModels(location, func(_ int, listURL string) ([]byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
 		if err != nil {
@@ -297,11 +320,13 @@ func (s *GeminiMessagesCompatService) listVertexGeminiModels(ctx context.Context
 		return res.Body, nil
 	})
 	if failure != nil {
+		observeAdaptiveCompletion(ctx, account, adaptiveSelectionModel(ctx, ""), start, failure.StatusCode, false)
 		return nil, failure, nil
 	}
 	if err != nil {
 		return nil, nil, err
 	}
+	observeAdaptiveCompletion(ctx, account, adaptiveSelectionModel(ctx, ""), start, 0, true)
 	return modelIDs, nil, nil
 }
 

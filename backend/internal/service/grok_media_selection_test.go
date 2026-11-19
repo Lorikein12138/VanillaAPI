@@ -45,7 +45,8 @@ func TestSelectGrokMediaVideoRequestAccountPreservesOwner(t *testing.T) {
 					acquiredIDs:    &acquired, releasedIDs: &released,
 				}),
 			}
-			ctx := context.Background()
+			ctx := WithGatewayAdaptiveIngress(context.Background(), &SettingService{settingRepo: adaptiveTestSettings{}}, "test_owner_affinity", "http")
+			seedAdaptiveTestSamples(t, ctx, "", owner, other)
 			require.NoError(t, svc.BindGrokMediaVideoRequestAccount(ctx, &groupID, "task", 10, 20, 1))
 			sessionHash := GrokMediaVideoRequestSessionHash("task", 10, 20)
 			for range 20 {
