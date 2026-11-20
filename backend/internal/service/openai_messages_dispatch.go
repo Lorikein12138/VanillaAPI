@@ -59,7 +59,14 @@ func claudeMessagesDispatchFamily(model string) string {
 	}
 }
 
+// ResolveMessagesDispatchModel returns the dispatch mapping without a channel override.
 func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
+	return g.ResolveMessagesDispatchModelForChannel(requestedModel, false)
+}
+
+// ResolveMessagesDispatchModelForChannel lets a channel mapping replace only the
+// implicit Claude family fallback. An empty result leaves the channel model in use.
+func (g *Group) ResolveMessagesDispatchModelForChannel(requestedModel string, hasChannelMapping bool) string {
 	if g == nil {
 		return ""
 	}
@@ -91,25 +98,19 @@ func (g *Group) ResolveMessagesDispatchModel(requestedModel string) string {
 		return mappedModel
 	}
 
+	var configured, fallback string
 	switch claudeMessagesDispatchFamily(requestedModel) {
 	case "opus":
-		if mappedModel := strings.TrimSpace(cfg.OpusMappedModel); mappedModel != "" {
-			return mappedModel
-		}
-		return defaultOpenAIMessagesDispatchOpusMappedModel
+		configured, fallback = cfg.OpusMappedModel, defaultOpenAIMessagesDispatchOpusMappedModel
 	case "sonnet":
-		if mappedModel := strings.TrimSpace(cfg.SonnetMappedModel); mappedModel != "" {
-			return mappedModel
-		}
-		return defaultOpenAIMessagesDispatchSonnetMappedModel
+		configured, fallback = cfg.SonnetMappedModel, defaultOpenAIMessagesDispatchSonnetMappedModel
 	case "haiku":
-		if mappedModel := strings.TrimSpace(cfg.HaikuMappedModel); mappedModel != "" {
-			return mappedModel
-		}
-		return defaultOpenAIMessagesDispatchHaikuMappedModel
-	default:
-		return ""
+		configured, fallback = cfg.HaikuMappedModel, defaultOpenAIMessagesDispatchHaikuMappedModel
 	}
+	if configured != "" || hasChannelMapping {
+		return configured
+	}
+	return fallback
 }
 
 func sanitizeGroupMessagesDispatchFields(g *Group) {

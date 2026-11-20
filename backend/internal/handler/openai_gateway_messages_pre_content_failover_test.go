@@ -38,15 +38,22 @@ type preContentFailoverUpstream struct {
 	service.HTTPUpstream
 	mu      sync.Mutex
 	hits    []int64
+	models  []string
 	respond func(call int) (*http.Response, error)
 }
 
 func (u *preContentFailoverUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	var model string
 	if req.Body != nil {
-		_, _ = io.Copy(io.Discard, req.Body)
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		model = gjson.GetBytes(body, "model").String()
 	}
 	u.mu.Lock()
 	u.hits = append(u.hits, accountID)
+	u.models = append(u.models, model)
 	call := len(u.hits)
 	u.mu.Unlock()
 	return u.respond(call)
@@ -80,10 +87,12 @@ type unexpectedEOFReader struct{}
 func (unexpectedEOFReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
 type preContentFailoverScenario struct {
-	accounts    []service.Account
-	respond     func(call int) (*http.Response, error)
-	passthrough *service.ErrorPassthroughService
-	requestBody string
+	accounts       []service.Account
+	respond        func(call int) (*http.Response, error)
+	passthrough    *service.ErrorPassthroughService
+	requestBody    string
+	channelMapping map[string]string
+	dispatchConfig service.OpenAIMessagesDispatchModelConfig
 }
 
 func preContentAccounts(count int) []service.Account {
@@ -123,10 +132,20 @@ func serveMessagesScenario(t *testing.T, sc preContentFailoverScenario) (*httpte
 	cfg.Security.URLAllowlist.AllowInsecureHTTP = true
 	billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingCache.Stop)
+	var channelService *service.ChannelService
+	if len(sc.channelMapping) > 0 {
+		channelService = service.NewChannelService(&openAIWSUsageHandlerChannelRepoStub{
+			channels: []service.Channel{{
+				ID: 1, Status: service.StatusActive, GroupIDs: []int64{groupID},
+				ModelMapping: map[string]map[string]string{service.PlatformOpenAI: sc.channelMapping},
+			}},
+			groupPlatforms: map[int64]string{groupID: service.PlatformOpenAI},
+		}, nil, nil, nil, nil)
+	}
 	gateway := service.NewOpenAIGatewayService(
 		repo, nil, nil, nil, nil, nil, nil, cfg, nil, nil,
 		service.NewBillingService(cfg, nil), nil, billingCache, upstream,
-		&service.DeferredService{}, nil, nil, nil, nil, nil, nil, nil,
+		&service.DeferredService{}, nil, nil, nil, channelService, nil, nil, nil,
 	)
 	cache := &concurrencyCacheMock{
 		acquireUserSlotFn:    func(context.Context, int64, int, string) (bool, error) { return true, nil },
@@ -135,8 +154,11 @@ func serveMessagesScenario(t *testing.T, sc preContentFailoverScenario) (*httpte
 	h := NewOpenAIGatewayHandler(gateway, service.NewConcurrencyService(cache), billingCache, &service.APIKeyService{}, nil, sc.passthrough, nil, nil, cfg)
 	apiKey := &service.APIKey{
 		ID: 9102, GroupID: &groupID,
-		User:  &service.User{ID: 9103, Status: service.StatusActive},
-		Group: &service.Group{ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive, AllowMessagesDispatch: true},
+		User: &service.User{ID: 9103, Status: service.StatusActive},
+		Group: &service.Group{
+			ID: groupID, Platform: service.PlatformOpenAI, Status: service.StatusActive,
+			AllowMessagesDispatch: true, MessagesDispatchModelConfig: sc.dispatchConfig,
+		},
 	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -156,6 +178,52 @@ func serveMessagesScenario(t *testing.T, sc preContentFailoverScenario) (*httpte
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(rec, req)
 	return rec, upstream
+}
+
+func TestOpenAIMessagesDispatchSelectsAndForwardsMappedModel(t *testing.T) {
+	const requested = "claude-sonnet-4-5-20250929"
+	const channelTarget = "gpt-5.2"
+	for _, tc := range []struct {
+		name     string
+		channel  map[string]string
+		dispatch service.OpenAIMessagesDispatchModelConfig
+		want     string
+	}{
+		{
+			name: "channel beats implicit family fallback", want: channelTarget,
+			channel: map[string]string{requested: channelTarget},
+		},
+		{
+			name: "configured family beats channel", want: "gpt-5.4",
+			channel:  map[string]string{requested: channelTarget},
+			dispatch: service.OpenAIMessagesDispatchModelConfig{SonnetMappedModel: "gpt-5.4"},
+		},
+		{
+			name: "exact mapping beats configured family and channel", want: "gpt-5.4-mini",
+			channel: map[string]string{requested: channelTarget},
+			dispatch: service.OpenAIMessagesDispatchModelConfig{
+				SonnetMappedModel:  "gpt-5.4",
+				ExactModelMappings: map[string]string{requested: "gpt-5.4-mini"},
+			},
+		},
+		{name: "implicit family fallback without channel", want: "gpt-5.3-codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accounts := preContentAccounts(1)
+			accounts[0].Credentials["model_mapping"] = map[string]any{tc.want: tc.want}
+			rec, upstream := serveMessagesScenario(t, preContentFailoverScenario{
+				accounts: accounts, channelMapping: tc.channel, dispatchConfig: tc.dispatch,
+				requestBody: `{"model":"` + requested + `","max_tokens":32,"messages":[{"role":"user","content":"hello"}],"stream":true}`,
+				respond: func(int) (*http.Response, error) {
+					return preContentSSEResponse(io.NopCloser(strings.NewReader(preContentHandlerSuccess))), nil
+				},
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, []int64{accounts[0].ID}, upstream.hits)
+			require.Equal(t, []string{tc.want}, upstream.models)
+			require.Contains(t, rec.Body.String(), "answer from second account")
+		})
+	}
 }
 
 // requireEndsWithSSEError checks that a response already committed as SSE ends

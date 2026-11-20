@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
 	coderws "github.com/coder/websocket"
 	"go.uber.org/zap"
 )
@@ -199,6 +200,16 @@ func isOpenAIWSIngressPreviousResponseNotFound(err error) bool {
 		return false
 	}
 	return !turnErr.wroteDownstream
+}
+
+// ErrOpenAIWSConflictingRequestFields identifies a client frame rejected before forwarding.
+var ErrOpenAIWSConflictingRequestFields = errors.New("conflicting websocket request fields")
+
+func openAIWSConflictingRequestFieldsError(payload []byte) error {
+	if field, conflict := requestmodel.ConflictingField("application/json", payload); conflict {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("websocket request payload declares field %.64q more than once", field), ErrOpenAIWSConflictingRequestFields)
+	}
+	return nil
 }
 
 // NewOpenAIWSClientCloseError 创建一个客户端 WS 关闭错误。
