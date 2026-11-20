@@ -744,6 +744,7 @@ func TestAPIContracts(t *testing.T) {
 					"promo_code_enabled": true,
 					"password_reset_enabled": false,
 						"frontend_url": "",
+						"gateway_adaptive_scheduling_enabled": false,
 						"totp_enabled": false,
 						"totp_encryption_key_configured": false,
 						"passkey_enabled": false,
@@ -751,6 +752,7 @@ func TestAPIContracts(t *testing.T) {
 						"passkey_rp_id": "",
 						"passkey_rp_origins": [],
 						"session_binding_enabled": false,
+						"site_display_currency": "USD",
 						"step_up_enabled": false,
 						"audit_log_retention_days": 180,
 						"login_agreement_enabled": false,
@@ -1028,6 +1030,7 @@ func TestAPIContracts(t *testing.T) {
 					"subscription_enabled": true,
 					"model_plaza_enabled": false,
 					"model_plaza_require_auth": false,
+					"model_plaza_show_official_pricing": true,
 					"model_plaza_description": "",
 					"plugin_management_enabled": false,
 					"risk_control_enabled": false,
@@ -1103,6 +1106,7 @@ func TestAPIContracts(t *testing.T) {
 					"promo_code_enabled": true,
 					"password_reset_enabled": false,
 					"frontend_url": "",
+					"gateway_adaptive_scheduling_enabled": false,
 						"invitation_code_enabled": false,
 						"totp_enabled": false,
 						"totp_encryption_key_configured": false,
@@ -1111,6 +1115,7 @@ func TestAPIContracts(t *testing.T) {
 						"passkey_rp_id": "",
 						"passkey_rp_origins": [],
 						"session_binding_enabled": false,
+						"site_display_currency": "USD",
 						"step_up_enabled": false,
 						"audit_log_retention_days": 180,
 						"login_agreement_enabled": false,
@@ -1351,6 +1356,7 @@ func TestAPIContracts(t *testing.T) {
 					"subscription_enabled": true,
 					"model_plaza_enabled": false,
 					"model_plaza_require_auth": false,
+					"model_plaza_show_official_pricing": true,
 					"model_plaza_description": "",
 					"plugin_management_enabled": false,
 					"risk_control_enabled": false,
@@ -1537,7 +1543,7 @@ func newContractDeps(t *testing.T) *contractDeps {
 	settingRepo := newStubSettingRepo()
 	settingService := service.NewSettingService(settingRepo, cfg)
 
-	adminService := service.NewAdminService(nil, userRepo, groupRepo, accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, authCacheInvalidator, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	adminService := service.NewAdminService(nil, userRepo, groupRepo, accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, authCacheInvalidator, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	authHandler := handler.NewAuthHandler(cfg, nil, userService, settingService, nil, redeemService, nil, nil)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, nil, nil)

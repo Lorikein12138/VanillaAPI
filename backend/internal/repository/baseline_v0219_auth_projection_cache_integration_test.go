@@ -161,7 +161,7 @@ func TestBaselineV0219AuthProjectionCacheColdHotAndInvalidation(t *testing.T) {
 	require.Equal(t, redisReadsBeforeL2+1, countingCache.authReads.Load(), "new service instance must read the shared Redis entry")
 	baselineV0219EventuallyAuthProjection(t, svc2, keyValue, true, true, "old-model")
 
-	admin := service.NewAdminService(cfg, nil, groupRepo, accountRepo, nil, countingAPIKeyRepo, nil, nil, nil, nil, nil, nil, svc1, client, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	admin := service.NewAdminService(cfg, nil, groupRepo, accountRepo, nil, countingAPIKeyRepo, nil, nil, nil, nil, nil, nil, svc1, client, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	imageCountOff := false
 	_, err = admin.UpdateGroup(ctx, group.ID, &service.UpdateGroupInput{ImageCountBilling: &imageCountOff})
 	require.NoError(t, err)
@@ -199,6 +199,8 @@ func TestBaselineV0219AuthProjectionCacheColdHotAndInvalidation(t *testing.T) {
 	oldEntry, err := rawAPIKeyCache.GetAuthCache(ctx, cacheKey)
 	require.NoError(t, err)
 	require.NotNil(t, oldEntry.Snapshot)
+	currentSnapshotVersion := oldEntry.Snapshot.Version
+	require.Greater(t, currentSnapshotVersion, 25)
 	oldSnapshot := *oldEntry.Snapshot
 	oldSnapshot.Version = 25
 	oldEntry.Snapshot = &oldSnapshot
@@ -213,7 +215,8 @@ func TestBaselineV0219AuthProjectionCacheColdHotAndInvalidation(t *testing.T) {
 	require.Equal(t, redisReadsBeforeV25+1, countingCache.authReads.Load(), "v25 Redis payload must be inspected once")
 	refreshedEntry, err := rawAPIKeyCache.GetAuthCache(ctx, cacheKey)
 	require.NoError(t, err)
-	require.Equal(t, 27, refreshedEntry.Snapshot.Version)
+	require.NotNil(t, refreshedEntry.Snapshot)
+	require.Equal(t, currentSnapshotVersion, refreshedEntry.Snapshot.Version)
 	require.True(t, refreshedEntry.Snapshot.Group.AllowImageGeneration)
 	require.False(t, refreshedEntry.Snapshot.Group.ImageCountBilling)
 	require.Contains(t, refreshedEntry.Snapshot.Group.ModelAllowlist.Models, "new-model")

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 type SystemOneForwardResult struct {
@@ -43,6 +44,15 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 	if err != nil {
 		return nil, err
 	}
+	mappedModel := firstNonEmpty(account.GetMappedModel(typesafe.JevLatestModel), typesafe.JevLatestModel)
+	var upstreamModel string
+	if mappedModel != typesafe.JevLatestModel {
+		body, err = sjson.SetBytes(body, "model", mappedModel)
+		if err != nil {
+			return nil, fmt.Errorf("apply TypeSafe account model mapping: %w", err)
+		}
+		upstreamModel = mappedModel
+	}
 	req, err := typesafe.NewSystemOneRequest(ctx, baseURL, key, body)
 	if err != nil {
 		return nil, err
@@ -52,6 +62,7 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	SetOpsUpstreamModel(c, upstreamModel)
 	upstreamStart := time.Now()
 	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	if err != nil {
@@ -63,7 +74,7 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		observeAdaptiveCompletion(ctx, account, typesafe.JevLatestModel, upstreamStart, resp.StatusCode, false)
+		observeAdaptiveCompletion(ctx, account, mappedModel, upstreamStart, resp.StatusCode, false)
 		return nil, s.handleSystemOneErrorResponse(ctx, c, account, resp, upstreamURL)
 	}
 
@@ -87,13 +98,14 @@ func (s *GatewayService) ForwardSystemOne(ctx context.Context, c *gin.Context, a
 		})
 		return nil, err
 	}
-	observeAdaptiveCompletion(ctx, account, typesafe.JevLatestModel, upstreamStart, resp.StatusCode, true)
+	observeAdaptiveCompletion(ctx, account, mappedModel, upstreamStart, resp.StatusCode, true)
 	return &SystemOneForwardResult{
 		ForwardResult: ForwardResult{
 			RequestID:             resp.Header.Get("x-request-id"),
 			UpstreamHeaders:       resp.Header.Clone(),
 			Usage:                 ClaudeUsage{InputTokens: decoded.Usage.InputTokens, OutputTokens: decoded.Usage.OutputTokens},
 			Model:                 typesafe.JevLatestModel,
+			UpstreamModel:         upstreamModel,
 			UpstreamResponseModel: decoded.Model,
 			Duration:              time.Since(started),
 		},
