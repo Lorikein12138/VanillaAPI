@@ -207,6 +207,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	// 也防止已计费的在途视频任务因绑定账号被门排除而查询返回伪 404。
 	attachGatewayAdaptiveInput(c, body)
 	requestCtx := service.WithOpenAIProfitControlSuppressed(c.Request.Context())
+	requestCtx = service.WithGatewayAdaptiveRequestModel(requestCtx, requestModel)
 	if isGrokVideoCreateEndpoint(endpoint) && strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		requestCtx = service.WithAdaptiveGrokVideoDuration(requestCtx, requestInfo.DurationSeconds)
 	}

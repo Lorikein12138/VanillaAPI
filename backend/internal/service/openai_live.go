@@ -148,6 +148,7 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		model = "gpt-live"
 	}
 	ctx = WithGatewayAdaptiveIngress(ctx, s.settingService, "openai_live_create", "webrtc_setup")
+	ctx = WithGatewayAdaptiveProbeGroup(ctx, identity.GroupID)
 	ctx = SetGatewayAdaptiveInput(ctx, request.Session)
 	if _, enabled := gatewayAdaptiveRoute(ctx); enabled {
 		ctx = WithAdaptiveSelectionModel(ctx, model)

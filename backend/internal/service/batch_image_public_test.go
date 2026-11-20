@@ -1015,3 +1015,50 @@ func TestGatewayAdaptiveBatchStaysWithinProvider(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, accounts[0].ID, account.ID)
 }
+
+func TestGatewayAdaptiveBatchSubmitUsesNormalizedModelBudget(t *testing.T) {
+	svc, repo, _, _, _ := newTestBatchImagePublicService(true)
+	const firstModel, secondModel = "gemini-2.5-flash-image", "gemini-3-pro-image-preview"
+	models := map[string]any{firstModel: firstModel, secondModel: secondModel}
+	accounts := []Account{
+		testBatchImageMappedAccount(101, AccountTypeAPIKey, models),
+		testBatchImageMappedAccount(102, AccountTypeAPIKey, models),
+		testBatchImageMappedAccount(103, AccountTypeAPIKey, models),
+	}
+	for i := range accounts {
+		accounts[i].Priority = 1
+	}
+	svc.AccountRepo = &publicBatchImageAccountRepo{accounts: accounts}
+	groupID := int64(7)
+	owner := testBatchImageOwner()
+	owner.GroupID = &groupID
+	svc.GroupRepo = &publicBatchImageGroupRepo{groups: map[int64]*Group{
+		groupID: {ID: groupID, Platform: PlatformGemini, AllowBatchImageGeneration: true, RateMultiplier: 1},
+	}}
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	newRequestContext := func() context.Context {
+		ctx := WithGatewayAdaptiveIngress(context.Background(), settings, "test_batch_submit", "http")
+		return WithGatewayAdaptiveProbeGroup(ctx, &groupID)
+	}
+	route, _ := gatewayAdaptiveRoute(newRequestContext())
+	route.effort = "2/0/1K/1:1"
+	now := time.Now()
+	for _, model := range []string{firstModel, secondModel} {
+		for range adaptiveMinimum {
+			telemetry.observe(adaptiveKey(route, &accounts[0], model), now, time.Second, true)
+		}
+	}
+	for i, model := range []string{firstModel, secondModel} {
+		req := validBatchImageSubmitRequest()
+		req.Model = " " + model + " "
+		got, err := svc.Submit(newRequestContext(), owner, req, "")
+		require.NoError(t, err)
+		job := repo.jobs[got.ID]
+		require.Equal(t, model, job.Model)
+		require.Equal(t, accounts[i+1].ID, *job.AccountID)
+		require.Contains(t, telemetry.exploration.pools, adaptiveProbeScope{groupID: groupID, model: model, route: route})
+		// Advance only the process limiter, leaving candidate cooldowns and budgets in force.
+		telemetry.exploration.lastProbe = now.Add(-adaptiveProbeInterval)
+	}
+}

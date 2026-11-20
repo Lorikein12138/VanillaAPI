@@ -35,8 +35,12 @@ type cleanupFixture struct {
 }
 
 // newMinimalCleanup 以最小依赖构造 provideCleanup。rdb 与两个缓存订阅服务由调用方指定，其余依赖均为空实现。
-func newMinimalCleanup(rdb *redis.Client, channelSvc *service.ChannelService, tlsSvc *service.TLSFingerprintProfileService) cleanupFixture {
+func newMinimalCleanup(rdb *redis.Client, channelSvc *service.ChannelService, tlsSvc *service.TLSFingerprintProfileService, settings ...*service.SettingService) cleanupFixture {
 	cfg := &config.Config{}
+	var settingSvc *service.SettingService
+	if len(settings) > 0 {
+		settingSvc = settings[0]
+	}
 
 	oauthSvc := service.NewOAuthService(nil, nil)
 	openAIOAuthSvc := service.NewOpenAIOAuthService(nil, nil)
@@ -123,6 +127,7 @@ func newMinimalCleanup(rdb *redis.Client, channelSvc *service.ChannelService, tl
 		moderationSvc, // contentModeration
 		channelSvc,
 		tlsSvc,
+		settingSvc,
 	)
 	return cleanupFixture{cleanup: cleanup, moderation: moderationSvc}
 }
@@ -322,17 +327,69 @@ func TestProvideCleanup_CacheSubscriberTimeoutIsReportedAsFailure(t *testing.T) 
 	t.Cleanup(channelSub.open) // 订阅卡住时 Stop 只能等到 10s 预算耗尽；用例结束时放行，避免 goroutine 泄漏
 	channelSvc := service.NewChannelService(nil, nil, nil, nil, &gatedChannelPubSub{sub: channelSub})
 	logs := captureCleanupLog(t)
+	timedOut := make(chan struct{})
+	log.SetOutput(&cleanupTimeoutLog{Buffer: logs, timedOut: timedOut})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	settings := service.ProvideSettingService(nil, nil, nil, nil, nil, stalledCleanupHistory{started: started, release: release})
+	waitForSignal(t, started, "history read")
 
 	start := time.Now()
-	newMinimalCleanup(rdb, channelSvc, nil).cleanup()
+	done := make(chan struct{})
+	go func() {
+		newMinimalCleanup(rdb, channelSvc, nil, settings).cleanup()
+		close(done)
+	}()
+	select {
+	case <-timedOut:
+	case <-time.After(12 * time.Second):
+		t.Fatal("application cleanup budget did not expire")
+	}
+	select {
+	case <-done:
+		t.Fatal("Redis closed before the history worker exited")
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, rdb.Ping(context.Background()).Err())
+	unblock()
+	waitForSignal(t, done, "history and Redis cleanup")
 	elapsed := time.Since(start)
 
 	require.True(t, elapsed >= 9*time.Second, "cleanup must wait for the stuck subscriber until its budget expires, elapsed=%s", elapsed)
 	out := logs.String()
 	require.Contains(t, out, "[Cleanup] ChannelService failed: context deadline exceeded")
+	require.Contains(t, out, "[Cleanup] GatewayAdaptiveHistory succeeded")
 	require.Contains(t, out, "[Cleanup] Redis succeeded")
 	require.Contains(t, out, "[Cleanup] Warning: cleanup timed out after 10 seconds")
 	require.Error(t, rdb.Ping(context.Background()).Err())
+}
+
+type cleanupTimeoutLog struct {
+	*bytes.Buffer
+	timedOut chan struct{}
+	once     sync.Once
+}
+
+func (l *cleanupTimeoutLog) Write(data []byte) (int, error) {
+	if bytes.Contains(data, []byte("ChannelService failed: context deadline exceeded")) {
+		l.once.Do(func() { close(l.timedOut) })
+	}
+	return l.Buffer.Write(data)
+}
+
+type stalledCleanupHistory struct {
+	service.AdaptiveHistoryStore
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (s stalledCleanupHistory) Read(ctx context.Context, _, _ time.Time) ([]service.AdaptiveHistoryRecord, error) {
+	close(s.started)
+	<-s.release
+	return nil, ctx.Err()
 }
 
 func TestProvideCleanup_NilCacheSubscribersStillCloseRedis(t *testing.T) {

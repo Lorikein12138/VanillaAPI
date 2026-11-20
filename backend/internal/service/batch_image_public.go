@@ -242,6 +242,7 @@ func (s *BatchImagePublicService) Submit(ctx context.Context, owner BatchImageOw
 		route.effort = fmt.Sprintf("%d/%d/%s/%s", len(normalized.Items), refs, normalized.ImageSize, normalized.AspectRatio)
 		ctx = context.WithValue(ctx, adaptiveRouteKey{}, route)
 	}
+	ctx = WithGatewayAdaptiveRequestModel(ctx, normalized.Model)
 	provider, account, err := s.selectProviderAndAccount(ctx, owner, normalized.Provider, normalized.Model)
 	if err != nil {
 		return nil, err

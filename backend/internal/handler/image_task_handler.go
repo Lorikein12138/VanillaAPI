@@ -221,6 +221,9 @@ func (h *AsyncImageHandler) executeWithGateway(platform string, c *gin.Context) 
 		return
 	}
 	ctx := h.openAI.gatewayService.WithAdaptiveImageTask(c.Request.Context(), c.Request.URL.Path)
+	if key, ok := middleware2.GetAPIKeyFromContext(c); ok && key != nil {
+		ctx = service.WithGatewayAdaptiveProbeGroup(ctx, key.GroupID)
+	}
 	if ctx != c.Request.Context() {
 		c.Request = c.Request.WithContext(ctx)
 	}

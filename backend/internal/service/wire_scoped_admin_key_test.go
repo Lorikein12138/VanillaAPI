@@ -26,7 +26,7 @@ func (s *settingRepoWithStartupMigration) Set(_ context.Context, key, value stri
 func TestProvideSettingServiceWiresScopedAdminKeyRepository(t *testing.T) {
 	keyRepo := &scopedKeyMemoryRepo{item: &ScopedAdminKey{ID: "key-1", KeyPrefix: "adm_sc_key-1"}}
 	settings := &settingRepoWithStartupMigration{settingRepoStub: &settingRepoStub{}}
-	svc := ProvideSettingService(keyRepo, settings, nil, nil, nil)
+	svc := ProvideSettingService(keyRepo, settings, nil, nil, nil, nil)
 
 	keys, err := svc.ListScopedAdminKeys(context.Background())
 	require.NoError(t, err)

@@ -39,6 +39,9 @@ func RegisterGatewayRoutes(
 		operation, transport := gatewayAdaptiveIngressRoute(c)
 		if operation != "" {
 			ctx := service.WithGatewayAdaptiveIngress(c.Request.Context(), settingService, operation, transport)
+			if key, ok := middleware.GetAPIKeyFromContext(c); ok && key != nil {
+				ctx = service.WithGatewayAdaptiveProbeGroup(ctx, key.GroupID)
+			}
 			if ctx != c.Request.Context() {
 				c.Request = c.Request.WithContext(ctx)
 			}

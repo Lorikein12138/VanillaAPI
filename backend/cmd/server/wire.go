@@ -137,6 +137,7 @@ func provideCleanup(
 	contentModeration *service.ContentModerationService,
 	channelService *service.ChannelService,
 	tlsFingerprintProfileService *service.TLSFingerprintProfileService,
+	settingService *service.SettingService,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -437,6 +438,12 @@ func provideCleanup(
 		}
 
 		infraSteps := []cleanupStep{
+			{"GatewayAdaptiveHistory", func() error {
+				// History has its own drain budget even if application cleanup timed out.
+				historyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				return settingService.StopGatewayAdaptiveHistory(historyCtx)
+			}},
 			{"Redis", func() error {
 				if rdb == nil {
 					return nil
