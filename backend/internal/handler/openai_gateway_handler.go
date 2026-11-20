@@ -2791,6 +2791,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
 	ctx = service.SetGatewayAdaptiveInput(ctx, firstMessage)
+	ctx = service.WithGatewayAdaptiveUpstreamSession(ctx, c.Request.Header)
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
@@ -3182,6 +3183,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				defer func() {
 					clearCyberPolicyAttemptState(c, !cyberBlockPendingAfterFailover)
 				}()
+				if turn == 1 && (turnErr != nil || openAIForwardSucceededForScheduling(result)) {
+					service.ObserveAdaptiveOpenAIResult(ctx, account, result, turnErr)
+				}
 				releaseTurnSlots()
 				turnRequestedModel := reqModel
 				turnUpstreamModel := ""
@@ -3243,9 +3247,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				scheduleModel := turnUpstreamModel
 				if scheduleModel == "" {
 					scheduleModel = turnRequestedModel
-				}
-				if turn == 1 && openAIForwardSucceededForScheduling(result) {
-					service.ObserveAdaptiveOpenAIResult(ctx, account, result, nil)
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account, scheduleModel, openAIForwardSucceededForScheduling(result), result.FirstTokenMs)
 				inboundEndpoint := GetInboundEndpoint(c)

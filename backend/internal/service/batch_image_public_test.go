@@ -1041,12 +1041,13 @@ func TestGatewayAdaptiveBatchSubmitUsesNormalizedModelBudget(t *testing.T) {
 		ctx := WithGatewayAdaptiveIngress(context.Background(), settings, "test_batch_submit", "http")
 		return WithGatewayAdaptiveProbeGroup(ctx, &groupID)
 	}
-	route, _ := gatewayAdaptiveRoute(newRequestContext())
+	seedContext := newRequestContext()
+	route, _ := gatewayAdaptiveRoute(seedContext)
 	route.effort = "2/0/1K/1:1"
 	now := time.Now()
 	for _, model := range []string{firstModel, secondModel} {
 		for range adaptiveMinimum {
-			telemetry.observe(adaptiveKey(route, &accounts[0], model), now, time.Second, true)
+			telemetry.observe(adaptiveContextKey(seedContext, route, &accounts[0], model), now, time.Second, true)
 		}
 	}
 	for i, model := range []string{firstModel, secondModel} {

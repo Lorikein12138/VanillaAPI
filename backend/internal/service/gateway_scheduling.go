@@ -135,7 +135,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	var stickyAccountID int64
 	var stickySource string
-	if prefetch := prefetchedStickyAccountIDFromContext(ctx, groupID); prefetch > 0 {
+	if prefetch := prefetchedStickyAccountIDFromContext(ctx, groupID); prefetch > 0 && ctx.Value(adaptiveStickyTrialKey{}) == nil {
 		stickyAccountID = prefetch
 		stickySource = "prefetch"
 	} else if sessionHash != "" && s.cache != nil {
@@ -174,11 +174,41 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 
 		for {
-			account, err := s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, localExcluded)
+			var probe *Account
+			selectionCtx := ctx
+			if _, enabled := gatewayAdaptiveRoute(ctx); enabled {
+				selectionCtx = context.WithValue(ctx, adaptiveStickyNeedsSlotKey{}, true)
+				if stickyAccountID == 0 && len(localExcluded) == 0 && ctx.Value(adaptiveStickyTrialKey{}) == nil {
+					selectionCtx = context.WithValue(selectionCtx, adaptiveLegacyProbeKey{}, &probe)
+				}
+			}
+			account, err := s.SelectAccountForModelWithExclusions(selectionCtx, groupID, sessionHash, requestedModel, localExcluded)
 			if err != nil {
 				return nil, err
 			}
 
+			if account.ID == stickyAccountID && sessionHash != "" {
+				var routingIDs []int64
+				if group != nil && requestedModel != "" && modelRoutingAppliesToTargetPlatform(group.Platform) {
+					ids := group.GetRoutingAccountIDs(requestedModel)
+					if containsInt64(ids, account.ID) {
+						routingIDs = ids
+					}
+				}
+				if alternative := s.tryAdaptiveGatewayStickyAlternative(ctx, groupID, sessionHash, requestedModel, localExcluded, account, routingIDs); alternative != nil {
+					return alternative, nil
+				}
+			}
+			if probe != nil {
+				result, err := s.tryAcquireAccountSlot(ctx, probe.ID, probe.Concurrency)
+				if err == nil && result.Acquired {
+					if s.checkAndRegisterSession(ctx, probe, sessionHash) {
+						_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, probe.ID)
+						return s.newSelectionResult(ctx, probe, true, result.ReleaseFunc, nil)
+					}
+					result.ReleaseFunc()
+				}
+			}
 			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 			if err == nil && result.Acquired {
 				// 获取槽位后检查会话限制（使用 sessionHash 作为会话标识符）
@@ -290,6 +320,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				continue
 			}
 			account, ok := accountByID[routingAccountID]
+			if ok && !adaptiveStickyTrialAllows(ctx, account) {
+				continue
+			}
 			if !ok || !s.isAccountSchedulableForSelection(account) {
 				if !ok {
 					filteredMissing++
@@ -370,6 +403,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 						rpmPass := gatePass && s.isAccountSchedulableForRPM(ctx, stickyAccount, true)
 
+						if rpmPass {
+							if alternative := s.tryAdaptiveGatewayStickyAlternative(ctx, groupID, sessionHash, requestedModel, excludedIDs, stickyAccount, routingAccountIDs); alternative != nil {
+								return alternative, nil
+							}
+						}
 						if rpmPass { // 粘性会话窗口费用+RPM 检查
 							result, err := s.tryAcquireAccountSlot(ctx, stickyAccountID, stickyAccount.Concurrency)
 							if err == nil && result.Acquired {
@@ -509,6 +547,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					}
 				}
 
+				cancelUnacquiredAdaptiveProbe(ctx)
 				// 5. 所有路由账号槽位满，尝试返回等待计划（选择负载最低的）
 				// 遍历找到第一个满足会话限制的账号
 				for _, item := range waitOrder {
@@ -577,7 +616,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					"rpm_ok", rpmOK,
 				)
 
-				if !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable {
+				stickyEligible := !clearSticky && platformOK && profitOK && modelSupported && channelOK && modelSchedulable && quotaOK && windowCostOK && rpmOK && schedulable
+				if stickyEligible {
+					if alternative := s.tryAdaptiveGatewayStickyAlternative(ctx, groupID, sessionHash, requestedModel, excludedIDs, account, nil); alternative != nil {
+						return alternative, nil
+					}
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
@@ -668,7 +711,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	channelRestrictedCount := 0
 	for i := range accounts {
 		acc := &accounts[i]
-		if isExcluded(acc.ID) {
+		if isExcluded(acc.ID) || !adaptiveStickyTrialAllows(ctx, acc) {
 			continue
 		}
 		// Scheduler snapshots can be temporarily stale (bucket rebuild is throttled);
@@ -765,7 +808,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			if selected == nil {
 				break
 			}
-			if _, adaptive := gatewayAdaptiveRoute(ctx); adaptive && len(available) > 1 {
+			if _, adaptive := gatewayAdaptiveRoute(ctx); adaptive && len(available) > 0 {
 				pool := available
 				if cfg.PreferSoonestReset {
 					pool = filterBySoonestReset(filterByMinPriority(pool))
@@ -778,7 +821,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 						break
 					}
 				}
-				if rankAdaptivePool(ctx, pool, adaptiveLoadedAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, stickyAccountID == 0 && len(excludedIDs) == 0) {
+				if rankAdaptiveImmediate(ctx, pool, adaptiveLoadedAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, stickyAccountID == 0 && len(excludedIDs) == 0) {
 					selected = &pool[0]
 				}
 			}
@@ -809,6 +852,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 	}
 
+	cancelUnacquiredAdaptiveProbe(ctx)
 	// ============ Layer 3: 兜底排队 ============
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
 	rankAdaptivePool(ctx, candidates, adaptiveAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, false)
@@ -827,10 +871,29 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	return nil, ErrNoAvailableAccounts
 }
 
+func (s *GatewayService) tryAdaptiveGatewayStickyAlternative(ctx context.Context, groupID *int64, sessionHash, model string, excludedIDs map[int64]struct{}, owner *Account, routingIDs []int64) *AccountSelectionResult {
+	trial := adaptiveStickyTrialContext(ctx, owner, adaptiveMappedModel(ctx, model), func(_, candidate *Account) bool {
+		return len(routingIDs) == 0 || containsInt64(routingIDs, candidate.ID)
+	})
+	if trial == nil {
+		return nil
+	}
+	selection, err := s.SelectAccountWithLoadAwareness(trial, groupID, "", model, excludedIDs, "", 0)
+	if !acquiredAdaptiveStickyAlternative(trial, selection, err) {
+		return nil
+	}
+	if !s.checkAndRegisterSession(ctx, selection.Account, sessionHash) {
+		selection.ReleaseFunc()
+		return nil
+	}
+	_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, selection.Account.ID)
+	return selection
+}
+
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash, requestedModel string, preferOAuth, explore bool) (*AccountSelectionResult, bool, error) {
 	ordered := append([]*Account(nil), candidates...)
 	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
-	rankAdaptivePool(ctx, ordered, adaptiveAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, explore)
+	rankAdaptiveImmediate(ctx, ordered, adaptiveAccount, adaptiveMappedModel(ctx, requestedModel), adaptiveAnyPeer, explore)
 
 	for _, acc := range ordered {
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
@@ -1227,9 +1290,10 @@ func (s *GatewayService) isAccountInGroup(account *Account, groupID *int64) bool
 
 func (s *GatewayService) tryAcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {
 	if s.concurrencyService == nil {
-		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
+		return adaptiveTrackSlot(ctx, accountID, &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil)
 	}
-	return s.concurrencyService.AcquireAccountSlot(ctx, accountID, maxConcurrency)
+	result, err := s.concurrencyService.AcquireAccountSlot(ctx, accountID, maxConcurrency)
+	return adaptiveTrackSlot(ctx, accountID, result, err)
 }
 
 type usageLogWindowStatsBatchProvider interface {
@@ -1608,6 +1672,21 @@ func (s *GatewayService) isAccountBlockedBySchedulingThreshold(ctx context.Conte
 	return s.rateLimitService.ApplyAccountSchedulingThreshold(ctx, account)
 }
 
+func (s *GatewayService) adaptiveHydratedStickyChoice(ctx context.Context, candidate *Account, model string) *Account {
+	owner, _ := ctx.Value(adaptiveSoftStickyKey{}).(*Account)
+	if owner == nil {
+		return candidate
+	}
+	if candidate == nil || candidate.ID == owner.ID {
+		return owner
+	}
+	hydrated, err := s.hydrateSelectedAccount(ctx, candidate)
+	if err != nil || hydrated == nil {
+		return owner
+	}
+	return adaptiveGatewayWinner(ctx, hydrated, nil, model, false)
+}
+
 func (s *GatewayService) hydrateSelectedAccount(ctx context.Context, account *Account) (*Account, error) {
 	if account == nil || s.schedulerSnapshot == nil {
 		return account, nil
@@ -1981,7 +2060,10 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 							if s.debugModelRoutingEnabled() {
 								logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
 							}
-							return account, nil
+							if !adaptiveGatewayStickyEscape(ctx, account, requestedModel) {
+								return account, nil
+							}
+							ctx = withAdaptiveSoftSticky(ctx, account)
 						}
 					}
 				}
@@ -1996,6 +2078,9 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		var err error
 		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
 		if err != nil {
+			if owner, _ := ctx.Value(adaptiveSoftStickyKey{}).(*Account); owner != nil {
+				return owner, nil
+			}
 			return nil, fmt.Errorf("query accounts failed: %w", err)
 		}
 		accountsLoaded = true
@@ -2080,6 +2165,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		}
 
 		selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
+		selected = s.adaptiveHydratedStickyChoice(ctx, selected, requestedModel)
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
@@ -2108,7 +2194,10 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
 					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && account.Platform == platform && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) {
-						return account, nil
+						if !adaptiveGatewayStickyEscape(ctx, account, requestedModel) {
+							return account, nil
+						}
+						ctx = withAdaptiveSoftSticky(ctx, account)
 					}
 				}
 			}
@@ -2124,6 +2213,9 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 		var err error
 		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
 		if err != nil {
+			if owner, _ := ctx.Value(adaptiveSoftStickyKey{}).(*Account); owner != nil {
+				return owner, nil
+			}
 			return nil, fmt.Errorf("query accounts failed: %w", err)
 		}
 	}
@@ -2205,6 +2297,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	}
 
 	selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
+	selected = s.adaptiveHydratedStickyChoice(ctx, selected, requestedModel)
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
@@ -2262,7 +2355,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 								if s.debugModelRoutingEnabled() {
 									logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] legacy mixed routed sticky hit: group_id=%v model=%s session=%s account=%d", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), accountID)
 								}
-								return account, nil
+								if !adaptiveGatewayStickyEscape(ctx, account, requestedModel) {
+									return account, nil
+								}
+								ctx = withAdaptiveSoftSticky(ctx, account)
 							}
 						}
 					}
@@ -2274,6 +2370,9 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		var err error
 		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, nativePlatform, false)
 		if err != nil {
+			if owner, _ := ctx.Value(adaptiveSoftStickyKey{}).(*Account); owner != nil {
+				return owner, nil
+			}
 			return nil, fmt.Errorf("query accounts failed: %w", err)
 		}
 		accountsLoaded = true
@@ -2362,6 +2461,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		}
 
 		selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
+		selected = s.adaptiveHydratedStickyChoice(ctx, selected, requestedModel)
 
 		if selected != nil {
 			if sessionHash != "" && s.cache != nil {
@@ -2391,7 +2491,10 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					}
 					if !clearSticky && s.isGatewayAccountProfitEligible(ctx, account) && s.isAccountInGroup(account, groupID) && (requestedModel == "" || s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) && s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) && s.isAccountSchedulableForQuota(account) && s.isAccountSchedulableForWindowCost(ctx, account, true) && s.isAccountSchedulableForRPM(ctx, account, true) && !s.isStickyAccountUpstreamRestricted(ctx, groupID, account, requestedModel) {
 						if account.Platform == nativePlatform || (account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled()) {
-							return account, nil
+							if !adaptiveGatewayStickyEscape(ctx, account, requestedModel) {
+								return account, nil
+							}
+							ctx = withAdaptiveSoftSticky(ctx, account)
 						}
 					}
 				}
@@ -2404,6 +2507,9 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 		var err error
 		accounts, _, err = s.listSchedulableAccounts(ctx, groupID, nativePlatform, false)
 		if err != nil {
+			if owner, _ := ctx.Value(adaptiveSoftStickyKey{}).(*Account); owner != nil {
+				return owner, nil
+			}
 			return nil, fmt.Errorf("query accounts failed: %w", err)
 		}
 	}
@@ -2488,6 +2594,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	}
 
 	selected = adaptiveGatewayWinner(ctx, selected, adaptiveCandidates, requestedModel, sessionHash == "" && len(excludedIDs) == 0)
+	selected = s.adaptiveHydratedStickyChoice(ctx, selected, requestedModel)
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)

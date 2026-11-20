@@ -71,3 +71,34 @@ func TestAdaptiveHistoryStoreBoundsReadAndKeepsNewestRows(t *testing.T) {
 	require.Equal(t, "newest", rows[0].Payload)
 	require.Equal(t, "2", rows[len(rows)-1].Payload)
 }
+
+func TestAdaptiveHistoryStoreKeepsLatestHealthForSevenDays(t *testing.T) {
+	server := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	store := ProvideAdaptiveHistoryStore(rdb)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	cutoff := now.Add(-service.AdaptiveHistoryRetention)
+	old := service.AdaptiveHistoryRecord{At: now.Add(-48 * time.Hour), StateKey: "request-class", Payload: "degraded"}
+	current := service.AdaptiveHistoryRecord{At: now.Add(-36 * time.Hour), StateKey: old.StateKey, Payload: "retest-pass"}
+	require.NoError(t, store.Merge(ctx, cutoff, []service.AdaptiveHistoryRecord{old, current, old}))
+	rows, err := store.Read(ctx, cutoff, now)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, current.Payload, rows[0].Payload)
+	require.Equal(t, current.At.UnixMicro(), rows[0].At.UnixMicro())
+
+	server.FastForward(time.Hour)
+	require.NoError(t, store.Merge(ctx, cutoff, []service.AdaptiveHistoryRecord{current}))
+	require.Equal(t, adaptiveHealthTTL-time.Hour, server.TTL(adaptiveHealthIndex))
+	require.Equal(t, adaptiveHealthTTL-time.Hour, server.TTL(adaptiveHealthData))
+
+	through := current.At.Add(adaptiveHealthTTL)
+	rows, err = store.Read(ctx, through.Add(-service.AdaptiveHistoryRetention), through)
+	require.NoError(t, err)
+	require.Empty(t, rows, "the latest observation sets the logical expiry")
+	server.FastForward(adaptiveHealthTTL - time.Hour)
+	require.False(t, server.Exists(adaptiveHealthIndex))
+	require.False(t, server.Exists(adaptiveHealthData))
+}

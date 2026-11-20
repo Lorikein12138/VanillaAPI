@@ -49,7 +49,7 @@ func TestGatewayAdaptiveRoutedProbeKeepsNormalWaitOrder(t *testing.T) {
 	mappedModel := adaptiveMappedModel(ctx, model)
 	for i := range 2 {
 		account := &repo.accounts[i]
-		key := adaptiveKey(route, account, mappedModel(account))
+		key := adaptiveContextKey(ctx, route, account, mappedModel(account))
 		for range adaptiveMinimum {
 			telemetry.observe(key, time.Now(), time.Second/time.Duration(i+1), true)
 		}

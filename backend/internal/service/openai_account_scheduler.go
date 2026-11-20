@@ -469,7 +469,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
 	if previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
-		(!req.StickyWeighted || !req.PreviousResponseCanMove) {
+		(!req.StickyWeighted || !req.PreviousResponseCanMove || adaptiveHardContinuity(ctx)) {
+		requireOwner := s.service.adaptivePreviousResponseRequiresOwner(ctx, req.GroupID, previousResponseID, req.PreviousResponseCanMove)
 		selection, err := s.service.selectAccountByPreviousResponseIDForCapability(
 			ctx,
 			req.GroupID,
@@ -507,6 +508,9 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			}
 			return selection, decision, nil
 		}
+		if requireOwner {
+			return nil, decision, ErrNoAvailableAccounts
+		}
 	}
 
 	if req.GuardianParentAccountID > 0 {
@@ -526,14 +530,18 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted {
+	_, adaptive := gatewayAdaptiveRoute(ctx)
+	if !req.StickyWeighted || adaptive {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
 		}
 		if selection != nil && selection.Account != nil {
 			decision.Layer = openAIAccountScheduleLayerSessionSticky
-			decision.StickySessionHit = true
+			decision.StickySessionHit = !escapedSticky
+			if escapedSticky {
+				decision.Layer = openAIAccountScheduleLayerLoadBalance
+			}
 			decision.SelectedAccountID = selection.Account.ID
 			decision.SelectedAccountType = selection.Account.Type
 			return selection, decision, nil
@@ -637,7 +645,20 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 		return nil, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); shouldEscape && !req.DisableStickyEscape {
+	_, adaptive := gatewayAdaptiveRoute(ctx)
+	if adaptive && !req.DisableStickyEscape && !req.PreserveStickyBinding && req.GuardianParentAccountID == 0 {
+		preferLowRate := req.UseUpstreamTokenCost && s.service.openAIWSSchedulerWeightsForRequest(ctx).UpstreamCost > 0
+		if trial := s.service.adaptiveOpenAIStickyTrial(ctx, account, req.RequestedModel, req.RequireCompact, preferLowRate); trial != nil {
+			alternate := req
+			alternate.SessionHash, alternate.StickyAccountID, alternate.StickyWeighted = "", 0, false
+			selection, _, _, _, err := s.selectByLoadBalance(trial, alternate)
+			if acquiredAdaptiveStickyAlternative(trial, selection, err) {
+				_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, sessionHash, selection.Account.ID)
+				return selection, true, nil
+			}
+		}
+	}
+	if reason, errorRate, ttft, shouldEscape := s.shouldEscapeStickyAccount(accountID, escapeCfg); !adaptive && shouldEscape && !req.DisableStickyEscape {
 		slog.Info("sticky_escape_triggered",
 			"account_id", accountID,
 			"reason", reason,
@@ -664,7 +685,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	cfg := s.service.schedulingConfig()
 	// WaitPlan.MaxConcurrency 使用 Concurrency（非 EffectiveLoadFactor），因为 WaitPlan 控制的是 Redis 实际并发槽位等待。
 	if s.service.concurrencyService != nil {
-		if escapeCfg.enabled && !req.DisableStickyEscape && acquireErr == nil && result != nil && !result.Acquired {
+		if !adaptive && escapeCfg.enabled && !req.DisableStickyEscape && acquireErr == nil && result != nil && !result.Acquired {
 			errorRate, ttft, _ := s.stats.snapshot(accountID)
 			slog.Info("sticky_escape_triggered",
 				"account_id", accountID,
@@ -1143,7 +1164,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		var ranked []openAIAccountCandidateScore
 		var adaptiveFirst bool
 		var immediateProbe []openAIAccountCandidateScore
-		if _, enabled := gatewayAdaptiveRoute(ctx); enabled && req.StickyAccountID == 0 && req.StickyPreviousAccountID == 0 && req.GuardianParentAccountID == 0 && !req.PreserveStickyBinding && req.PreviousResponseID == "" {
+		if route, enabled := gatewayAdaptiveRoute(ctx); enabled && !route.protected && req.StickyAccountID == 0 && req.StickyPreviousAccountID == 0 && req.GuardianParentAccountID == 0 && !req.PreserveStickyBinding && req.PreviousResponseID == "" {
 			ordered := append([]openAIAccountCandidateScore(nil), pool...)
 			sort.SliceStable(ordered, func(i, j int) bool { return isOpenAIAccountCandidateBetter(ordered[i], ordered[j]) })
 			rateOrder := openAILegacyUpstreamRateOrder{}
@@ -1159,14 +1180,17 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			for _, item := range ordered {
 				loads[item.account.ID] = item
 			}
-			peers := adaptiveOpenAIPeers(req.RequireCompact, rateOrder)
+			compactPeers := adaptiveOpenAIHealthPeers(req.RequireCompact)
+			healthPeers := func(a, b *Account) bool {
+				return loads[a.ID].loadInfo.LoadRate < 100 && loads[b.ID].loadInfo.LoadRate < 100 && compactPeers(a, b)
+			}
 			originalFirst := ordered[0].account.ID
 			var normalOrder []openAIAccountCandidateScore
 			var probeBaseline int
 			adaptiveFirst, probeBaseline = rankAdaptivePoolWithProbe(ctx, ordered, func(item openAIAccountCandidateScore) *Account { return item.account },
 				adaptiveOpenAIModel(ctx, req.RequestedModel, req.RequireCompact), func(a, b *Account) bool {
-					return loads[a.ID].loadInfo.LoadRate < 100 && loads[b.ID].loadInfo.LoadRate < 100 && peers(a, b)
-				}, explore && len(req.ExcludedIDs) == 0, adaptiveProbeOptions[openAIAccountCandidateScore]{waitOrder: &normalOrder, canProbe: func(a *Account) bool {
+					return healthPeers(a, b) && rateOrder.compare(a, b) == 0
+				}, explore && len(req.ExcludedIDs) == 0, adaptiveProbeOptions[openAIAccountCandidateScore]{waitOrder: &normalOrder, healthPeers: healthPeers, canProbe: func(a *Account) bool {
 					item := loads[a.ID]
 					return !item.loadKnown || a.Concurrency <= 0 || item.loadInfo.CurrentConcurrency < a.Concurrency
 				}})
@@ -1177,6 +1201,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 				ordered = normalOrder
 				adaptiveFirst = ordered[0].account.ID != originalFirst
 			}
+			adaptiveFirst = adaptiveFirst || adaptiveTextStream(route)
 			if adaptiveFirst {
 				ranked = ordered[:groupTopK]
 			}
@@ -1296,6 +1321,7 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 	selectionOrder []openAIAccountCandidateScore,
 	budget *openAISelectionProbeBudget,
 ) (*AccountSelectionResult, bool, error) {
+	defer cancelUnacquiredAdaptiveProbe(ctx)
 	compactBlocked := false
 	release := func(result *AcquireResult) {
 		if result != nil && result.ReleaseFunc != nil {
@@ -1570,6 +1596,9 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
 	for i := range accounts {
 		account := &accounts[i]
+		if !adaptiveStickyTrialAllows(ctx, account) {
+			continue
+		}
 		if req.ExcludedIDs != nil {
 			if _, excluded := req.ExcludedIDs[account.ID]; excluded {
 				filterStats.exclude("excluded")
@@ -2489,6 +2518,23 @@ func (s *OpenAIGatewayService) selectLegacyAccountByPreviousResponse(
 	return selection, true, nil
 }
 
+func (s *OpenAIGatewayService) adaptivePreviousResponseRequiresOwner(ctx context.Context, groupID *int64, responseID string, canRebuild bool) bool {
+	route, enabled := gatewayAdaptiveRoute(ctx)
+	if !enabled || strings.TrimSpace(responseID) == "" {
+		return false
+	}
+	if route.transport != "ws" || !canRebuild {
+		return true
+	}
+	store := s.getOpenAIWSStateStore()
+	if store == nil {
+		return false
+	}
+	// Snapshot the binding before eligibility checks can reject or clear it.
+	owner, _ := store.GetResponseAccount(ctx, derefGroupID(groupID), responseID)
+	return owner > 0
+}
+
 func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	ctx context.Context,
 	groupID *int64,
@@ -2528,6 +2574,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	scheduler := s.getOpenAIAccountScheduler(ctx)
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
+		requireOwner := platform == PlatformOpenAI && s.adaptivePreviousResponseRequiresOwner(ctx, groupID, previousResponseID, previousResponseCanMove)
 		if selection, hit, err := s.selectLegacyAccountByPreviousResponse(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform); err != nil {
 			return nil, decision, err
 		} else if hit {
@@ -2536,6 +2583,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 			decision.SelectedAccountID = selection.Account.ID
 			decision.SelectedAccountType = selection.Account.Type
 			return selection, decision, nil
+		}
+		if requireOwner {
+			return nil, decision, ErrNoAvailableAccounts
 		}
 		if guardianParentAccountID > 0 {
 			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
@@ -2648,7 +2698,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	stickyWeighted := s.isOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx)
 	subscriptionPriority := s.isOpenAIAdvancedSchedulerSubscriptionPriorityEnabled(ctx)
 	stickyPreviousAccountID := int64(0)
-	if stickyWeighted && previousResponseCanMove && strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
+	if stickyWeighted && previousResponseCanMove && strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI && !adaptiveHardContinuity(ctx) {
 		stickyPreviousAccountID = s.ResolveAccountIDByPreviousResponseIDForScheduler(ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact)
 	}
 

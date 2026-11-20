@@ -23,7 +23,10 @@ import (
 
 type adaptiveTestSettings struct{ SettingRepository }
 
-func (adaptiveTestSettings) GetValue(context.Context, string) (string, error) {
+func (adaptiveTestSettings) GetValue(_ context.Context, key string) (string, error) {
+	if key == SettingKeyOpenAIFastPolicySettings {
+		return "{}", nil
+	}
 	return "true", nil
 }
 
@@ -170,7 +173,10 @@ func TestGatewayAdaptiveDecayAndRecentOverride(t *testing.T) {
 	telemetry.observe(weighted, now, time.Second, true)
 	telemetry.observe(weighted, now, time.Second, false)
 	// Three 18-hour-old successes weigh 1/8 each, yielding a mean of about 4.8s.
-	require.Equal(t, adaptiveScore{reliability: 2, latency: 22, known: true}, telemetry.score(weighted, now))
+	score := telemetry.score(weighted, now)
+	require.True(t, score.known)
+	require.Equal(t, 2, score.reliability)
+	require.Equal(t, 22, score.latency)
 
 	telemetry = &adaptiveTelemetry{}
 	for range 12 {
@@ -273,8 +279,9 @@ func TestGatewayAdaptiveProbeBudgetSurvivesCandidateAndBaselineChanges(t *testin
 	ctx := newContext(groupID)
 	route, _ := gatewayAdaptiveRoute(ctx)
 	for range adaptiveMinimum {
-		telemetry.observe(adaptiveKey(route, &firstBaseline, "model"), now, time.Second, true)
-		telemetry.observe(adaptiveKey(route, &secondBaseline, "model"), now, time.Second, true)
+		telemetry.observe(adaptiveContextKey(ctx, route, &firstBaseline, "model"), now, time.Second, true)
+		telemetry.observe(adaptiveContextKey(ctx, route, &secondBaseline, "model"), now, time.Second, true)
+		telemetry.observe(adaptiveContextKey(newContext(groupID+1), route, &secondBaseline, "model"), now, time.Second, true)
 	}
 	pool := []*Account{&firstBaseline, &firstUnknown}
 	require.True(t, rankAdaptivePool(ctx, pool, adaptiveAccount, model, adaptiveAnyPeer, true))

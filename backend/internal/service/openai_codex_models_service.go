@@ -1628,6 +1628,7 @@ type openAIModelsRequest struct {
 	accountID           int64
 	credentialAccountID int64
 	credentialAccount   *Account
+	selectedAccount     *Account
 	accountConcurrency  int
 	useAPIKeyUpstream   bool
 	// Cached bodies have already been converted to their requested format.
@@ -1813,6 +1814,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		accountID:           account.ID,
 		credentialAccountID: credAccount.ID,
 		credentialAccount:   credAccount,
+		selectedAccount:     account,
 		accountConcurrency:  account.Concurrency,
 		useAPIKeyUpstream:   useAPIKeyUpstream,
 	}
@@ -1905,8 +1907,7 @@ func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, requ
 				status = upstreamError.statusCode
 			}
 			// The wrapped closure only runs on an actual shared upstream refresh.
-			account := &Account{ID: request.accountID, Platform: PlatformOpenAI, Type: request.credentialAccount.Type}
-			observeAdaptiveCompletion(ctx, account, "", start, status, err == nil && response != nil && !response.NotModified)
+			observeAdaptiveCompletion(ctx, request.selectedAccount, "", start, status, err == nil && response != nil && !response.NotModified)
 			return response, err
 		}
 	}
