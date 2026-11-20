@@ -45,7 +45,7 @@ func TestGatewayAdaptiveHistoryRetriesAndRestoresWithoutCountingLiveOrHistorical
 	var live []AdaptiveHistoryRecord
 	var reads int
 	readCalls := make(chan int, 4)
-	writes := make(chan int, 1)
+	writes := make(chan int, 2)
 	store := adaptiveHistoryTestStore{
 		read: func(_ context.Context, _, _ time.Time) ([]AdaptiveHistoryRecord, error) {
 			reads++
@@ -78,7 +78,7 @@ func TestGatewayAdaptiveHistoryRetriesAndRestoresWithoutCountingLiveOrHistorical
 	telemetry.observe(key, now, time.Second, true)
 	ticks <- now
 	require.Eventually(t, func() bool { return len(writes) == 1 }, time.Second, time.Millisecond)
-	require.Equal(t, 1, <-writes)
+	require.Equal(t, 1, <-writes) // Samples continue while health restoration is unavailable.
 	ticks <- now
 	require.Eventually(t, func() bool {
 		telemetry.mu.Lock()
@@ -237,4 +237,118 @@ func TestGatewayAdaptiveHistoryStopClosesAdmissionAndDrainsAcceptedSamples(t *te
 	require.NoError(t, <-stopped)
 	require.Equal(t, adaptiveHistoryBatch+1, written)
 	require.Empty(t, telemetry.history.queue)
+}
+
+func TestGatewayAdaptiveHistoryKeepsDegradationThroughInitialReadFailure(t *testing.T) {
+	now := time.Now().Truncate(time.Microsecond)
+	key := adaptiveSampleKey{accountID: 34, groupID: 6, model: "wire", route: adaptiveRoute{operation: "POST /v1/messages", transport: "sse"}}
+	other := key
+	other.accountID++
+	persisted := adaptiveHealth{Last: now.Add(-time.Minute), Fault: adaptiveUpstreamDegraded, RetryAt: now.Add(4 * time.Minute), Backoff: 1}
+	original, ok := adaptiveHealthRecord(key, persisted)
+	require.True(t, ok)
+	wrapped := key
+	wrapped.accountID += 2
+	older, ok := adaptiveHealthRecord(wrapped, adaptiveHealth{Last: now.Add(-time.Minute)})
+	require.True(t, ok)
+	latest := map[string]AdaptiveHistoryRecord{original.StateKey: original, older.StateKey: older}
+	samples := []AdaptiveHistoryRecord{}
+	readAttempt := make(chan struct{}, 4)
+	writeAttempt := make(chan []AdaptiveHistoryRecord, 4)
+	allowRead := make(chan struct{})
+	store := adaptiveHistoryTestStore{
+		read: func(context.Context, time.Time, time.Time) ([]AdaptiveHistoryRecord, error) {
+			readAttempt <- struct{}{}
+			select {
+			case <-allowRead:
+				rows := append([]AdaptiveHistoryRecord(nil), samples...)
+				for _, state := range latest {
+					rows = append(rows, state)
+				}
+				return rows, nil
+			default:
+				return nil, errors.New("short outage")
+			}
+		},
+		merge: func(_ context.Context, _ time.Time, batch []AdaptiveHistoryRecord) error {
+			for _, row := range batch {
+				if row.StateKey == "" {
+					samples = append(samples, row)
+					continue
+				}
+				if row.At.After(latest[row.StateKey].At) {
+					latest[row.StateKey] = row
+				}
+			}
+			writeAttempt <- append([]AdaptiveHistoryRecord(nil), batch...)
+			return nil
+		},
+	}
+	telemetry := &adaptiveTelemetry{}
+	ctx := telemetry.attachAdaptiveHistory(store)
+	ticks := make(chan time.Time, 1)
+	go telemetry.history.run(ctx, telemetry, ticks)
+	settings := &SettingService{adaptiveTelemetry: telemetry}
+	stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+		defer cleanupCancel()
+		require.NoError(t, settings.StopGatewayAdaptiveHistory(cleanupCtx))
+	})
+	wait := func() {
+		t.Helper()
+		select {
+		case <-readAttempt:
+		case <-stop.Done():
+			t.Fatal("worker did not attempt Read")
+		}
+	}
+	written := func() []AdaptiveHistoryRecord {
+		t.Helper()
+		select {
+		case batch := <-writeAttempt:
+			return batch
+		case <-stop.Done():
+			t.Fatal("worker did not write")
+			return nil
+		}
+	}
+	wait()
+	telemetry.observe(key, now, 7*time.Second, true)
+	for i := range 3 {
+		telemetry.observe(other, now.Add(time.Duration(i)*time.Microsecond), 0, false)
+		telemetry.observe(wrapped, now.Add(time.Duration(i)*time.Microsecond), 0, false)
+	}
+	for i := range adaptiveSamples {
+		telemetry.observe(wrapped, now.Add(time.Duration(3+i)*time.Microsecond), 7*time.Second, true)
+	}
+	ticks <- now
+	batch := written()
+	require.Len(t, batch, 7+adaptiveSamples)
+	for _, row := range batch {
+		require.Empty(t, row.StateKey)
+	}
+	wait()
+	close(allowRead)
+	ticks <- now
+	wait()
+	ticks <- now
+	_ = written()
+	require.NoError(t, settings.StopGatewayAdaptiveHistory(stop))
+	state := latest[original.StateKey]
+	require.True(t, state.At.Equal(now))
+	var restored adaptiveStoredSample
+	require.NoError(t, json.Unmarshal([]byte(state.Payload), &restored))
+	require.Equal(t, adaptiveUpstreamDegraded, restored.Health.Fault)
+	require.True(t, persisted.RetryAt.Equal(restored.Health.RetryAt))
+	require.Zero(t, restored.Health.Passed)
+	require.Len(t, samples, 7+adaptiveSamples)
+	var wrappedState adaptiveStoredSample
+	require.NoError(t, json.Unmarshal([]byte(latest[older.StateKey].Payload), &wrappedState))
+	require.Equal(t, adaptiveUpstreamDegraded, wrappedState.Health.Fault)
+	otherRecord, ok := adaptiveHealthRecord(other, telemetry.series[other].health)
+	require.True(t, ok)
+	require.Contains(t, latest, otherRecord.StateKey)
+	require.Equal(t, adaptiveUpstreamDegraded, telemetry.series[other].health.Fault)
 }

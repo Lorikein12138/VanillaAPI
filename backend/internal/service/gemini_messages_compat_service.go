@@ -127,20 +127,30 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 
 	// 2. 尝试粘性会话命中
 	// Try sticky session hit
-	if account := s.tryStickySessionHit(ctx, groupID, sessionHash, cacheKey, requestedModel, excludedIDs, platform, useMixedScheduling); account != nil {
-		return account, nil
+	owner := s.tryStickySessionHit(ctx, groupID, sessionHash, cacheKey, requestedModel, excludedIDs, platform, useMixedScheduling)
+	if owner != nil {
+		if !adaptiveGatewayStickyEscape(ctx, owner, requestedModel) {
+			return owner, nil
+		}
+		ctx = withAdaptiveSoftSticky(ctx, owner)
 	}
 
 	// 3. 查询可调度账户（强制平台模式：优先按分组查找，找不到再查全部）
 	// Query schedulable accounts (force platform mode: try group first, fallback to all)
 	accounts, err := s.listSchedulableAccountsOnce(ctx, groupID, platform, hasForcePlatform)
 	if err != nil {
+		if owner != nil {
+			return owner, nil
+		}
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
 	// 强制平台模式下，分组中找不到账户时回退查询全部
 	if len(accounts) == 0 && groupID != nil && hasForcePlatform {
 		accounts, err = s.listSchedulableAccountsOnce(ctx, nil, platform, hasForcePlatform)
 		if err != nil {
+			if owner != nil {
+				return owner, nil
+			}
 			return nil, fmt.Errorf("query accounts failed: %w", err)
 		}
 	}
@@ -154,6 +164,18 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 			return nil, fmt.Errorf("no available Gemini accounts supporting model: %s", requestedModel)
 		}
 		return nil, errors.New("no available Gemini accounts")
+	}
+
+	if owner != nil {
+		if selected.ID == owner.ID {
+			return owner, nil
+		}
+		hydrated, err := s.hydrateSelectedAccount(ctx, selected)
+		if err != nil || hydrated == nil || adaptiveGatewayWinner(ctx, hydrated, nil, requestedModel, false).ID == owner.ID {
+			return owner, nil
+		}
+		_ = s.cache.SetSessionAccountID(ctx, derefGroupID(groupID), cacheKey, hydrated.ID, geminiStickySessionTTL)
+		return hydrated, nil
 	}
 
 	// 5. 设置粘性会话绑定

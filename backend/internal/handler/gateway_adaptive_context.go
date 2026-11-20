@@ -7,6 +7,7 @@ import (
 
 func attachGatewayAdaptiveInput(c *gin.Context, body []byte) {
 	ctx := service.SetGatewayAdaptiveInput(c.Request.Context(), body)
+	ctx = service.WithGatewayAdaptiveUpstreamSession(ctx, c.Request.Header)
 	if ctx != c.Request.Context() {
 		c.Request = c.Request.WithContext(ctx)
 	}

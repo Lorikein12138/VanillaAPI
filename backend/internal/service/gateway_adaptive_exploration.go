@@ -11,7 +11,7 @@ const (
 	adaptiveProbeInterval = time.Minute
 	adaptiveProbeCooldown = 30 * time.Minute
 	adaptiveProbePoolTTL  = 24 * time.Hour
-	adaptiveProbeRequests = 20
+	adaptiveProbeRequests = 100
 )
 
 type adaptiveProbeMember struct {

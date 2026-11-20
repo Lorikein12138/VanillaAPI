@@ -47,6 +47,7 @@ func (s *OpenAIGatewayService) FetchOpenAIModelsList(ctx context.Context, accoun
 		url: req.URL.String(), headers: req.Header,
 		proxyURL: upstreamModelsProxyURL(account), accountID: account.ID,
 		credentialAccountID: credentialAccount.ID, credentialAccount: credentialAccount,
+		selectedAccount:    account,
 		accountConcurrency: account.Concurrency, useAPIKeyUpstream: true,
 		standardModelsList: true,
 	}

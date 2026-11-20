@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -42,6 +43,8 @@ type adaptiveRoute struct {
 	thinkingLevel   string
 	thinkingEnabled bool
 	protected       bool
+	replayable      bool
+	nonText         bool
 }
 
 type adaptiveRouteKey struct{}
@@ -54,6 +57,8 @@ type adaptiveIngress struct {
 	operation string
 	transport string
 	explored  atomic.Bool
+	counted   atomic.Bool
+	recovery  atomic.Pointer[adaptiveRecoveryLease]
 	settings  *SettingService
 	telemetry *adaptiveTelemetry
 	fastOnce  sync.Once
@@ -76,6 +81,14 @@ func SetGatewayAdaptiveInput(ctx context.Context, body []byte) context.Context {
 		return ctx
 	}
 	return withGatewayAdaptiveRoute(ctx, ingress.operation, ingress.transport, body)
+}
+
+// WithGatewayAdaptiveUpstreamSession protects provider-native continuity.
+func WithGatewayAdaptiveUpstreamSession(ctx context.Context, headers http.Header) context.Context {
+	if strings.TrimSpace(headers.Get(grokConversationIDHeader)) != "" {
+		return protectAdaptiveSelection(ctx)
+	}
+	return ctx
 }
 
 // WithGatewayAdaptiveProbeGroup supplies the authenticated scheduling group.
@@ -105,13 +118,18 @@ func withGatewayAdaptiveRoute(ctx context.Context, operation, transport string, 
 			transport = "sse"
 		}
 	}
+	if transport == "ws" {
+		payload = openAIRequestPayloadView(body)
+	}
 	route := adaptiveRoute{
-		operation: operation,
-		transport: transport,
-		inputSize: bits.Len(uint(len(body)) >> 9),
-		effort:    adaptiveEffort(payload),
-		protected: adaptiveContinuity(payload) || requestHasGrokEncryptedReasoning(body),
-		tier:      adaptiveTier(payload.Get("service_tier").String()),
+		operation:  operation,
+		transport:  transport,
+		inputSize:  bits.Len(uint(len(body)) >> 9),
+		effort:     adaptiveEffort(payload),
+		protected:  adaptiveContinuity(payload) || requestHasGrokEncryptedReasoning(body),
+		tier:       adaptiveTier(payload.Get("service_tier").String()),
+		replayable: adaptiveReplayable(operation, transport, payload),
+		nonText:    payload.Get("tools.#(type==image_generation)").Exists() || payload.Get("modalities.#(==audio)").Exists(),
 	}
 	var durationOK bool
 	route.duration, durationOK = adaptiveDurationBucket(payload.Get("duration"))
@@ -362,24 +380,37 @@ type adaptiveSampleKey struct {
 	platform    string
 	accountType string
 	model       string
+	groupID     int64
+	config      string
 }
 
 func adaptiveKey(route adaptiveRoute, account *Account, model string) adaptiveSampleKey {
 	route.protected = false
 	route.messagesFast = false
-	return adaptiveSampleKey{route, account.ID, account.Platform, account.Type, model}
+	route.replayable = false
+	return adaptiveSampleKey{route: route, accountID: account.ID, platform: account.Platform, accountType: account.Type, model: model, config: adaptiveAccountConfig(account)}
+}
+
+func adaptiveContextKey(ctx context.Context, route adaptiveRoute, account *Account, model string) adaptiveSampleKey {
+	key := adaptiveKey(route, account, model)
+	key.groupID, _ = ctx.Value(adaptiveProbeGroupKey{}).(int64)
+	return key
 }
 
 type adaptiveSample struct {
 	at      time.Time
 	latency time.Duration
 	success bool
+	probe   bool
 	id      string
 }
 
 type adaptiveSeries struct {
-	samples [adaptiveSamples]adaptiveSample
-	next    int
+	samples     [adaptiveSamples]adaptiveSample
+	next        int
+	health      adaptiveHealth
+	successes   [10]adaptiveSample
+	nextSuccess int
 }
 
 type adaptiveTelemetry struct {
@@ -387,6 +418,7 @@ type adaptiveTelemetry struct {
 	series      map[adaptiveSampleKey]*adaptiveSeries
 	history     *adaptiveHistory
 	exploration adaptiveExploration
+	recovery    adaptiveRecovery
 }
 
 var gatewayAdaptiveTelemetry adaptiveTelemetry
@@ -399,30 +431,29 @@ func adaptiveTelemetryForContext(ctx context.Context) *adaptiveTelemetry {
 }
 
 func (t *adaptiveTelemetry) observe(key adaptiveSampleKey, now time.Time, latency time.Duration, success bool) {
+	t.observeAttempt(key, now, latency, success, false)
+}
+
+func (t *adaptiveTelemetry) observeAttempt(key adaptiveSampleKey, now time.Time, latency time.Duration, success, probe bool) {
 	if len(key.model) > 128 || (success && (latency <= 0 || latency > adaptiveMaxSuccessLatency)) {
 		return
 	}
-	sample := adaptiveSample{at: now, latency: latency, success: success}
+	sample := adaptiveSample{at: now, latency: latency, success: success, probe: probe}
 	if t.history != nil {
 		sample.id = t.history.nextID()
 	}
-	t.addSample(key, sample)
+	t.insertSample(key, sample, true, probe)
 	if t.history != nil {
 		t.history.enqueue(key, sample)
 	}
 }
 
 func (t *adaptiveTelemetry) addSample(key adaptiveSampleKey, sample adaptiveSample) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	t.insertSample(key, sample, false, false)
+}
+
+func (t *adaptiveTelemetry) seriesForObservation(key adaptiveSampleKey, at time.Time) *adaptiveSeries {
 	series := t.series[key]
-	if series != nil && sample.id != "" {
-		for _, existing := range series.samples {
-			if existing.id == sample.id {
-				return
-			}
-		}
-	}
 	if series == nil {
 		if t.series == nil {
 			t.series = make(map[adaptiveSampleKey]*adaptiveSeries)
@@ -431,46 +462,86 @@ func (t *adaptiveTelemetry) addSample(key adaptiveSampleKey, sample adaptiveSamp
 			var oldestKey adaptiveSampleKey
 			var oldest time.Time
 			for key, item := range t.series {
-				last := item.samples[(item.next+adaptiveSamples-1)%adaptiveSamples].at
+				last := item.health.Last
+				if last.IsZero() {
+					last = item.samples[(item.next+adaptiveSamples-1)%adaptiveSamples].at
+				}
 				if oldest.IsZero() || last.Before(oldest) {
 					oldestKey, oldest = key, last
 				}
 			}
-			if sample.at.Before(oldest) {
-				return
+			if at.Before(oldest) {
+				return nil
 			}
 			delete(t.series, oldestKey)
 		}
 		series = &adaptiveSeries{}
 		t.series[key] = series
 	}
-	// Startup recovery can overlap live observations. Keep the newest samples
-	// regardless of insertion order, including when the ring is full.
-	if old := series.samples[series.next].at; !old.IsZero() && sample.at.Before(old) {
-		return
+	return series
+}
+
+func (t *adaptiveTelemetry) insertSample(key adaptiveSampleKey, sample adaptiveSample, updateHealth, probe bool) adaptiveHealth {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	series := t.seriesForObservation(key, sample.at)
+	if series == nil {
+		return adaptiveHealth{}
 	}
-	position := series.next
-	for range adaptiveSamples - 1 {
-		previous := (position + adaptiveSamples - 1) % adaptiveSamples
-		if !sample.at.Before(series.samples[previous].at) {
+	if sample.id != "" {
+		for _, existing := range series.samples {
+			if existing.id == sample.id {
+				return adaptiveHealth{}
+			}
+		}
+	}
+	if !insertAdaptiveSample(series.samples[:], &series.next, sample) {
+		return adaptiveHealth{}
+	}
+	if sample.success {
+		insertAdaptiveSample(series.successes[:], &series.nextSuccess, sample)
+	}
+	if updateHealth {
+		series.updateHealth(key, sample, probe)
+		return series.health
+	}
+	return adaptiveHealth{}
+}
+
+// Startup restore and live observations can overlap. Keep both rings ordered
+// by observation time, including when older samples arrive after a full ring.
+func insertAdaptiveSample(samples []adaptiveSample, next *int, sample adaptiveSample) bool {
+	if old := samples[*next].at; !old.IsZero() && sample.at.Before(old) {
+		return false
+	}
+	position := *next
+	for range len(samples) - 1 {
+		previous := (position + len(samples) - 1) % len(samples)
+		if !sample.at.Before(samples[previous].at) {
 			break
 		}
-		series.samples[position] = series.samples[previous]
+		samples[position] = samples[previous]
 		position = previous
 	}
-	series.samples[position] = sample
-	series.next = (series.next + 1) % adaptiveSamples
+	samples[position] = sample
+	*next = (*next + 1) % len(samples)
+	return true
 }
 
 type adaptiveScore struct {
 	reliability int
 	latency     int
 	known       bool
+	health      adaptiveHealth
+	median      time.Duration
+	comparable  int
+	probe       bool
+	regressed   bool
 }
 
 type adaptiveWeightedSamples struct {
-	count                            int
-	weight, success, weightedLatency float64
+	count                                            int
+	weight, success, weightedLatency, weightedPoints float64
 }
 
 func (s *adaptiveWeightedSamples) add(sample adaptiveSample, weight float64) {
@@ -479,6 +550,7 @@ func (s *adaptiveWeightedSamples) add(sample adaptiveSample, weight float64) {
 	if sample.success {
 		s.success += weight
 		s.weightedLatency += weight * float64(sample.latency)
+		s.weightedPoints += weight * float64(adaptiveTTFTPoints(sample.latency))
 	}
 }
 
@@ -516,11 +588,26 @@ func (t *adaptiveTelemetry) score(key adaptiveSampleKey, now time.Time) adaptive
 			recent.add(sample, weight)
 		}
 	}
-	// Pick one score per account before sorting so comparisons stay transitive.
-	if score := recent.score(); score.known {
-		return score
+	score := history.score()
+	if adaptiveTextStream(key.route) {
+		score.known = history.count >= adaptiveMinimum
+		score.latency = math.MaxInt
+		if history.success > 0 {
+			score.latency = 100 - int(math.Round(history.weightedPoints/history.success))
+			score.reliability = int(math.Round(history.success / history.weight * 10000))
+		}
+		_, score.probe, score.regressed, score.median, score.comparable = series.latencyHealth(now)
+	} else if current := recent.score(); current.known {
+		score = current
 	}
-	return history.score()
+	if now.Sub(series.health.Last) < adaptiveHealthRetention {
+		score.health = series.health
+		if now.Sub(series.health.Last) >= adaptiveWindow {
+			score.health.Fault = adaptiveHealthy
+			score.health.Verify = true
+		}
+	}
+	return score
 }
 
 type adaptivePeerMatch func(*Account, *Account) bool
@@ -529,7 +616,10 @@ type adaptiveProbeOptions[T any] struct {
 	scope       adaptiveProbeScope
 	opportunity func() bool
 	canProbe    func(*Account) bool
+	healthPeers adaptivePeerMatch
 	waitOrder   *[]T
+	reserve     func(adaptiveSampleKey) bool
+	immediate   bool
 }
 
 // rankAdaptivePool expects a baseline order and an equivalence relation for
@@ -541,23 +631,38 @@ func rankAdaptivePool[T any](ctx context.Context, pool []T, account func(T) *Acc
 
 // probeBaseline is the index of the pre-probe winner in the returned pool.
 // A zero index means that no cold-start probe was scheduled.
+func rankAdaptiveImmediate[T any](ctx context.Context, pool []T, account func(T) *Account, model func(*Account) string, peers adaptivePeerMatch, explore bool) bool {
+	changed, _ := rankAdaptivePoolWithProbe(ctx, pool, account, model, peers, explore, adaptiveProbeOptions[T]{immediate: true})
+	return changed
+}
+
 func rankAdaptivePoolWithProbe[T any](ctx context.Context, pool []T, account func(T) *Account, model func(*Account) string, peers adaptivePeerMatch, explore bool, probe adaptiveProbeOptions[T]) (changed bool, probeBaseline int) {
 	route, ok := gatewayAdaptiveRoute(ctx)
-	if !ok || route.protected || len(pool) < 2 || ctx.Err() != nil {
+	if !ok || route.protected || len(pool) == 0 || ctx.Err() != nil {
 		return false, 0
 	}
 	if eligible, _ := ctx.Value(adaptiveEligibilityKey{}).(func(*Account) bool); eligible != nil {
 		previousPeers := peers
 		peers = func(a, b *Account) bool { return eligible(a) && eligible(b) && previousPeers(a, b) }
+		if healthPeers := probe.healthPeers; healthPeers != nil {
+			probe.healthPeers = func(a, b *Account) bool { return eligible(a) && eligible(b) && healthPeers(a, b) }
+		}
 	}
+	probe.scope.groupID, _ = ctx.Value(adaptiveProbeGroupKey{}).(int64)
+	probe.scope.model, _ = ctx.Value(adaptiveProbeModelKey{}).(string)
+	telemetry := adaptiveTelemetryForContext(ctx)
 	if explore && ctx.Value(adaptiveNoExploreKey{}) == nil {
 		if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); ingress != nil {
 			probe.opportunity = func() bool { return ingress.explored.CompareAndSwap(false, true) }
-			probe.scope.groupID, _ = ctx.Value(adaptiveProbeGroupKey{}).(int64)
-			probe.scope.model, _ = ctx.Value(adaptiveProbeModelKey{}).(string)
+			if probe.waitOrder != nil || probe.immediate {
+				scope := probe.scope
+				scope.route = route
+				scope.route.replayable = false
+				probe.reserve = telemetry.recovery.opportunity(ctx, ingress, scope, time.Now())
+			}
 		}
 	}
-	return rankAdaptiveWithTelemetry(adaptiveTelemetryForContext(ctx), route, pool, account, model, peers, probe, time.Now(), func(candidate *Account, upstreamModel string) string {
+	return rankAdaptiveWithTelemetry(telemetry, route, pool, account, model, peers, probe, time.Now(), func(candidate *Account, upstreamModel string) string {
 		return adaptiveCandidateTier(ctx, route, candidate, upstreamModel)
 	})
 }
@@ -579,13 +684,20 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 			candidateRoute.tier = candidateTier(candidate, upstreamModel)
 		}
 		if candidateRoute.tier != "unknown" {
-			keys[candidate.ID] = adaptiveKey(candidateRoute, candidate, upstreamModel)
+			key := adaptiveKey(candidateRoute, candidate, upstreamModel)
+			key.groupID = probe.scope.groupID
+			keys[candidate.ID] = key
 		}
 	}
-	sameTierPeers := func(a, b *Account) bool {
+	sameTier := func(a, b *Account) bool {
 		aKey, aOK := keys[a.ID]
 		bKey, bOK := keys[b.ID]
-		return aOK && bOK && aKey.route.tier == bKey.route.tier && peers(a, b)
+		return aOK && bOK && aKey.route.tier == bKey.route.tier
+	}
+	sameTierPeers := func(a, b *Account) bool { return sameTier(a, b) && peers(a, b) }
+	// A health-only peer can cross a ranking preference using the same actual model.
+	healthOnlyPeers := func(a, b *Account) bool {
+		return probe.healthPeers != nil && sameTier(a, b) && keys[a.ID].model != "" && keys[a.ID].model == keys[b.ID].model && probe.healthPeers(a, b)
 	}
 	scores := make(map[int64]adaptiveScore, len(pool))
 	telemetry.mu.Lock()
@@ -595,6 +707,10 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 	telemetry.mu.Unlock()
 
 	firstID := account(pool[0]).ID
+	text := adaptiveTextStream(route)
+	if text {
+		rankAdaptivePriority(pool, account, sameTierPeers)
+	}
 	seen := make([]bool, len(pool))
 	for i, item := range pool {
 		if seen[i] || !scores[account(item).ID].known {
@@ -603,7 +719,8 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 		positions := []int{i}
 		group := []T{item}
 		for j := i + 1; j < len(pool); j++ {
-			if !seen[j] && scores[account(pool[j]).ID].known && sameTierPeers(account(item), account(pool[j])) {
+			if !seen[j] && scores[account(pool[j]).ID].known && sameTierPeers(account(item), account(pool[j])) &&
+				(!text || (account(item).Priority == account(pool[j]).Priority && account(item).BillingRateMultiplier() == account(pool[j]).BillingRateMultiplier())) {
 				seen[j] = true
 				positions = append(positions, j)
 				group = append(group, pool[j])
@@ -620,17 +737,60 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 			pool[position] = group[j]
 		}
 	}
+	for i := 0; i < len(pool); i++ {
+		for j := i + 1; j < len(pool); j++ {
+			current, candidate := account(pool[i]), account(pool[j])
+			regularPeers := sameTierPeers(current, candidate)
+			if !regularPeers && !healthOnlyPeers(current, candidate) {
+				continue
+			}
+			a, b := scores[current.ID], scores[candidate.ID]
+			sameModel := keys[current.ID].model == keys[candidate.ID].model
+			if (adaptiveHealthPrefers(current, candidate, a, b, sameModel) &&
+				(regularPeers || a.health.Fault == adaptiveUpstreamDegraded || adaptiveProvenFaster(a, b, sameModel))) ||
+				(regularPeers && text && adaptiveSamePriorityPrefers(current, candidate, a, b, sameModel)) {
+				pool[i], pool[j] = pool[j], pool[i]
+			}
+		}
+	}
 	baseline := account(pool[0])
+	if probe.reserve != nil {
+		for i := 1; i < len(pool); i++ {
+			candidate := account(pool[i])
+			regularPeers := sameTierPeers(baseline, candidate)
+			if (!regularPeers && !healthOnlyPeers(baseline, candidate)) || (probe.canProbe != nil && !probe.canProbe(candidate)) {
+				continue
+			}
+			candidateScore := scores[candidate.ID]
+			comparison := adaptiveComparisonProbe(scores[baseline.ID], candidateScore, keys[baseline.ID].model == keys[candidate.ID].model)
+			retest := candidateScore.canRetest(now) && (regularPeers || candidateScore.health.Fault != adaptiveHealthy || candidateScore.health.Verify)
+			if (!retest && !comparison) || !probe.reserve(keys[candidate.ID]) {
+				continue
+			}
+			if probe.waitOrder != nil {
+				*probe.waitOrder = slices.Clone(pool)
+			}
+			// Moving a probe preserves the order of every regular candidate.
+			item := pool[i]
+			copy(pool[1:i+1], pool[:i])
+			pool[0] = item
+			return true, 1
+		}
+		if scores[baseline.ID].canRetest(now) && (probe.canProbe == nil || probe.canProbe(baseline)) {
+			probe.reserve(keys[baseline.ID])
+		}
+	}
 	if probe.opportunity != nil && scores[baseline.ID].known && (probe.canProbe == nil || probe.canProbe(baseline)) {
 		var members []adaptiveProbeMember
 		for i := 1; i < len(pool); i++ {
 			candidate := account(pool[i])
-			if !scores[candidate.ID].known && candidate.Priority == baseline.Priority && sameTierPeers(baseline, candidate) &&
+			if !scores[candidate.ID].known && scores[candidate.ID].health.Last.IsZero() && candidate.Priority == baseline.Priority && sameTierPeers(baseline, candidate) &&
 				(probe.canProbe == nil || probe.canProbe(candidate)) {
 				members = append(members, adaptiveProbeMember{id: candidate.ID, position: i})
 			}
 		}
 		probe.scope.route = route
+		probe.scope.route.replayable = false
 		if pick := telemetry.exploration.pick(probe.scope, members, now, probe.opportunity); pick > 0 {
 			if probe.waitOrder != nil {
 				*probe.waitOrder = slices.Clone(pool)
@@ -654,6 +814,30 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 		return true, 0
 	}
 	return false, 0
+}
+
+func rankAdaptivePriority[T any](pool []T, account func(T) *Account, peers adaptivePeerMatch) {
+	seen := make([]bool, len(pool))
+	for i, item := range pool {
+		if seen[i] {
+			continue
+		}
+		positions := []int{i}
+		group := []T{item}
+		for j := i + 1; j < len(pool); j++ {
+			if !seen[j] && peers(account(item), account(pool[j])) {
+				seen[j] = true
+				positions = append(positions, j)
+				group = append(group, pool[j])
+			}
+		}
+		sort.SliceStable(group, func(i, j int) bool {
+			return account(group[i]).Priority < account(group[j]).Priority
+		})
+		for j, position := range positions {
+			pool[position] = group[j]
+		}
+	}
 }
 
 func adaptiveAccount(account *Account) *Account { return account }
@@ -697,8 +881,36 @@ func adaptiveAnyPeer(*Account, *Account) bool { return true }
 
 func adaptiveLoadedAccount(item accountWithLoad) *Account { return item.account }
 
+type adaptiveLegacyProbeKey struct{}
+
 func adaptiveGatewayWinner(ctx context.Context, baseline *Account, pool []*Account, model string, explore bool) *Account {
-	if baseline == nil || len(pool) < 2 {
+	mapped := adaptiveMappedModel(ctx, model)
+	if owner, _ := ctx.Value(adaptiveSoftStickyKey{}).(*Account); owner != nil {
+		trial := adaptiveStickyTrialContext(ctx, owner, mapped, adaptiveAnyPeer)
+		if trial != nil {
+			if adaptiveStickyTrialAllows(trial, baseline) {
+				return baseline
+			}
+			for _, candidate := range pool {
+				if adaptiveStickyTrialAllows(trial, candidate) {
+					return candidate
+				}
+			}
+		}
+		return owner
+	}
+	if ctx.Value(adaptiveStickyTrialKey{}) != nil {
+		if adaptiveStickyTrialAllows(ctx, baseline) {
+			return baseline
+		}
+		for _, candidate := range pool {
+			if adaptiveStickyTrialAllows(ctx, candidate) {
+				return candidate
+			}
+		}
+		return nil
+	}
+	if baseline == nil || len(pool) == 0 {
 		return baseline
 	}
 	for i, candidate := range pool {
@@ -708,7 +920,16 @@ func adaptiveGatewayWinner(ctx context.Context, baseline *Account, pool []*Accou
 			break
 		}
 	}
-	if rankAdaptivePool(ctx, pool, adaptiveAccount, adaptiveMappedModel(ctx, model), adaptiveAnyPeer, explore) {
+	if probe, _ := ctx.Value(adaptiveLegacyProbeKey{}).(**Account); probe != nil {
+		changed, normal := rankAdaptivePoolWithProbe(ctx, pool, adaptiveAccount, adaptiveMappedModel(ctx, model), adaptiveAnyPeer, true, adaptiveProbeOptions[*Account]{immediate: true})
+		if normal > 0 {
+			*probe = pool[0]
+			return pool[normal]
+		}
+		if changed {
+			return pool[0]
+		}
+	} else if rankAdaptivePool(ctx, pool, adaptiveAccount, adaptiveMappedModel(ctx, model), adaptiveAnyPeer, explore) {
 		return pool[0]
 	}
 	return baseline
@@ -760,18 +981,24 @@ func adaptiveOpenAIModel(ctx context.Context, model string, compact bool) func(*
 }
 
 func adaptiveOpenAIPeers(compact bool, rateOrder openAILegacyUpstreamRateOrder) adaptivePeerMatch {
+	structuralPeers := adaptiveOpenAIHealthPeers(compact)
+	return func(a, b *Account) bool { return structuralPeers(a, b) && rateOrder.compare(a, b) == 0 }
+}
+
+func adaptiveOpenAIHealthPeers(compact bool) adaptivePeerMatch {
 	return func(a, b *Account) bool {
-		return (!compact || openAICompactSupportTier(a) == openAICompactSupportTier(b)) && rateOrder.compare(a, b) == 0
+		return !compact || openAICompactSupportTier(a) == openAICompactSupportTier(b)
 	}
 }
 
 type adaptiveObservationKey struct{}
 
 type adaptiveObservation struct {
-	mu     sync.Mutex
-	first  time.Time
-	calls  int
-	status int
+	mu              sync.Mutex
+	first           time.Time
+	calls           int
+	status          int
+	failureRecorded bool
 }
 
 func beginAdaptiveObservation(ctx context.Context) (context.Context, *adaptiveObservation) {
@@ -811,7 +1038,13 @@ func adaptiveHTTPObservation(ctx context.Context) *adaptiveObservation {
 }
 
 func observeAdaptiveGatewayResult(ctx context.Context, observation *adaptiveObservation, account *Account, result *ForwardResult, err error) {
-	if result == nil || result.ClientDisconnect || result.UpstreamResponseModelConflict {
+	if result != nil && (result.ClientDisconnect || result.UpstreamResponseModelConflict) {
+		return
+	}
+	if err != nil && observation != nil {
+		observeAdaptiveForwardFailure(ctx, observation, account, err, adaptiveMappedModel(ctx, adaptiveIngressModel(ctx)))
+	}
+	if result == nil {
 		return
 	}
 	observeAdaptiveResult(ctx, observation, account, result.Model, result.UpstreamModel, result.Stream, result.Duration, result.FirstTokenMs, result.ServiceTier, result.UpstreamResponseServiceTier, err)
@@ -820,7 +1053,45 @@ func observeAdaptiveGatewayResult(ctx context.Context, observation *adaptiveObse
 // ObserveAdaptiveOpenAIResult is also used by the Responses WebSocket
 // dispatcher at its upstream terminal callback.
 func ObserveAdaptiveOpenAIResult(ctx context.Context, account *Account, result *OpenAIForwardResult, err error) {
-	observeAdaptiveOpenAIResult(ctx, nil, account, result, err)
+	if err != nil {
+		observeAdaptiveForwardFailure(ctx, nil, account, err, adaptiveOpenAIModel(ctx, adaptiveIngressModel(ctx), false))
+		return
+	}
+	observeAdaptiveOpenAIResult(ctx, nil, account, result, nil)
+}
+
+func adaptiveIngressModel(ctx context.Context) string {
+	model, _ := ctx.Value(adaptiveProbeModelKey{}).(string)
+	return model
+}
+
+func observeAdaptiveForwardFailure(ctx context.Context, observation *adaptiveObservation, account *Account, err error, model func(*Account) string) {
+	route, enabled := gatewayAdaptiveRoute(ctx)
+	if !enabled || route.protected || account == nil || ctx.Err() != nil {
+		return
+	}
+	var upstream *UpstreamFailoverError
+	if !errors.As(err, &upstream) || !adaptiveFailureStatus(upstream.StatusCode) || upstream.IsCredentialFailure() {
+		return
+	}
+	upstreamModel := model(account)
+	if upstreamModel == "" {
+		return
+	}
+	if observation != nil {
+		observation.mu.Lock()
+		defer observation.mu.Unlock()
+		if observation.calls != 1 || observation.failureRecorded || observation.status >= 400 {
+			return
+		}
+		observation.failureRecorded = true
+	} else if route.transport != "ws" {
+		return
+	}
+	route.tier = adaptiveCandidateTier(ctx, route, account, upstreamModel)
+	if route.tier != "unknown" {
+		observeAdaptiveAttempt(ctx, route, account, upstreamModel, time.Now(), 0, false)
+	}
 }
 
 func observeAdaptiveOpenAIResult(ctx context.Context, observation *adaptiveObservation, account *Account, result *OpenAIForwardResult, err error) {
@@ -828,7 +1099,13 @@ func observeAdaptiveOpenAIResult(ctx context.Context, observation *adaptiveObser
 }
 
 func observeAdaptiveOpenAIResultWithObserver(ctx context.Context, observation *adaptiveObservation, account *Account, result *OpenAIForwardResult, err error, observer *upstreamResponseModelObserver) {
-	if result == nil || result.ClientDisconnect || result.UpstreamResponseModelConflict {
+	if result != nil && (result.ClientDisconnect || result.UpstreamResponseModelConflict) {
+		return
+	}
+	if err != nil && observation != nil {
+		observeAdaptiveForwardFailure(ctx, observation, account, err, adaptiveOpenAIModel(ctx, adaptiveIngressModel(ctx), false))
+	}
+	if result == nil {
 		return
 	}
 	route, enabled := gatewayAdaptiveRoute(ctx)
@@ -889,7 +1166,7 @@ func observeAdaptiveResult(ctx context.Context, observation *adaptiveObservation
 	} else {
 		elapsed = now.Sub(observation.first)
 	}
-	adaptiveTelemetryForContext(ctx).observe(adaptiveKey(route, account, upstreamModel), now, elapsed, true)
+	observeAdaptiveAttempt(ctx, route, account, upstreamModel, now, elapsed, true)
 }
 
 func observeAdaptiveCompletion(ctx context.Context, account *Account, model string, start time.Time, status int, success bool) {
@@ -898,7 +1175,7 @@ func observeAdaptiveCompletion(ctx context.Context, account *Account, model stri
 		return
 	}
 	if success || adaptiveFailureStatus(status) {
-		adaptiveTelemetryForContext(ctx).observe(adaptiveKey(route, account, model), time.Now(), time.Since(start), success)
+		observeAdaptiveAttempt(ctx, route, account, model, time.Now(), time.Since(start), success)
 	}
 }
 
@@ -920,15 +1197,16 @@ func observeAdaptiveHTTPFailure(ctx context.Context, observation *adaptiveObserv
 	}
 	observation.mu.Lock()
 	defer observation.mu.Unlock()
-	if observation.calls == 1 && observation.status == status && ctx.Err() == nil {
-		adaptiveTelemetryForContext(ctx).observe(adaptiveKey(route, account, model), time.Now(), time.Since(observation.first), false)
+	if observation.calls == 1 && observation.status == status && !observation.failureRecorded && ctx.Err() == nil {
+		observation.failureRecorded = true
+		observeAdaptiveAttempt(ctx, route, account, model, time.Now(), time.Since(observation.first), false)
 	}
 }
 
 func adaptiveFailureStatus(status int) bool {
 	// A rejected prompt, invalid payload, or shared rate limit is insufficient
 	// evidence of an unhealthy account.
-	return status == 502 || status == 503 || status == 504
+	return status >= 500 && status <= 599
 }
 
 // WithAdaptiveImageInput uses fields the existing image parser validated,
