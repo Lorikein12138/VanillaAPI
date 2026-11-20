@@ -900,13 +900,13 @@ func resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel string) strin
 }
 
 func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, error) {
-	account, _, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
+	account, _, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate, nil)
 	return account, err
 }
 
 // selectAccountForModelWithExclusionsStickyHit 与 selectAccountForModelWithExclusions 相同，
 // 另返回账号是否来自粘性会话命中。
-func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool, error) {
+func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool, probe **Account) (*Account, bool, error) {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -933,7 +933,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 	if stickyAccountID > 0 {
 		ctx = protectAdaptiveSelection(ctx)
 	}
-	selected, compactBlocked, filterStats := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate)
+	selected, compactBlocked, filterStats := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate, probe)
 
 	if selected == nil {
 		return nil, false, noAvailableOpenAISelectionError(requestedModel, compactBlocked, filterStats.summary(""))
@@ -942,6 +942,13 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 	hydrated, err := s.hydrateSelectedAccount(ctx, selected)
 	if err != nil {
 		return nil, false, err
+	}
+	if probe != nil && *probe != nil {
+		if probeAccount, probeErr := s.hydrateSelectedAccount(ctx, *probe); probeErr == nil && probeAccount != nil {
+			*probe = probeAccount
+			return hydrated, false, nil // The caller binds the account selected after the immediate probe.
+		}
+		*probe = nil
 	}
 
 	// 4. 设置粘性会话绑定（利润门下推迟到 handler 终检通过后再绑定，
@@ -1030,7 +1037,7 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 // (only meaningful when the legacy /responses/compact requireCompact flag is
 // true); the third contains deterministic
 // exclusion diagnostics for the evaluated snapshot.
-func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool, openAISelectionFilterStats) {
+func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool, probe **Account) (*Account, bool, openAISelectionFilterStats) {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	compactBlocked := false
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
@@ -1097,7 +1104,11 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		}
 		return s.isBetterAccount(a, b)
 	})
-	rankAdaptivePool(ctx, eligible, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), len(excludedIDs) == 0)
+	_, probeBaseline := rankAdaptivePoolWithProbe(ctx, eligible, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), len(excludedIDs) == 0, adaptiveProbeOptions[*Account]{})
+	if probe != nil && probeBaseline > 0 {
+		*probe = eligible[0]
+		return eligible[probeBaseline], compactBlocked, filterStats
+	}
 	return eligible[0], compactBlocked, filterStats
 }
 
@@ -1164,9 +1175,22 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 	ctx = withOpenAIImageSizeStickyAccount(ctx, stickyAccountID)
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
-		account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate)
+		var probe *Account
+		account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate, &probe)
 		if err != nil {
 			return nil, err
+		}
+		if probe != nil {
+			probeSlot, probeErr := s.tryAcquireAccountSlot(ctx, probe.ID, probe.Concurrency)
+			if probeErr == nil && probeSlot != nil && probeSlot.Acquired {
+				if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
+					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, probe.ID, openaiStickySessionTTL)
+				}
+				return s.newAcquiredSelectionResult(ctx, probe, probeSlot.ReleaseFunc)
+			}
+			if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
+				_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, account.ID, openaiStickySessionTTL)
+			}
 		}
 		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 		if err == nil && result != nil && result.Acquired {
@@ -1331,7 +1355,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		})
 	}
 
-	tryAcquireFromLoadMap := func(loadMap map[int64]*AccountLoadInfo) (*AccountSelectionResult, bool, error) {
+	tryAcquireFromLoadMap := func(loadMap map[int64]*AccountLoadInfo, explore bool) (*AccountSelectionResult, bool, error) {
 		var available []accountWithLoad
 		for _, acc := range candidates {
 			loadInfo := loadMap[acc.ID]
@@ -1395,7 +1419,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			selectionOrder = append(selectionOrder, available...)
 		}
 
-		rankAdaptivePool(ctx, selectionOrder, adaptiveLoadedAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), stickyAccountID == 0 && len(excludedIDs) == 0)
+		rankAdaptivePool(ctx, selectionOrder, adaptiveLoadedAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), explore && stickyAccountID == 0 && len(excludedIDs) == 0)
 		for _, item := range selectionOrder {
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
@@ -1461,13 +1485,13 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			}
 		}
 	} else {
-		if selection, attempted, selectErr := tryAcquireFromLoadMap(loadMap); selectErr != nil {
+		if selection, attempted, selectErr := tryAcquireFromLoadMap(loadMap, true); selectErr != nil {
 			return nil, selectErr
 		} else if selection != nil {
 			return selection, nil
 		} else if attempted {
 			if freshLoadMap, loadErr := s.concurrencyService.GetAccountsLoadBatchFresh(ctx, accountLoads); loadErr == nil {
-				if selection, _, selectErr := tryAcquireFromLoadMap(freshLoadMap); selectErr != nil {
+				if selection, _, selectErr := tryAcquireFromLoadMap(freshLoadMap, false); selectErr != nil {
 					return nil, selectErr
 				} else if selection != nil {
 					return selection, nil

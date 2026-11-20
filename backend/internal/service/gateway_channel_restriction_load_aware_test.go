@@ -5,10 +5,61 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/stretchr/testify/require"
 )
+
+type adaptiveRoutedConcurrencyCache struct {
+	*mockConcurrencyCache
+	attempted []int64
+}
+
+func (c *adaptiveRoutedConcurrencyCache) AcquireAccountSlot(_ context.Context, accountID int64, _ int, _ string) (bool, error) {
+	c.attempted = append(c.attempted, accountID)
+	return false, nil
+}
+
+func TestGatewayAdaptiveRoutedProbeKeepsNormalWaitOrder(t *testing.T) {
+	const model = "claude-fable-5-1"
+	f := newLoadAwareRestrictionFixture(t, false, nil, map[string][]int64{model: {1, 2, 3}})
+	repo := f.svc.accountRepo.(*mockAccountRepoForPlatform)
+	third := repo.accounts[0]
+	third.ID = 3
+	repo.accounts = append(repo.accounts, third)
+	for i := range repo.accounts {
+		account := &repo.accounts[i]
+		account.Priority = 1
+		account.Type = AccountTypeAPIKey
+		repo.accountsByID[account.ID] = account
+	}
+	concurrency := &adaptiveRoutedConcurrencyCache{mockConcurrencyCache: f.concurrencyCache}
+	concurrency.loadMap = map[int64]*AccountLoadInfo{
+		1: {AccountID: 1, LoadRate: 0},
+		2: {AccountID: 2, LoadRate: 1},
+		3: {AccountID: 3, LoadRate: 2},
+	}
+	f.svc.concurrencyService = NewConcurrencyService(concurrency)
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	ctx := WithGatewayAdaptiveIngress(f.ctx, settings, "test_routed_probe", "http")
+	ctx = WithGatewayAdaptiveProbeGroup(ctx, &f.groupID)
+	route, _ := gatewayAdaptiveRoute(ctx)
+	mappedModel := adaptiveMappedModel(ctx, model)
+	for i := range 2 {
+		account := &repo.accounts[i]
+		key := adaptiveKey(route, account, mappedModel(account))
+		for range adaptiveMinimum {
+			telemetry.observe(key, time.Now(), time.Second/time.Duration(i+1), true)
+		}
+	}
+	result, err := f.svc.SelectAccountWithLoadAwareness(ctx, &f.groupID, "", model, nil, "", 0)
+	require.NoError(t, err)
+	require.NotNil(t, result.WaitPlan)
+	require.Equal(t, []int64{3, 2, 1}, concurrency.attempted)
+	require.EqualValues(t, 2, result.WaitPlan.AccountID)
+}
 
 // loadAwareRestrictionFixture 构造走负载感知路径（load_batch 开启 + 并发服务存在）的
 // GatewayService：分组 10 绑定 upstream 计费基准的渠道，定价列表只允许 claude-sonnet-4-6。

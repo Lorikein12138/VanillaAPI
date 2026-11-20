@@ -138,6 +138,7 @@ type SettingService struct {
 
 	gatewayAdaptiveSchedulingCache atomic.Pointer[cachedGatewayAdaptiveScheduling]
 	gatewayAdaptiveSchedulingSF    singleflight.Group
+	adaptiveTelemetry              *adaptiveTelemetry
 
 	cyberSessionBlockRuntimeMu    sync.Mutex
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime

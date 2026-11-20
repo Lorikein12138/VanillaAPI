@@ -729,14 +729,15 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int6
 }
 
 type openAIAccountCandidateScore struct {
-	account   *Account
-	loadInfo  *AccountLoadInfo
-	loadKnown bool
-	score     float64
-	priority  int
-	errorRate float64
-	ttft      float64
-	hasTTFT   bool
+	account           *Account
+	loadInfo          *AccountLoadInfo
+	loadKnown         bool
+	score             float64
+	priority          int
+	errorRate         float64
+	ttft              float64
+	hasTTFT           bool
+	adaptiveProbeOnly bool
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore
@@ -1131,7 +1132,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
-	buildSelectionOrder := func(pool []openAIAccountCandidateScore, topK int, includeOverflowFallback bool) []openAIAccountCandidateScore {
+	buildSelectionOrder := func(pool []openAIAccountCandidateScore, topK int, includeOverflowFallback, explore bool) []openAIAccountCandidateScore {
 		if len(pool) == 0 || topK <= 0 {
 			return nil
 		}
@@ -1141,6 +1142,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		}
 		var ranked []openAIAccountCandidateScore
 		var adaptiveFirst bool
+		var immediateProbe []openAIAccountCandidateScore
 		if _, enabled := gatewayAdaptiveRoute(ctx); enabled && req.StickyAccountID == 0 && req.StickyPreviousAccountID == 0 && req.GuardianParentAccountID == 0 && !req.PreserveStickyBinding && req.PreviousResponseID == "" {
 			ordered := append([]openAIAccountCandidateScore(nil), pool...)
 			sort.SliceStable(ordered, func(i, j int) bool { return isOpenAIAccountCandidateBetter(ordered[i], ordered[j]) })
@@ -1153,15 +1155,28 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 				}
 				rateOrder = newOpenAILegacyUpstreamRateOrder(accounts, time.Now(), s.service.openAIOAuthSchedulingRateMultiplier(ctx))
 			}
-			loads := make(map[int64]int, len(ordered))
+			loads := make(map[int64]openAIAccountCandidateScore, len(ordered))
 			for _, item := range ordered {
-				loads[item.account.ID] = item.loadInfo.LoadRate
+				loads[item.account.ID] = item
 			}
 			peers := adaptiveOpenAIPeers(req.RequireCompact, rateOrder)
-			adaptiveFirst = rankAdaptivePool(ctx, ordered, func(item openAIAccountCandidateScore) *Account { return item.account },
+			originalFirst := ordered[0].account.ID
+			var normalOrder []openAIAccountCandidateScore
+			var probeBaseline int
+			adaptiveFirst, probeBaseline = rankAdaptivePoolWithProbe(ctx, ordered, func(item openAIAccountCandidateScore) *Account { return item.account },
 				adaptiveOpenAIModel(ctx, req.RequestedModel, req.RequireCompact), func(a, b *Account) bool {
-					return loads[a.ID] < 100 && loads[b.ID] < 100 && peers(a, b)
-				}, len(req.ExcludedIDs) == 0)
+					return loads[a.ID].loadInfo.LoadRate < 100 && loads[b.ID].loadInfo.LoadRate < 100 && peers(a, b)
+				}, explore && len(req.ExcludedIDs) == 0, adaptiveProbeOptions[openAIAccountCandidateScore]{waitOrder: &normalOrder, canProbe: func(a *Account) bool {
+					item := loads[a.ID]
+					return !item.loadKnown || a.Concurrency <= 0 || item.loadInfo.CurrentConcurrency < a.Concurrency
+				}})
+			if probeBaseline > 0 {
+				probe := ordered[0]
+				probe.adaptiveProbeOnly = true
+				immediateProbe = []openAIAccountCandidateScore{probe}
+				ordered = normalOrder
+				adaptiveFirst = ordered[0].account.ID != originalFirst
+			}
 			if adaptiveFirst {
 				ranked = ordered[:groupTopK]
 			}
@@ -1194,7 +1209,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			primary = buildOpenAIWeightedSelectionOrder(ranked, req)
 		}
 		if !includeOverflowFallback || groupTopK >= len(pool) {
-			return primary
+			return append(immediateProbe, primary...)
 		}
 
 		selected := make(map[int64]struct{}, len(primary))
@@ -1210,7 +1225,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 		sort.Slice(overflow, func(i, j int) bool {
 			return isOpenAIAccountCandidateBetter(overflow[i], overflow[j])
 		})
-		return append(primary, overflow...)
+		return append(immediateProbe, append(primary, overflow...)...)
 	}
 	if req.RequireCompact {
 		supported := make([]openAIAccountCandidateScore, 0, len(plan.candidates))
@@ -1224,15 +1239,15 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			}
 		}
 		selectionOrder := make([]openAIAccountCandidateScore, 0, len(plan.allCandidates))
-		selectionOrder = append(selectionOrder, buildSelectionOrder(supported, plan.topK, plan.includeOverflowFallback)...)
-		selectionOrder = append(selectionOrder, buildSelectionOrder(unknown, plan.topK, plan.includeOverflowFallback)...)
+		selectionOrder = append(selectionOrder, buildSelectionOrder(supported, plan.topK, plan.includeOverflowFallback, true)...)
+		selectionOrder = append(selectionOrder, buildSelectionOrder(unknown, plan.topK, plan.includeOverflowFallback, len(supported) == 0)...)
 		if len(plan.staleSnapshotCompactRetry) > 0 && s.service.schedulerSnapshot != nil {
 			selectionOrder = append(selectionOrder, sortOpenAICompactRetryCandidates(plan.staleSnapshotCompactRetry)...)
 		}
 		return selectionOrder
 	}
 
-	return buildSelectionOrder(plan.candidates, plan.topK, plan.includeOverflowFallback)
+	return buildSelectionOrder(plan.candidates, plan.topK, plan.includeOverflowFallback, true)
 }
 
 func sortOpenAICompactRetryCandidates(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
@@ -1297,11 +1312,19 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			continue
 		}
 
-		result, attempted, acquireErr := s.tryAcquireOpenAIAccountSlot(ctx, candidate.account.ID, candidate.account.Concurrency, budget)
+		candidateBudget := budget
+		if candidate.adaptiveProbeOnly {
+			// Exploration must leave the normal slot and wait budgets intact.
+			candidateBudget = newOpenAISelectionProbeBudget()
+		}
+		result, attempted, acquireErr := s.tryAcquireOpenAIAccountSlot(ctx, candidate.account.ID, candidate.account.Concurrency, candidateBudget)
 		if !attempted {
 			break
 		}
 		if acquireErr != nil {
+			if candidate.adaptiveProbeOnly && ctx.Err() == nil {
+				continue
+			}
 			return nil, compactBlocked, acquireErr
 		}
 		if result == nil || !result.Acquired {
@@ -1313,7 +1336,7 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			release(result)
 			continue
 		}
-		if !s.consumeOpenAISelectionDBRecheck(budget) {
+		if !s.consumeOpenAISelectionDBRecheck(candidateBudget) {
 			release(result)
 			break
 		}
@@ -1323,18 +1346,21 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			continue
 		}
 		if req.RequireCompact && openAICompactSupportTier(fresh) == 0 {
-			compactBlocked = true
+			compactBlocked = compactBlocked || !candidate.adaptiveProbeOnly
 			release(result)
 			continue
 		}
 
 		if fresh.Concurrency != candidate.account.Concurrency {
 			release(result)
-			result, attempted, acquireErr = s.tryAcquireOpenAIAccountSlot(ctx, fresh.ID, fresh.Concurrency, budget)
+			result, attempted, acquireErr = s.tryAcquireOpenAIAccountSlot(ctx, fresh.ID, fresh.Concurrency, candidateBudget)
 			if !attempted {
 				continue
 			}
 			if acquireErr != nil {
+				if candidate.adaptiveProbeOnly && ctx.Err() == nil {
+					continue
+				}
 				return nil, compactBlocked, acquireErr
 			}
 			if result == nil || !result.Acquired {
@@ -1606,7 +1632,7 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 				return attempt.result, attempt.candidateCount, attempt.topK, attempt.loadSkew, nil
 			}
 			if len(regularAccounts) > 0 {
-				regularAttempt := s.trySelectByLoadBalancePool(ctx, req, regularAccounts, loadMap, budget)
+				regularAttempt := s.trySelectByLoadBalancePool(withoutAdaptiveExploration(ctx), req, regularAccounts, loadMap, budget)
 				if regularAttempt.err != nil && !regularAttempt.noCompactCandidates {
 					return nil, regularAttempt.candidateCount, regularAttempt.topK, regularAttempt.loadSkew, regularAttempt.err
 				}
@@ -1704,7 +1730,7 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 	if s.service.concurrencyService != nil && !budget.acquireExhausted() {
 		loadReq := buildOpenAIAccountLoadRequest(filtered)
 		if freshLoadMap, loadErr := s.service.concurrencyService.GetAccountsLoadBatchFresh(ctx, loadReq); loadErr == nil {
-			freshPlan := s.buildOpenAIAccountLoadPlan(ctx, req, filtered, freshLoadMap)
+			freshPlan := s.buildOpenAIAccountLoadPlan(withoutAdaptiveExploration(ctx), req, filtered, freshLoadMap)
 			if openAICostOverflowExpanded(req, freshPlan) {
 				budget.enableLimit()
 			}
@@ -1799,7 +1825,7 @@ func (s *defaultOpenAIAccountScheduler) finishLoadBalanceSelectionFallback(
 		wantAttempted := pass == 1 || pass == 3
 		wantKnownFull := pass >= 2
 		for _, candidate := range attempt.selectionOrder {
-			if candidate.account == nil {
+			if candidate.account == nil || candidate.adaptiveProbeOnly {
 				continue
 			}
 			if budget != nil && budget.limited {

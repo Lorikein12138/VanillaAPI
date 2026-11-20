@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -122,10 +123,11 @@ func TestGatewayAdaptiveExpiredAndIsolatedSamples(t *testing.T) {
 	check := func(route adaptiveRoute, at time.Time, peer adaptivePeerMatch, want int64) {
 		t.Helper()
 		pool := []*Account{&one, &two}
-		rankAdaptiveWithTelemetry(telemetry, route, pool, adaptiveAccount, model, peer, false, at, func(int) int { return 0 }, nil)
+		rankAdaptiveWithTelemetry(telemetry, route, pool, adaptiveAccount, model, peer, adaptiveProbeOptions[*Account]{}, at, nil)
 		require.Equal(t, want, pool[0].ID)
 	}
 	check(route, now, adaptiveAnyPeer, 2)
+	check(route, now.Add(3*time.Hour), adaptiveAnyPeer, 2)
 	check(route, now.Add(adaptiveWindow), adaptiveAnyPeer, 1)
 	check(route, now, func(a, b *Account) bool { return a.Priority == b.Priority }, 1)
 	other := route
@@ -143,6 +145,367 @@ func TestGatewayAdaptiveExpiredAndIsolatedSamples(t *testing.T) {
 	protected := withGatewayAdaptiveRoute(ctx, "test_messages", "", []byte("{\"previous_response_id\":\"resp_a\"}"))
 	pool := []*Account{&one, &two}
 	require.False(t, rankAdaptivePool(protected, pool, adaptiveAccount, model, adaptiveAnyPeer, true))
+}
+
+func TestGatewayAdaptiveDecayAndRecentOverride(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	route := adaptiveRoute{operation: "chat", transport: "http"}
+	telemetry := &adaptiveTelemetry{}
+	accounts := []Account{adaptiveTestAccount(1, PlatformOpenAI, 1), adaptiveTestAccount(2, PlatformOpenAI, 1)}
+	keys := []adaptiveSampleKey{adaptiveKey(route, &accounts[0], "model"), adaptiveKey(route, &accounts[1], "model")}
+	for range adaptiveMinimum - 1 {
+		telemetry.observe(keys[0], now, time.Second, true)
+	}
+	require.False(t, telemetry.score(keys[0], now).known)
+	for range adaptiveMinimum {
+		telemetry.observe(keys[1], now.Add(-6*time.Hour-time.Second), time.Second, true)
+	}
+	require.False(t, telemetry.score(keys[1], now).known)
+	require.True(t, telemetry.score(keys[1], now.Add(-time.Second)).known)
+
+	weighted := adaptiveKey(route, &accounts[1], "weighted")
+	for range 3 {
+		telemetry.observe(weighted, now.Add(-18*time.Hour), 15*time.Second, true)
+	}
+	telemetry.observe(weighted, now, time.Second, true)
+	telemetry.observe(weighted, now, time.Second, false)
+	// Three 18-hour-old successes weigh 1/8 each, yielding a mean of about 4.8s.
+	require.Equal(t, adaptiveScore{reliability: 2, latency: 22, known: true}, telemetry.score(weighted, now))
+
+	telemetry = &adaptiveTelemetry{}
+	for range 12 {
+		telemetry.observe(keys[0], now.Add(-time.Hour), 100*time.Millisecond, true)
+		telemetry.observe(keys[1], now.Add(-time.Hour), time.Second, true)
+	}
+	for range adaptiveMinimum {
+		telemetry.observe(keys[0], now, 2*time.Second, true)
+	}
+	pool := []*Account{&accounts[0], &accounts[1]}
+	rankAdaptiveWithTelemetry(telemetry, route, pool, adaptiveAccount, func(*Account) string { return "model" }, adaptiveAnyPeer, adaptiveProbeOptions[*Account]{}, now, nil)
+	require.Equal(t, accounts[1].ID, pool[0].ID)
+	for range adaptiveMinimum {
+		telemetry.observe(keys[0], now.Add(time.Second), 0, false)
+	}
+	require.Less(t, telemetry.score(keys[0], now.Add(time.Second)).reliability, telemetry.score(keys[1], now.Add(time.Second)).reliability)
+
+	tooSlow := adaptiveKey(route, &accounts[0], "too-slow")
+	for range adaptiveMinimum {
+		telemetry.observe(tooSlow, now, adaptiveMaxSuccessLatency+time.Nanosecond, true)
+	}
+	require.NotContains(t, telemetry.series, tooSlow)
+}
+
+func TestGatewayAdaptiveColdStartBudgetCooldownAndRotation(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	telemetry := &adaptiveTelemetry{}
+	route := adaptiveRoute{operation: "chat", transport: "http"}
+	baseline := adaptiveTestAccount(1, PlatformOpenAI, 1)
+	first := adaptiveTestAccount(2, PlatformOpenAI, 1)
+	second := adaptiveTestAccount(3, PlatformOpenAI, 1)
+	otherTier := adaptiveTestAccount(4, PlatformOpenAI, 2)
+	model := func(*Account) string { return "model" }
+	probe := adaptiveProbeOptions[*Account]{opportunity: func() bool { return true }}
+	for range adaptiveMinimum {
+		telemetry.observe(adaptiveKey(route, &baseline, "model"), now, time.Second, true)
+	}
+	try := func(at time.Time, want ...*Account) {
+		t.Helper()
+		pool := []*Account{&baseline, &otherTier, &second, &first}
+		rankAdaptiveWithTelemetry(telemetry, route, pool, adaptiveAccount, model, adaptiveAnyPeer, probe, at, nil)
+		require.Equal(t, want, pool)
+	}
+	try(now, &first, &otherTier, &baseline, &second)
+	otherRoute := route
+	otherRoute.operation = "another_protocol"
+	for range adaptiveMinimum {
+		telemetry.observe(adaptiveKey(otherRoute, &baseline, "model"), now, time.Second, true)
+	}
+	otherCandidate := adaptiveTestAccount(5, PlatformGemini, 1)
+	otherPool := []*Account{&baseline, &otherCandidate}
+	changed, _ := rankAdaptiveWithTelemetry(telemetry, otherRoute, otherPool, adaptiveAccount, model, adaptiveAnyPeer, probe, now.Add(time.Second), nil)
+	require.False(t, changed) // a separate pool still shares the process cap
+	for range adaptiveProbeRequests - 1 {
+		try(now.Add(time.Minute), &baseline, &otherTier, &second, &first)
+	}
+	try(now.Add(time.Minute), &second, &otherTier, &baseline, &first)
+	for range adaptiveProbeRequests - 1 {
+		try(now.Add(time.Minute*2), &baseline, &otherTier, &second, &first)
+	}
+	try(now.Add(29*time.Minute), &baseline, &otherTier, &second, &first)
+	try(now.Add(30*time.Minute), &first, &otherTier, &baseline, &second)
+}
+
+func TestGatewayAdaptiveDoesNotPreferAllFailuresAtZeroReliability(t *testing.T) {
+	now := time.Now()
+	route := adaptiveRoute{operation: "chat", transport: "http"}
+	telemetry := &adaptiveTelemetry{}
+	failed := adaptiveTestAccount(1, PlatformOpenAI, 1)
+	partial := adaptiveTestAccount(2, PlatformOpenAI, 1)
+	model := func(*Account) string { return "model" }
+	failedKey, partialKey := adaptiveKey(route, &failed, "model"), adaptiveKey(route, &partial, "model")
+	for i := range adaptiveSamples {
+		telemetry.observe(failedKey, now, 0, false)
+		telemetry.observe(partialKey, now, 10*time.Second, i == 0)
+	}
+	require.Zero(t, telemetry.score(failedKey, now).reliability)
+	require.Zero(t, telemetry.score(partialKey, now).reliability)
+	pool := []*Account{&failed, &partial}
+	changed, _ := rankAdaptiveWithTelemetry(telemetry, route, pool, adaptiveAccount, model, adaptiveAnyPeer, adaptiveProbeOptions[*Account]{}, now, nil)
+	require.True(t, changed)
+	require.Equal(t, &partial, pool[0])
+}
+
+func TestGatewayAdaptiveProbeBudgetSurvivesCandidateAndBaselineChanges(t *testing.T) {
+	now := time.Now()
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	model := func(*Account) string { return "model" }
+	firstBaseline := adaptiveTestAccount(1, PlatformOpenAI, 1)
+	secondBaseline := adaptiveTestAccount(2, PlatformOpenAI, 1)
+	firstUnknown := adaptiveTestAccount(3, PlatformOpenAI, 1)
+	secondUnknown := adaptiveTestAccount(4, PlatformOpenAI, 1)
+	groupID := int64(10)
+	newContext := func(group int64) context.Context {
+		ctx := WithGatewayAdaptiveIngress(context.Background(), settings, "test_budget", "http")
+		ctx = SetGatewayAdaptiveInput(ctx, []byte(`{"model":"request-model"}`))
+		return WithGatewayAdaptiveProbeGroup(ctx, &group)
+	}
+	ctx := newContext(groupID)
+	route, _ := gatewayAdaptiveRoute(ctx)
+	for range adaptiveMinimum {
+		telemetry.observe(adaptiveKey(route, &firstBaseline, "model"), now, time.Second, true)
+		telemetry.observe(adaptiveKey(route, &secondBaseline, "model"), now, time.Second, true)
+	}
+	pool := []*Account{&firstBaseline, &firstUnknown}
+	require.True(t, rankAdaptivePool(ctx, pool, adaptiveAccount, model, adaptiveAnyPeer, true))
+	// Advance the process limiter without changing any cooldowns or pool budgets.
+	telemetry.exploration.lastProbe = now.Add(-adaptiveProbeInterval)
+	tryChangedPool := func(ctx context.Context) bool {
+		pool := []*Account{&secondBaseline, &secondUnknown}
+		return rankAdaptivePool(ctx, pool, adaptiveAccount, model, adaptiveAnyPeer, true)
+	}
+	request := newContext(groupID)
+	for range adaptiveProbeRequests {
+		require.False(t, tryChangedPool(request))
+	}
+	for range adaptiveProbeRequests - 2 {
+		require.False(t, tryChangedPool(newContext(groupID)))
+	}
+	require.True(t, tryChangedPool(newContext(groupID)))
+	telemetry.exploration.lastProbe = now.Add(-adaptiveProbeInterval)
+	otherUnknown := adaptiveTestAccount(5, PlatformOpenAI, 1)
+	pool = []*Account{&secondBaseline, &otherUnknown}
+	require.True(t, rankAdaptivePool(newContext(groupID+1), pool, adaptiveAccount, model, adaptiveAnyPeer, true))
+}
+
+func TestGatewayAdaptiveProbeBudgetUsesParsedRequestModel(t *testing.T) {
+	for _, tc := range []struct {
+		name, operation, firstModel, secondModel string
+		parse                                    func(*testing.T, context.Context, string) context.Context
+	}{
+		{
+			name: "Gemini URL", operation: "POST /v1beta/models/*modelAction:generateContent", firstModel: "gemini-one", secondModel: "gemini-two",
+			parse: func(_ *testing.T, ctx context.Context, model string) context.Context {
+				return WithGatewayAdaptiveRequestModel(SetGatewayAdaptiveInput(ctx, []byte(`{"contents":[]}`)), model)
+			},
+		},
+		{
+			name: "image multipart", operation: "POST /v1/images/edits", firstModel: "gpt-image-1", secondModel: "gpt-image-2",
+			parse: func(t *testing.T, ctx context.Context, model string) context.Context {
+				var body bytes.Buffer
+				writer := multipart.NewWriter(&body)
+				require.NoError(t, writer.WriteField("model", model))
+				require.NoError(t, writer.WriteField("prompt", "edit"))
+				part, err := writer.CreateFormFile("image", "source.png")
+				require.NoError(t, err)
+				_, err = part.Write([]byte("image"))
+				require.NoError(t, err)
+				require.NoError(t, writer.Close())
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body.Bytes()))
+				c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+				svc := &OpenAIGatewayService{}
+				input, err := svc.ParseOpenAIImagesRequest(c, body.Bytes())
+				require.NoError(t, err)
+				return WithAdaptiveImageInput(ctx, body.Bytes(), input)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			telemetry := &adaptiveTelemetry{}
+			settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+			newIngress := func() context.Context {
+				return WithGatewayAdaptiveIngress(context.Background(), settings, tc.operation, "http")
+			}
+			firstIngress := newIngress()
+			first := tc.parse(t, firstIngress, tc.firstModel)
+			second := tc.parse(t, newIngress(), tc.secondModel)
+			baseline, firstUnknown, secondUnknown := adaptiveTestAccount(1, PlatformOpenAI, 1), adaptiveTestAccount(2, PlatformOpenAI, 1), adaptiveTestAccount(3, PlatformOpenAI, 1)
+			mapped := func(account *Account) string { return fmt.Sprintf("mapped-model-%d", account.ID) }
+			for _, ctx := range []context.Context{first, second} {
+				route, _ := gatewayAdaptiveRoute(ctx)
+				for range adaptiveMinimum {
+					telemetry.observe(adaptiveKey(route, &baseline, mapped(&baseline)), now, time.Second, true)
+				}
+			}
+			try := func(ctx context.Context, unknown *Account) bool {
+				return rankAdaptivePool(ctx, []*Account{&baseline, unknown}, adaptiveAccount, mapped, adaptiveAnyPeer, true)
+			}
+			require.True(t, try(first, &firstUnknown))
+			telemetry.exploration.lastProbe = now.Add(-adaptiveProbeInterval)
+			require.False(t, try(tc.parse(t, firstIngress, tc.secondModel), &secondUnknown))
+			require.True(t, try(second, &secondUnknown))
+		})
+	}
+}
+
+func TestGatewayAdaptiveColdStartRequiresAnEligibleUnboundRequest(t *testing.T) {
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	baseline := adaptiveTestAccount(1, PlatformOpenAI, 1)
+	unknown := adaptiveTestAccount(2, PlatformOpenAI, 1)
+	model := func(*Account) string { return "model" }
+	newContext := func() context.Context {
+		return WithGatewayAdaptiveIngress(context.Background(), settings, "test_cold_start", "http")
+	}
+	check := func(ctx context.Context, peers adaptivePeerMatch, explore, want bool) {
+		t.Helper()
+		pool := []*Account{&baseline, &unknown}
+		require.Equal(t, want, rankAdaptivePool(ctx, pool, adaptiveAccount, model, peers, explore))
+	}
+	ctx := newContext()
+	check(ctx, adaptiveAnyPeer, true, false) // no confidence yet
+	route, _ := gatewayAdaptiveRoute(ctx)
+	for range adaptiveMinimum {
+		telemetry.observe(adaptiveKey(route, &baseline, "model"), time.Now(), time.Second, true)
+	}
+	check(protectAdaptiveSelection(ctx), adaptiveAnyPeer, true, false)
+	check(withoutAdaptiveExploration(ctx), adaptiveAnyPeer, true, false) // internal retry
+	check(ctx, adaptiveAnyPeer, false, false)                            // excluded or waiting path
+	check(ctx, func(*Account, *Account) bool { return false }, true, false)
+	check(ctx, adaptiveAnyPeer, true, true)
+	check(ctx, adaptiveAnyPeer, true, false)
+}
+
+type adaptiveTopKConcurrencyCache struct {
+	upstreamCostTrackingConcurrencyCache
+	busy       int64
+	attempted  []int64
+	allBusy    bool
+	refreshErr error
+}
+
+func (c *adaptiveTopKConcurrencyCache) AcquireAccountSlot(_ context.Context, accountID int64, _ int, _ string) (bool, error) {
+	c.attempted = append(c.attempted, accountID)
+	return !c.allBusy && accountID != c.busy, nil
+}
+
+func (c *adaptiveTopKConcurrencyCache) GetAccountsLoadBatch(ctx context.Context, accounts []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
+	if c.refreshErr != nil {
+		return nil, c.refreshErr
+	}
+	return c.upstreamCostTrackingConcurrencyCache.GetAccountsLoadBatch(ctx, accounts)
+}
+
+func TestGatewayAdaptiveOpenAIAdvancedWaitUsesNormalTopSevenAfterRefreshFailure(t *testing.T) {
+	accounts := make([]Account, 8)
+	filtered := make([]*Account, 0, len(accounts))
+	loads := make(map[int64]*AccountLoadInfo, len(accounts))
+	for i := range accounts {
+		accounts[i] = adaptiveTestAccount(int64(i+1), PlatformOpenAI, 1)
+		filtered = append(filtered, &accounts[i])
+		loads[accounts[i].ID] = &AccountLoadInfo{AccountID: accounts[i].ID, LoadRate: 14 * i}
+	}
+	cache := &adaptiveTopKConcurrencyCache{allBusy: true, refreshErr: errors.New("load refresh failed")}
+	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{
+		accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts}, cfg: &config.Config{}, concurrencyService: NewConcurrencyService(cache),
+	}}
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	ctx := WithGatewayAdaptiveIngress(context.Background(), settings, "test_advanced_probe_wait", "http")
+	const model = "gpt-5.1"
+	route, _ := gatewayAdaptiveRoute(ctx)
+	for i := range 7 {
+		for range adaptiveMinimum {
+			telemetry.observe(adaptiveKey(route, &accounts[i], model), time.Now(), time.Second, true)
+		}
+	}
+	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, RequestedModel: model, SessionHash: "stable-weighted-order"}
+	normal := scheduler.buildOpenAIAccountLoadPlan(withoutAdaptiveExploration(ctx), req, filtered, loads)
+	require.Equal(t, 7, normal.topK)
+	require.Len(t, normal.selectionOrder, 7)
+	budget := newOpenAISelectionProbeBudget()
+	attempt := scheduler.trySelectByLoadBalancePool(ctx, req, filtered, loads, budget)
+	require.NoError(t, attempt.err)
+	require.Nil(t, attempt.result)
+	require.Len(t, cache.attempted, 8)
+	require.Equal(t, accounts[7].ID, cache.attempted[0])
+	for i, candidate := range normal.selectionOrder {
+		require.Equal(t, candidate.account.ID, cache.attempted[i+1])
+	}
+	selection, _, _, _, err := scheduler.finishLoadBalanceSelectionFallback(ctx, req, attempt, budget, openAISelectionFilterStats{})
+	require.NoError(t, err)
+	require.NotNil(t, selection.WaitPlan)
+	require.Equal(t, normal.selectionOrder[0].account.ID, selection.WaitPlan.AccountID)
+}
+
+func TestGatewayAdaptiveOpenAILegacyWithoutBatchWaitsOnNormalFirst(t *testing.T) {
+	accounts := []Account{adaptiveTestAccount(1, PlatformOpenAI, 1), adaptiveTestAccount(2, PlatformOpenAI, 1)}
+	cache := &adaptiveTopKConcurrencyCache{allBusy: true}
+	svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts}, cfg: &config.Config{}, concurrencyService: NewConcurrencyService(cache)}
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	ctx := WithGatewayAdaptiveIngress(context.Background(), settings, "test_legacy_probe_wait", "http")
+	route, _ := gatewayAdaptiveRoute(ctx)
+	const model = "gpt-5.1"
+	for range adaptiveMinimum {
+		telemetry.observe(adaptiveKey(route, &accounts[0], model), time.Now(), time.Second, true)
+	}
+	selection, err := svc.selectAccountWithLoadAwareness(ctx, nil, PlatformOpenAI, "", model, nil, false, OpenAIEndpointCapability(""), false)
+	require.NoError(t, err)
+	require.NotNil(t, selection.WaitPlan)
+	require.Equal(t, []int64{accounts[1].ID, accounts[0].ID}, cache.attempted)
+	require.Equal(t, accounts[0].ID, selection.WaitPlan.AccountID)
+}
+
+func TestGatewayAdaptiveOpenAITopOneAttemptsBaselineAfterProbe(t *testing.T) {
+	accounts := []Account{adaptiveTestAccount(1, PlatformOpenAI, 1), adaptiveTestAccount(2, PlatformOpenAI, 1)}
+	cache := &adaptiveTopKConcurrencyCache{busy: accounts[1].ID}
+	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{
+		accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts}, cfg: &config.Config{}, concurrencyService: NewConcurrencyService(cache),
+	}}
+	telemetry := &adaptiveTelemetry{}
+	settings := &SettingService{settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry}
+	ctx := WithGatewayAdaptiveIngress(context.Background(), settings, "test_topk_probe", "http")
+	route, _ := gatewayAdaptiveRoute(ctx)
+	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, RequestedModel: "gpt-5.1"}
+	for range adaptiveMinimum {
+		telemetry.observe(adaptiveKey(route, &accounts[0], req.RequestedModel), time.Now(), time.Second, true)
+	}
+	plan := openAIAccountLoadPlan{topK: 1, candidates: []openAIAccountCandidateScore{
+		{account: &accounts[0], score: 2, loadInfo: &AccountLoadInfo{}},
+		{account: &accounts[1], score: 1, loadInfo: &AccountLoadInfo{}, loadKnown: true},
+	}}
+	req.ExcludedIDs = map[int64]struct{}{3: {}}
+	require.Len(t, scheduler.buildOpenAISelectionOrder(ctx, req, plan), 1)
+	req.ExcludedIDs = nil
+	req.StickyAccountID = accounts[0].ID
+	require.Len(t, scheduler.buildOpenAISelectionOrder(ctx, req, plan), 1)
+	req.StickyAccountID = 0
+	plan.candidates[1].loadInfo.CurrentConcurrency = 1
+	require.Len(t, scheduler.buildOpenAISelectionOrder(ctx, req, plan), 1)
+	plan.candidates[1].loadInfo.CurrentConcurrency = 0
+	order := scheduler.buildOpenAISelectionOrder(ctx, req, plan)
+	require.Len(t, order, 2)
+	require.True(t, order[0].adaptiveProbeOnly)
+	selection, _, err := scheduler.tryAcquireOpenAISelectionOrder(ctx, req, order)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, accounts[0].ID, selection.Account.ID)
+	require.Equal(t, []int64{accounts[1].ID, accounts[0].ID}, cache.attempted)
+	selection.ReleaseFunc()
+	require.Len(t, scheduler.buildOpenAISelectionOrder(ctx, req, plan), 1)
 }
 
 func TestGatewayAdaptiveObservationRequiresOneUpstreamAndLiveClient(t *testing.T) {

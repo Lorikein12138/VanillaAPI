@@ -320,6 +320,9 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		googleError(c, http.StatusBadRequest, "Invalid model in URL")
 		return
 	}
+	if ctx := service.WithGatewayAdaptiveRequestModel(c.Request.Context(), modelName); ctx != c.Request.Context() {
+		c.Request = c.Request.WithContext(ctx)
+	}
 	if resolvedModel, ok := service.ResolvedUpstreamModelFromContext(c.Request.Context()); ok && strings.TrimSpace(resolvedModel) != "" {
 		modelName = strings.TrimSpace(resolvedModel)
 	}
@@ -517,6 +520,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	defer inflightRelease()
 
 	attachGatewayAdaptiveInput(c, body)
+	if ctx := service.WithGatewayAdaptiveRequestModel(c.Request.Context(), urlModel); ctx != c.Request.Context() {
+		c.Request = c.Request.WithContext(ctx)
+	}
 	// 3) select account (sticky session based on request body)
 	// 优先使用 Gemini CLI 的会话标识（privileged-user-id + tmp 目录哈希）
 	sessionHash := ""

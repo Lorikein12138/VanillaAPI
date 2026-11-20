@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/bits"
-	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,10 +22,13 @@ import (
 )
 
 const (
-	adaptiveWindow   = 15 * time.Minute
-	adaptiveCapacity = 4096
-	adaptiveSamples  = 16
-	adaptiveMinimum  = 4
+	adaptiveWindow            = AdaptiveHistoryRetention
+	adaptiveHalfLife          = 6 * time.Hour
+	adaptiveRecentWindow      = 15 * time.Minute
+	adaptiveMaxSuccessLatency = 15 * time.Minute
+	adaptiveCapacity          = 4096
+	adaptiveSamples           = 16
+	adaptiveMinimum           = 4
 )
 
 type adaptiveRoute struct {
@@ -42,12 +46,16 @@ type adaptiveRoute struct {
 
 type adaptiveRouteKey struct{}
 type adaptiveIngressKey struct{}
+type adaptiveNoExploreKey struct{}
+type adaptiveProbeGroupKey struct{}
+type adaptiveProbeModelKey struct{}
 
 type adaptiveIngress struct {
 	operation string
 	transport string
 	explored  atomic.Bool
 	settings  *SettingService
+	telemetry *adaptiveTelemetry
 	fastOnce  sync.Once
 	fast      *OpenAIFastPolicySettings
 }
@@ -57,7 +65,7 @@ func WithGatewayAdaptiveIngress(ctx context.Context, settings *SettingService, o
 	if settings == nil || !settings.IsGatewayAdaptiveSchedulingEnabled(ctx) || operation == "" {
 		return ctx
 	}
-	ingress := &adaptiveIngress{operation: operation, transport: transport, settings: settings}
+	ingress := &adaptiveIngress{operation: operation, transport: transport, settings: settings, telemetry: settings.adaptiveTelemetry}
 	return withGatewayAdaptiveRoute(context.WithValue(ctx, adaptiveIngressKey{}, ingress), operation, transport, nil)
 }
 
@@ -68,6 +76,23 @@ func SetGatewayAdaptiveInput(ctx context.Context, body []byte) context.Context {
 		return ctx
 	}
 	return withGatewayAdaptiveRoute(ctx, ingress.operation, ingress.transport, body)
+}
+
+// WithGatewayAdaptiveProbeGroup supplies the authenticated scheduling group.
+func WithGatewayAdaptiveProbeGroup(ctx context.Context, groupID *int64) context.Context {
+	if _, enabled := gatewayAdaptiveRoute(ctx); enabled && groupID != nil {
+		return context.WithValue(ctx, adaptiveProbeGroupKey{}, *groupID)
+	}
+	return ctx
+}
+
+// WithGatewayAdaptiveRequestModel supplies the parsed model for the probe budget.
+func WithGatewayAdaptiveRequestModel(ctx context.Context, model string) context.Context {
+	model = strings.TrimSpace(model)
+	if _, enabled := gatewayAdaptiveRoute(ctx); enabled && model != "" && len(model) <= 128 {
+		return context.WithValue(ctx, adaptiveProbeModelKey{}, model)
+	}
+	return ctx
 }
 
 // withGatewayAdaptiveRoute records only routing characteristics. The request
@@ -104,7 +129,7 @@ func withGatewayAdaptiveRoute(ctx context.Context, operation, transport string, 
 		route.thinkingLevel = geminiThinkingLevelFromClaudeBody(body, thinking)
 		route.thinkingEnabled = thinking != nil && (thinking.Type == "enabled" || thinking.Type == "adaptive")
 	}
-	return context.WithValue(ctx, adaptiveRouteKey{}, route)
+	return WithGatewayAdaptiveRequestModel(context.WithValue(ctx, adaptiveRouteKey{}, route), payload.Get("model").String())
 }
 
 func adaptiveEffort(payload gjson.Result) string {
@@ -349,6 +374,7 @@ type adaptiveSample struct {
 	at      time.Time
 	latency time.Duration
 	success bool
+	id      string
 }
 
 type adaptiveSeries struct {
@@ -357,19 +383,46 @@ type adaptiveSeries struct {
 }
 
 type adaptiveTelemetry struct {
-	mu     sync.Mutex
-	series map[adaptiveSampleKey]*adaptiveSeries
+	mu          sync.Mutex
+	series      map[adaptiveSampleKey]*adaptiveSeries
+	history     *adaptiveHistory
+	exploration adaptiveExploration
 }
 
 var gatewayAdaptiveTelemetry adaptiveTelemetry
 
+func adaptiveTelemetryForContext(ctx context.Context) *adaptiveTelemetry {
+	if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); ingress != nil && ingress.telemetry != nil {
+		return ingress.telemetry
+	}
+	return &gatewayAdaptiveTelemetry
+}
+
 func (t *adaptiveTelemetry) observe(key adaptiveSampleKey, now time.Time, latency time.Duration, success bool) {
-	if len(key.model) > 128 || (success && (latency <= 0 || latency > adaptiveWindow)) {
+	if len(key.model) > 128 || (success && (latency <= 0 || latency > adaptiveMaxSuccessLatency)) {
 		return
 	}
+	sample := adaptiveSample{at: now, latency: latency, success: success}
+	if t.history != nil {
+		sample.id = t.history.nextID()
+	}
+	t.addSample(key, sample)
+	if t.history != nil {
+		t.history.enqueue(key, sample)
+	}
+}
+
+func (t *adaptiveTelemetry) addSample(key adaptiveSampleKey, sample adaptiveSample) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	series := t.series[key]
+	if series != nil && sample.id != "" {
+		for _, existing := range series.samples {
+			if existing.id == sample.id {
+				return
+			}
+		}
+	}
 	if series == nil {
 		if t.series == nil {
 			t.series = make(map[adaptiveSampleKey]*adaptiveSeries)
@@ -383,12 +436,29 @@ func (t *adaptiveTelemetry) observe(key adaptiveSampleKey, now time.Time, latenc
 					oldestKey, oldest = key, last
 				}
 			}
+			if sample.at.Before(oldest) {
+				return
+			}
 			delete(t.series, oldestKey)
 		}
 		series = &adaptiveSeries{}
 		t.series[key] = series
 	}
-	series.samples[series.next] = adaptiveSample{now, latency, success}
+	// Startup recovery can overlap live observations. Keep the newest samples
+	// regardless of insertion order, including when the ring is full.
+	if old := series.samples[series.next].at; !old.IsZero() && sample.at.Before(old) {
+		return
+	}
+	position := series.next
+	for range adaptiveSamples - 1 {
+		previous := (position + adaptiveSamples - 1) % adaptiveSamples
+		if !sample.at.Before(series.samples[previous].at) {
+			break
+		}
+		series.samples[position] = series.samples[previous]
+		position = previous
+	}
+	series.samples[position] = sample
 	series.next = (series.next + 1) % adaptiveSamples
 }
 
@@ -398,61 +468,108 @@ type adaptiveScore struct {
 	known       bool
 }
 
+type adaptiveWeightedSamples struct {
+	count                            int
+	weight, success, weightedLatency float64
+}
+
+func (s *adaptiveWeightedSamples) add(sample adaptiveSample, weight float64) {
+	s.count++
+	s.weight += weight
+	if sample.success {
+		s.success += weight
+		s.weightedLatency += weight * float64(sample.latency)
+	}
+}
+
+func (s adaptiveWeightedSamples) score() adaptiveScore {
+	if s.count < adaptiveMinimum || s.weight < 2 {
+		return adaptiveScore{}
+	}
+	// Quantize at approximately 20% increments to avoid moving accounts
+	// for minor jitter. Compare reliability before latency.
+	latency := math.MaxInt
+	if s.success > 0 {
+		latency = 0
+		mean := time.Duration(s.weightedLatency / s.success)
+		for bucket := 100 * time.Millisecond; bucket < mean; bucket += bucket / 5 {
+			latency++
+		}
+	}
+	return adaptiveScore{reliability: int((s.success / s.weight) * 5), latency: latency, known: true}
+}
+
 func (t *adaptiveTelemetry) score(key adaptiveSampleKey, now time.Time) adaptiveScore {
 	series := t.series[key]
 	if series == nil {
 		return adaptiveScore{}
 	}
-	var count, successful int
-	var total time.Duration
+	var history, recent adaptiveWeightedSamples
 	for _, sample := range series.samples {
 		age := now.Sub(sample.at)
 		if age < 0 || age >= adaptiveWindow {
 			continue
 		}
-		count++
-		if sample.success {
-			successful++
-			total += sample.latency
+		weight := math.Exp2(-float64(age) / float64(adaptiveHalfLife))
+		history.add(sample, weight)
+		if age < adaptiveRecentWindow {
+			recent.add(sample, weight)
 		}
 	}
-	if count < adaptiveMinimum {
-		return adaptiveScore{}
+	// Pick one score per account before sorting so comparisons stay transitive.
+	if score := recent.score(); score.known {
+		return score
 	}
-	// Quantize at approximately 20% increments to avoid moving accounts
-	// for minor jitter. Compare recent reliability before latency.
-	latency := 0
-	if successful > 0 {
-		mean := total / time.Duration(successful)
-		for bucket := 100 * time.Millisecond; bucket < mean; bucket += bucket / 5 {
-			latency++
-		}
-	}
-	return adaptiveScore{reliability: successful * 5 / count, latency: latency, known: true}
+	return history.score()
 }
 
 type adaptivePeerMatch func(*Account, *Account) bool
 
+type adaptiveProbeOptions[T any] struct {
+	scope       adaptiveProbeScope
+	opportunity func() bool
+	canProbe    func(*Account) bool
+	waitOrder   *[]T
+}
+
 // rankAdaptivePool expects a baseline order and an equivalence relation for
 // fixed tiers. Unknown positions stay fixed, except during cold-start sampling.
 func rankAdaptivePool[T any](ctx context.Context, pool []T, account func(T) *Account, model func(*Account) string, peers adaptivePeerMatch, explore bool) bool {
+	changed, _ := rankAdaptivePoolWithProbe(ctx, pool, account, model, peers, explore, adaptiveProbeOptions[T]{})
+	return changed
+}
+
+// probeBaseline is the index of the pre-probe winner in the returned pool.
+// A zero index means that no cold-start probe was scheduled.
+func rankAdaptivePoolWithProbe[T any](ctx context.Context, pool []T, account func(T) *Account, model func(*Account) string, peers adaptivePeerMatch, explore bool, probe adaptiveProbeOptions[T]) (changed bool, probeBaseline int) {
 	route, ok := gatewayAdaptiveRoute(ctx)
 	if !ok || route.protected || len(pool) < 2 || ctx.Err() != nil {
-		return false
-	}
-	if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); explore && ingress != nil {
-		explore = ingress.explored.CompareAndSwap(false, true)
+		return false, 0
 	}
 	if eligible, _ := ctx.Value(adaptiveEligibilityKey{}).(func(*Account) bool); eligible != nil {
 		previousPeers := peers
 		peers = func(a, b *Account) bool { return eligible(a) && eligible(b) && previousPeers(a, b) }
 	}
-	return rankAdaptiveWithTelemetry(&gatewayAdaptiveTelemetry, route, pool, account, model, peers, explore, time.Now(), rand.IntN, func(candidate *Account, upstreamModel string) string {
+	if explore && ctx.Value(adaptiveNoExploreKey{}) == nil {
+		if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); ingress != nil {
+			probe.opportunity = func() bool { return ingress.explored.CompareAndSwap(false, true) }
+			probe.scope.groupID, _ = ctx.Value(adaptiveProbeGroupKey{}).(int64)
+			probe.scope.model, _ = ctx.Value(adaptiveProbeModelKey{}).(string)
+		}
+	}
+	return rankAdaptiveWithTelemetry(adaptiveTelemetryForContext(ctx), route, pool, account, model, peers, probe, time.Now(), func(candidate *Account, upstreamModel string) string {
 		return adaptiveCandidateTier(ctx, route, candidate, upstreamModel)
 	})
 }
 
-func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adaptiveRoute, pool []T, account func(T) *Account, model func(*Account) string, peers adaptivePeerMatch, explore bool, now time.Time, random func(int) int, candidateTier func(*Account, string) string) bool {
+func withoutAdaptiveExploration(ctx context.Context) context.Context {
+	if _, enabled := gatewayAdaptiveRoute(ctx); enabled && ctx.Value(adaptiveNoExploreKey{}) == nil {
+		return context.WithValue(ctx, adaptiveNoExploreKey{}, true)
+	}
+	return ctx
+}
+
+func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adaptiveRoute, pool []T, account func(T) *Account, model func(*Account) string, peers adaptivePeerMatch, probe adaptiveProbeOptions[T], now time.Time, candidateTier func(*Account, string) string) (bool, int) {
 	keys := make(map[int64]adaptiveSampleKey, len(pool))
 	for _, item := range pool {
 		candidate := account(item)
@@ -478,32 +595,6 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 	telemetry.mu.Unlock()
 
 	firstID := account(pool[0]).ID
-	// A request only gets an exploration draw at its first eligible pool.
-	// The caller disables exploration for retries and queue-only fallbacks.
-	if explore && random(20) == 0 {
-		var unknown []int
-		for i := 1; i < len(pool); i++ {
-			candidate := account(pool[i])
-			if !scores[candidate.ID].known && sameTierPeers(account(pool[0]), candidate) {
-				unknown = append(unknown, i)
-			}
-		}
-		if len(unknown) > 0 {
-			pick := unknown[random(len(unknown))]
-			item := pool[pick]
-			// Move only through peer positions so another tier keeps its slot.
-			for i := pick - 1; i >= 0; i-- {
-				if sameTierPeers(account(pool[0]), account(pool[i])) {
-					pool[pick] = pool[i]
-					pick = i
-				}
-			}
-			pool[0] = item
-			slog.Debug("gateway.adaptive_selection", "reason", "exploration", "account_id", account(item).ID)
-			return true
-		}
-	}
-
 	seen := make([]bool, len(pool))
 	for i, item := range pool {
 		if seen[i] || !scores[account(item).ID].known {
@@ -529,11 +620,40 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 			pool[position] = group[j]
 		}
 	}
+	baseline := account(pool[0])
+	if probe.opportunity != nil && scores[baseline.ID].known && (probe.canProbe == nil || probe.canProbe(baseline)) {
+		var members []adaptiveProbeMember
+		for i := 1; i < len(pool); i++ {
+			candidate := account(pool[i])
+			if !scores[candidate.ID].known && candidate.Priority == baseline.Priority && sameTierPeers(baseline, candidate) &&
+				(probe.canProbe == nil || probe.canProbe(candidate)) {
+				members = append(members, adaptiveProbeMember{id: candidate.ID, position: i})
+			}
+		}
+		probe.scope.route = route
+		if pick := telemetry.exploration.pick(probe.scope, members, now, probe.opportunity); pick > 0 {
+			if probe.waitOrder != nil {
+				*probe.waitOrder = slices.Clone(pool)
+			}
+			item := pool[pick]
+			// Rotate only through peer positions. Every unprobed peer keeps
+			// its relative order and every other tier keeps its slot.
+			for i := pick - 1; i > 0; i-- {
+				candidate := account(pool[i])
+				if candidate.Priority == baseline.Priority && sameTierPeers(baseline, candidate) {
+					pool[pick], pick = pool[i], i
+				}
+			}
+			pool[pick], pool[0] = pool[0], item
+			slog.Debug("gateway.adaptive_selection", "reason", "exploration", "account_id", account(item).ID)
+			return true, pick
+		}
+	}
 	if firstID != account(pool[0]).ID {
 		slog.Debug("gateway.adaptive_selection", "reason", "recent_observations", "account_id", account(pool[0]).ID)
-		return true
+		return true, 0
 	}
-	return false
+	return false, 0
 }
 
 func adaptiveAccount(account *Account) *Account { return account }
@@ -769,7 +889,7 @@ func observeAdaptiveResult(ctx context.Context, observation *adaptiveObservation
 	} else {
 		elapsed = now.Sub(observation.first)
 	}
-	gatewayAdaptiveTelemetry.observe(adaptiveKey(route, account, upstreamModel), now, elapsed, true)
+	adaptiveTelemetryForContext(ctx).observe(adaptiveKey(route, account, upstreamModel), now, elapsed, true)
 }
 
 func observeAdaptiveCompletion(ctx context.Context, account *Account, model string, start time.Time, status int, success bool) {
@@ -778,7 +898,7 @@ func observeAdaptiveCompletion(ctx context.Context, account *Account, model stri
 		return
 	}
 	if success || adaptiveFailureStatus(status) {
-		gatewayAdaptiveTelemetry.observe(adaptiveKey(route, account, model), time.Now(), time.Since(start), success)
+		adaptiveTelemetryForContext(ctx).observe(adaptiveKey(route, account, model), time.Now(), time.Since(start), success)
 	}
 }
 
@@ -801,7 +921,7 @@ func observeAdaptiveHTTPFailure(ctx context.Context, observation *adaptiveObserv
 	observation.mu.Lock()
 	defer observation.mu.Unlock()
 	if observation.calls == 1 && observation.status == status && ctx.Err() == nil {
-		gatewayAdaptiveTelemetry.observe(adaptiveKey(route, account, model), time.Now(), time.Since(observation.first), false)
+		adaptiveTelemetryForContext(ctx).observe(adaptiveKey(route, account, model), time.Now(), time.Since(observation.first), false)
 	}
 }
 
@@ -833,7 +953,7 @@ func WithAdaptiveImageInput(ctx context.Context, body []byte, input *OpenAIImage
 	if len(route.effort) > 96 {
 		return context.WithValue(ctx, adaptiveRouteKey{}, adaptiveRoute{})
 	}
-	return context.WithValue(ctx, adaptiveRouteKey{}, route)
+	return WithGatewayAdaptiveRequestModel(context.WithValue(ctx, adaptiveRouteKey{}, route), input.Model)
 }
 
 // WithAdaptiveImageTask checks the setting again in the detached executor.
