@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 )
 
 // TokenCostRequest 通用网关 token 计费请求。
@@ -17,7 +19,8 @@ type TokenCostRequest struct {
 	ReasoningEffort string
 	Resolver        *ModelPricingResolver
 	// Resolved 为调用方预先解析的定价（Resolver.Resolve 的结果），nil 表示未解析。
-	Resolved *ResolvedPricing
+	Resolved          *ResolvedPricing
+	deferFallbackWarn bool
 }
 
 // CalculateTokenCostForRequest 按通用网关的路径选择计算 token 费用：
@@ -37,22 +40,30 @@ func (s *BillingService) CalculateTokenCostForRequest(req TokenCostRequest) (*Co
 	if req.ReasoningEffort != "" || req.ServiceTier != "" {
 		return s.CalculateCostUnified(s.tokenCostInput(req, resolved))
 	}
+	if req.deferFallbackWarn {
+		// 保留目录直接计费路径的查价时点和默认计费参数。
+		return s.CalculateCostUnified(CostInput{
+			Model: req.Model, Tokens: req.Tokens, RateMultiplier: req.RateMultiplier,
+			PricingAt: timezone.Now(), deferFallbackWarn: true,
+		})
+	}
 	return s.CalculateCost(req.Model, req.Tokens, req.RateMultiplier)
 }
 
 func (s *BillingService) tokenCostInput(req TokenCostRequest, resolved *ResolvedPricing) CostInput {
 	input := CostInput{
-		Ctx:             req.Ctx,
-		Model:           req.Model,
-		Group:           req.Group,
-		Tokens:          req.Tokens,
-		RequestCount:    1,
-		RateMultiplier:  req.RateMultiplier,
-		PricingAt:       req.PricingAt,
-		ServiceTier:     req.ServiceTier,
-		ReasoningEffort: req.ReasoningEffort,
-		Resolver:        req.Resolver,
-		Resolved:        resolved,
+		Ctx:               req.Ctx,
+		Model:             req.Model,
+		Group:             req.Group,
+		Tokens:            req.Tokens,
+		RequestCount:      1,
+		RateMultiplier:    req.RateMultiplier,
+		PricingAt:         req.PricingAt,
+		ServiceTier:       req.ServiceTier,
+		ReasoningEffort:   req.ReasoningEffort,
+		Resolver:          req.Resolver,
+		Resolved:          resolved,
+		deferFallbackWarn: req.deferFallbackWarn,
 	}
 	if req.Group != nil {
 		gid := req.Group.ID

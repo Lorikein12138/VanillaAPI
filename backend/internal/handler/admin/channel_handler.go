@@ -617,7 +617,7 @@ func (h *ChannelHandler) GetModelDefaultPricing(c *gin.Context) {
 		return
 	}
 
-	pricing, err := h.billingService.GetModelPricing(model)
+	pricing, err := h.billingService.GetModelPricingQuiet(model)
 	if err != nil {
 		// 模型不在定价列表中
 		response.Success(c, gin.H{"found": false})

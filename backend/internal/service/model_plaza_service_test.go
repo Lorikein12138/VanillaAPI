@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -1359,4 +1360,90 @@ func TestListGroupsOfficialPricingSwitchKeepsCatalogBackedPayablePrices(t *testi
 	require.NoError(t, err)
 	model.OfficialPricing = nil
 	require.Equal(t, on, off)
+}
+
+func TestBuiltinFallbackWarnOnlyForUnconfiguredBilling(t *testing.T) {
+	const model = "gpt-5.6-luna"
+	const warning = "Using fallback pricing for model: " + model
+	const groupID = int64(10)
+	ctx := context.Background()
+	group := Group{ID: groupID, Name: "g", Platform: PlatformOpenAI, RateMultiplier: 1}
+	plaza := newPlazaServiceWithBilling([]Channel{{
+		ID: 1, Name: "ch", Status: StatusActive, GroupIDs: []int64{groupID},
+		ModelMapping: map[string]map[string]string{PlatformOpenAI: {model: model}},
+	}}, []Group{group}, map[int64]string{groupID: PlatformOpenAI}, nil)
+	billing := plaza.billingService
+	logs := captureStdLog(t)
+
+	partial := ChannelModelPricing{
+		Platform: PlatformOpenAI, Models: []string{model},
+		InputPrice: float64Ptr(0.4e-6), OutputPrice: float64Ptr(0),
+	}
+	direct, err := billing.GetModelPricingWithChannel(model, &partial)
+	require.NoError(t, err)
+	require.Equal(t, 0.4e-6, direct.InputPricePerToken)
+	require.Zero(t, direct.OutputPricePerToken)
+	require.Equal(t, 0.02e-6, direct.CacheReadPricePerToken)
+
+	channelResolver := NewModelPricingResolver(newChannelServiceWithPricings(groupID, []ChannelModelPricing{partial}), billing)
+	input := CostInput{
+		Ctx: ctx, Model: model, GroupID: &group.ID, Group: &group, Resolver: channelResolver,
+		Tokens:         UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000},
+		RateMultiplier: 1,
+	}
+	resolved := channelResolver.Resolve(ctx, PricingInput{Model: model, GroupID: &group.ID, Group: &group})
+	require.Equal(t, PricingSourceChannel, resolved.Source)
+	channelCost, err := billing.CalculateCostUnified(input)
+	require.NoError(t, err)
+	require.InDelta(t, 0.4, channelCost.InputCost, 1e-12)
+	require.Zero(t, channelCost.OutputCost)
+	require.InDelta(t, 0.02, channelCost.CacheReadCost, 1e-12)
+
+	groupWithPricing := group
+	groupWithPricing.ModelPricing = []ChannelModelPricing{partial}
+	input.Group = &groupWithPricing
+	resolved = channelResolver.Resolve(ctx, PricingInput{Model: model, GroupID: &group.ID, Group: input.Group})
+	require.Equal(t, PricingSourceGroup, resolved.Source)
+	groupCost, err := billing.CalculateCostUnified(input)
+	require.NoError(t, err)
+	require.Equal(t, channelCost, groupCost)
+
+	for _, showOfficial := range []bool{false, true} {
+		groups, err := plaza.ListGroups(ctx, showOfficial)
+		require.NoError(t, err)
+		require.Len(t, groups, 1)
+		require.Len(t, groups[0].Models, 1)
+		displayed := groups[0].Models[0]
+		require.NotNil(t, displayed.Pricing)
+		require.NotNil(t, displayed.Pricing.InputPrice)
+		require.InDelta(t, 0.2e-6, *displayed.Pricing.InputPrice, 1e-15)
+		if showOfficial {
+			require.NotNil(t, displayed.OfficialPricing)
+			require.Equal(t, float64Ptr(0.2e-6), displayed.OfficialPricing.InputPrice)
+		} else {
+			require.Nil(t, displayed.OfficialPricing)
+		}
+	}
+
+	apiKey := &APIKey{Group: &group}
+	gateway := &GatewayService{billingService: billing, resolver: plaza.resolver}
+	openaiGateway := &OpenAIGatewayService{resolver: plaza.resolver}
+	require.True(t, gateway.hasResolvableTokenPricing(ctx, model, apiKey))
+	require.Nil(t, openaiGateway.resolveOpenAIChannelPricing(ctx, model, apiKey))
+	require.NotContains(t, logs.String(), warning)
+
+	input.Group = &group
+	input.Resolver = plaza.resolver
+	cost, err := billing.CalculateCostUnified(input)
+	require.NoError(t, err)
+	require.InDelta(t, 0.2, cost.InputCost, 1e-12)
+	require.InDelta(t, 1.2, cost.OutputCost, 1e-12)
+	require.Equal(t, 1, strings.Count(logs.String(), warning))
+
+	input.Model = strings.ToUpper(model)
+	_, err = billing.CalculateCostUnified(input)
+	require.NoError(t, err)
+	_, err = billing.GetModelPricing(model)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(logs.String(), "Using fallback pricing for model: "))
 }

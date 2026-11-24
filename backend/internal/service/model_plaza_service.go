@@ -400,7 +400,7 @@ func (s *ModelPlazaService) lookupOfficialPricing(ctx context.Context, modelName
 	}
 	var result *PlazaOfficialPricing
 	pricingAt := standardContextPricingAt()
-	if mp, err := s.billingService.getModelPricingAt(modelName, pricingAt); err == nil && mp != nil {
+	if mp, _, err := s.billingService.lookupBaseModelPricingAt(modelName, pricingAt); err == nil && mp != nil {
 		result = &PlazaOfficialPricing{
 			InputPrice:      nonZeroPtr(mp.InputPricePerToken),
 			OutputPrice:     nonZeroPtr(mp.OutputPricePerToken),

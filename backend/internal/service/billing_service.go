@@ -218,6 +218,7 @@ type CostBreakdown struct {
 	ActualCost                float64 // 应用倍率后的实际费用
 	BillingMode               string  // 计费模式（"token"/"per_request"/"image"），由 CalculateCostUnified 填充
 	LongContextBillingApplied bool
+	builtinFallbackModel      string // 试算使用的内置兜底模型，选定结果后才告警
 }
 
 func applyCostBreakdownMultiplier(cost *CostBreakdown, multiplier float64) {
@@ -1542,6 +1543,12 @@ func (s *BillingService) GetModelPricing(model string) (*ModelPricing, error) {
 	return s.getModelPricingAt(model, timezone.Now())
 }
 
+// GetModelPricingQuiet 查询模型基础价，供展示和定价探测使用。
+func (s *BillingService) GetModelPricingQuiet(model string) (*ModelPricing, error) {
+	pricing, _, err := s.lookupBaseModelPricingAt(model, timezone.Now())
+	return pricing, err
+}
+
 // CacheStoragePricePerTokenHour 返回模型的显式上下文缓存存储单价（每 token 每小时，USD）。
 // 优先级：价格表（override_file 等）按确定性识别配置的值 > 内置型号价 > 内置 Pro/Flash 系列兜底价；
 // 均未命中返回 0。
@@ -1557,6 +1564,23 @@ func (s *BillingService) CacheStoragePricePerTokenHour(model string) float64 {
 // getModelPricingAt 保留带计费时点的内部调用接口。DeepSeek 默认低谷价
 // 仅由模型决定，峰谷倍率由统一计费入口按请求时点处理。
 func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*ModelPricing, error) {
+	pricing, builtinFallback, err := s.lookupBaseModelPricingAt(model, pricingAt)
+	if builtinFallback {
+		s.warnBuiltinFallbackPricing(model)
+	}
+	return pricing, err
+}
+
+func (s *BillingService) warnBuiltinFallbackPricing(model string) {
+	// 按小写模型名去重，每个模型每进程最多告警一次（issue #3394）。
+	model = strings.ToLower(model)
+	if _, seen := s.fallbackWarnSeen.LoadOrStore(model, struct{}{}); !seen {
+		log.Printf("[Billing] Using fallback pricing for model: %s", model)
+	}
+}
+
+// lookupBaseModelPricingAt 安静查询基础定价，并标记是否命中内置兜底价。
+func (s *BillingService) lookupBaseModelPricingAt(model string, pricingAt time.Time) (*ModelPricing, bool, error) {
 	// 标准化模型名称（转小写）
 	model = strings.ToLower(model)
 
@@ -1570,7 +1594,7 @@ func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*
 		// PricingService，不受影响。
 		if litellmPricing != nil && litellmPricing.TokenPricingAbsent {
 			if isDomesticSupplementModel(model) {
-				return nil, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
+				return nil, false, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
 			}
 			litellmPricing = nil
 		}
@@ -1603,33 +1627,27 @@ func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*
 				ImageInputPricePerToken:       litellmPricing.InputCostPerImageToken,
 				ImageCacheReadPricePerToken:   litellmPricing.CacheReadInputImageTokenCost,
 				ImageOutputPricePerToken:      litellmPricing.OutputCostPerImageToken,
-			}, true, pricingAt), nil
+			}, true, pricingAt), false, nil
 		}
 	}
 
 	// 2. 使用硬编码回退价格
-	fallback := s.getFallbackPricing(model)
-	if fallback != nil {
-		// 按模型名去重:每个模型每进程最多打一条 warn,避免热路径每请求刷屏（issue #3394）。
-		// model 在函数入口已 ToLower,故 GLM-5.2 / glm-5.2 视为同一条目。
-		if _, seen := s.fallbackWarnSeen.LoadOrStore(model, struct{}{}); !seen {
-			log.Printf("[Billing] Using fallback pricing for model: %s", model)
-		}
-		return s.applyModelSpecificPricingPolicyEx(model, fallback, true, pricingAt), nil
+	if fallback := s.getFallbackPricing(model); fallback != nil {
+		return s.applyModelSpecificPricingPolicyEx(model, fallback, true, pricingAt), true, nil
 	}
 
-	return nil, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
+	return nil, false, fmt.Errorf("%w for model: %s", ErrModelPricingUnavailable, model)
 }
 
 // GetModelPricingWithChannel 获取模型定价，渠道配置的价格覆盖默认值。
 // 与其他 token 字段一致，渠道留空的图片输入/输出价沿用目录价，见 applyChannelImagePriceOverrides。
 func (s *BillingService) GetModelPricingWithChannel(model string, channelPricing *ChannelModelPricing) (*ModelPricing, error) {
-	pricing, err := s.GetModelPricing(model)
+	if channelPricing == nil {
+		return s.GetModelPricing(model)
+	}
+	pricing, err := s.GetModelPricingQuiet(model)
 	if err != nil {
 		return nil, err
-	}
-	if channelPricing == nil {
-		return pricing, nil
 	}
 	// 防止修改 fallbackPrices 中的共享指针
 	cloned := *pricing
@@ -1717,6 +1735,7 @@ type CostInput struct {
 	LongContextBillingEnabled *bool
 	// DisableModelLongContextPricing 豁免模型价卡的长上下文附加费，不改变自定义区间价格。
 	DisableModelLongContextPricing bool
+	deferFallbackWarn              bool
 }
 
 // CalculateCostUnified 统一计费入口，支持三种计费模式。
@@ -1728,24 +1747,30 @@ func (s *BillingService) CalculateCostUnified(input CostInput) (*CostBreakdown, 
 		if input.LongContextBillingEnabled != nil {
 			applyLongContextBilling = *input.LongContextBillingEnabled
 		}
-		pricing, err := s.getModelPricingAt(input.Model, input.PricingAt)
+		pricing, builtinFallback, err := s.lookupBaseModelPricingAt(input.Model, input.PricingAt)
 		if err != nil {
 			return nil, err
 		}
+		if builtinFallback && !input.deferFallbackWarn {
+			s.warnBuiltinFallbackPricing(input.Model)
+		}
 		breakdown := s.computeTokenBreakdown(pricing, input.Tokens, input.RateMultiplier, input.ServiceTier, applyLongContextBilling && !input.DisableModelLongContextPricing)
 		applyCostBreakdownMultiplier(breakdown, reasoningEffortBillingMultiplier(input.ReasoningEffort, pricing.ReasoningEffortMultipliers))
+		if builtinFallback && input.deferFallbackWarn {
+			breakdown.builtinFallbackModel = input.Model
+		}
 		return breakdown, nil
 	}
 
 	// 优先使用预解析结果，避免重复 Resolve 调用
 	resolved := input.Resolved
 	if resolved == nil {
-		resolved = input.Resolver.Resolve(input.Ctx, PricingInput{
+		resolved = input.Resolver.resolve(input.Ctx, PricingInput{
 			Model:     input.Model,
 			GroupID:   input.GroupID,
 			Group:     input.Group,
 			PricingAt: input.PricingAt,
-		})
+		}, !input.deferFallbackWarn)
 	}
 
 	// 保存时强制 > 0；若仍有负数泄漏（缓存/迁移残留），按 0 处理避免按 1x 误扣。
@@ -1765,12 +1790,21 @@ func (s *BillingService) CalculateCostUnified(input CostInput) (*CostBreakdown, 
 		breakdown, err = s.calculateTokenCost(resolved, input)
 	}
 	if err == nil && breakdown != nil {
+		if resolved.builtinFallback && input.deferFallbackWarn {
+			breakdown.builtinFallbackModel = input.Model
+		}
 		breakdown.BillingMode = string(resolved.Mode)
 		if breakdown.BillingMode == "" {
 			breakdown.BillingMode = string(BillingModeToken)
 		}
 	}
 	return breakdown, err
+}
+
+func (s *BillingService) warnSelectedFallbackPricing(cost *CostBreakdown) {
+	if cost != nil && cost.builtinFallbackModel != "" {
+		s.warnBuiltinFallbackPricing(cost.builtinFallbackModel)
+	}
 }
 
 // calculateTokenCost 按 token 区间计费

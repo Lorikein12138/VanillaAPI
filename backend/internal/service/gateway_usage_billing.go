@@ -833,6 +833,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 			}
 		}
 	}
+	s.billingService.warnSelectedFallbackPricing(cost)
 
 	// 判断计费方式：订阅模式 vs 余额模式
 	isSubscriptionBilling := subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
@@ -1171,7 +1172,7 @@ func (s *GatewayService) hasResolvableTokenPricing(ctx context.Context, model st
 	if s.billingService == nil {
 		return false
 	}
-	_, err := s.billingService.GetModelPricing(model)
+	_, err := s.billingService.GetModelPricingQuiet(model)
 	return err == nil
 }
 
@@ -1198,7 +1199,7 @@ func (s *GatewayService) resolveChannelPricing(ctx context.Context, billingModel
 		return nil
 	}
 	gid := apiKey.Group.ID
-	resolved := s.resolver.Resolve(ctx, PricingInput{Model: billingModel, PricingAt: GatewayTokenRequestPricingAtFromContext(ctx), GroupID: &gid, Group: apiKey.Group})
+	resolved := s.resolver.resolveQuiet(ctx, PricingInput{Model: billingModel, PricingAt: GatewayTokenRequestPricingAtFromContext(ctx), GroupID: &gid, Group: apiKey.Group})
 	if resolved.Source == PricingSourceGroup || resolved.Source == PricingSourceChannel {
 		return resolved
 	}
@@ -1325,20 +1326,21 @@ func (s *GatewayService) calculateTokenCost(
 	var resolved *ResolvedPricing
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
-		resolved = s.resolver.Resolve(ctx, PricingInput{Model: billingModel, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
+		resolved = s.resolver.resolveQuiet(ctx, PricingInput{Model: billingModel, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
 	}
 
 	cost, err := s.billingService.CalculateTokenCostForRequest(TokenCostRequest{
-		Ctx:             ctx,
-		Model:           billingModel,
-		Group:           apiKey.Group,
-		Tokens:          result.Usage.billingUsageTokens(),
-		RateMultiplier:  multiplier,
-		PricingAt:       pricingAt,
-		ServiceTier:     optionalStringValue(result.ServiceTier),
-		ReasoningEffort: optionalStringValue(result.ReasoningEffort),
-		Resolver:        s.resolver,
-		Resolved:        resolved,
+		Ctx:               ctx,
+		Model:             billingModel,
+		Group:             apiKey.Group,
+		Tokens:            result.Usage.billingUsageTokens(),
+		RateMultiplier:    multiplier,
+		PricingAt:         pricingAt,
+		ServiceTier:       optionalStringValue(result.ServiceTier),
+		ReasoningEffort:   optionalStringValue(result.ReasoningEffort),
+		Resolver:          s.resolver,
+		Resolved:          resolved,
+		deferFallbackWarn: true,
 	})
 	if err != nil {
 		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)

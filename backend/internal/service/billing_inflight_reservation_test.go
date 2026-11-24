@@ -415,6 +415,15 @@ func TestInflightEstimate_AccountLevelMappingFallsBackLikeBilling(t *testing.T) 
 		best = math.Max(best, c)
 	}
 	require.InDelta(t, best, est, 1e-12, "estimate = max over candidate account-mapped billing models")
+
+	svc.resolver = nil
+	withoutResolver, priced := svc.EstimateInflightReservation(ctx, apiKey, InflightEstimateRequest{Model: "acct-alias-31", BodyBytes: 4000, MaxTokens: 1000})
+	require.True(t, priced)
+	require.InDelta(t, est, withoutResolver, 1e-12)
+	svc.billingService.fallbackWarnSeen.Range(func(model, _ any) bool {
+		t.Errorf("inflight estimate should not mark model %q as warned", model)
+		return true
+	})
 }
 
 type inflightSnapshotCacheStub struct {

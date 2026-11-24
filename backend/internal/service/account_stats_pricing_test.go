@@ -1041,6 +1041,8 @@ func TestResolveAccountStatsCost_Gemini36FlashTierUsesFallbackPricing(t *testing
 	)
 	require.NotNil(t, result)
 	require.InDelta(t, 4.575, *result, 1e-12)
+	_, warned := bs.fallbackWarnSeen.Load("gemini-3.6-flash-low")
+	require.False(t, warned, "account statistics should not mark the model as warned")
 }
 
 func TestResolveAccountStatsCost_AllMiss_ReturnsNil(t *testing.T) {

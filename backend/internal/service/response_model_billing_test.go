@@ -28,10 +28,12 @@ const (
 // 使断言不依赖两个具体模型的价格大小关系（价格表调整时测试仍然自洽）。
 func orderedResponseBillingModels(t *testing.T, svc *BillingService, tokens UsageTokens, a, b string) (string, string, *CostBreakdown, *CostBreakdown) {
 	t.Helper()
-	costA, err := svc.CalculateCost(a, tokens, 1.1)
+	pricingA, err := svc.GetModelPricingQuiet(a)
 	require.NoError(t, err)
-	costB, err := svc.CalculateCost(b, tokens, 1.1)
+	pricingB, err := svc.GetModelPricingQuiet(b)
 	require.NoError(t, err)
+	costA := svc.computeTokenBreakdown(pricingA, tokens, 1.1, "", true)
+	costB := svc.computeTokenBreakdown(pricingB, tokens, 1.1, "", true)
 	require.NotEqual(t, costA.TotalCost, costB.TotalCost, "fixture prices for %s and %s must differ", a, b)
 	require.True(t, svc.HasIdentifiedTokenPricing(a), "fixture model %s must be identifiable in the pricing table", a)
 	require.True(t, svc.HasIdentifiedTokenPricing(b), "fixture model %s must be identifiable in the pricing table", b)
@@ -39,6 +41,16 @@ func orderedResponseBillingModels(t *testing.T, svc *BillingService, tokens Usag
 		return a, b, costA, costB
 	}
 	return b, a, costB, costA
+}
+
+func requireOnlyFallbackWarningFor(t *testing.T, billing *BillingService, model string) {
+	t.Helper()
+	var warned []string
+	billing.fallbackWarnSeen.Range(func(key, _ any) bool {
+		warned = append(warned, key.(string))
+		return true
+	})
+	require.Equal(t, []string{model}, warned)
 }
 
 // --- Anthropic gateway (GatewayService.RecordUsage) ---
@@ -81,6 +93,7 @@ func TestGatewayServiceRecordUsage_ResponseModelBillsCheaperResponseModel(t *tes
 	require.Equal(t, cheaper, *usageRepo.lastLog.UpstreamResponseModel)
 	require.NotNil(t, usageRepo.lastLog.UpstreamModelMismatch)
 	require.True(t, *usageRepo.lastLog.UpstreamModelMismatch)
+	requireOnlyFallbackWarningFor(t, svc.billingService, cheaper)
 }
 
 func TestGatewayServiceRecordUsage_ResponseModelRejectsPricierResponseModel(t *testing.T) {
@@ -113,6 +126,7 @@ func TestGatewayServiceRecordUsage_ResponseModelRejectsPricierResponseModel(t *t
 	require.NotNil(t, usageRepo.lastLog)
 	require.InDelta(t, cheaperCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.InDelta(t, cheaperCost.ActualCost, userRepo.lastAmount, 1e-12)
+	requireOnlyFallbackWarningFor(t, svc.billingService, cheaper)
 }
 
 func TestGatewayServiceRecordUsage_ResponseModelSafeFallbacks(t *testing.T) {
@@ -221,6 +235,7 @@ func TestOpenAIGatewayServiceRecordUsage_ResponseModelBillsCheaperResponseModel(
 	require.Equal(t, cheaper, *usageRepo.lastLog.UpstreamResponseModel)
 	require.NotNil(t, usageRepo.lastLog.UpstreamModelMismatch)
 	require.True(t, *usageRepo.lastLog.UpstreamModelMismatch)
+	requireOnlyFallbackWarningFor(t, svc.billingService, cheaper)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ResponseModelRejectsPricierResponseModel(t *testing.T) {
@@ -254,6 +269,7 @@ func TestOpenAIGatewayServiceRecordUsage_ResponseModelRejectsPricierResponseMode
 	require.NotNil(t, usageRepo.lastLog)
 	require.InDelta(t, cheaperCost.ActualCost, usageRepo.lastLog.ActualCost, 1e-12)
 	require.InDelta(t, cheaperCost.ActualCost, userRepo.lastAmount, 1e-12)
+	requireOnlyFallbackWarningFor(t, svc.billingService, cheaper)
 }
 
 func TestOpenAIGatewayServiceRecordUsage_ResponseModelSafeFallbacks(t *testing.T) {

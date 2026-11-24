@@ -266,6 +266,7 @@ func (s *GatewayService) recordAdvisorUsages(ctx context.Context, input *recordU
 			errs = append(errs, fmt.Errorf("bill advisor iteration %d: %w", i+1, err))
 			continue
 		}
+		s.billingService.warnSelectedFallbackPricing(cost)
 		segment := ForwardResult{
 			Usage:                 iteration.usage,
 			Model:                 model,
@@ -294,9 +295,9 @@ func (s *GatewayService) calculateAdvisorTokenCost(ctx context.Context, apiKey *
 	var resolved *ResolvedPricing
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
-		resolved = s.resolver.Resolve(ctx, PricingInput{Model: model, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
+		resolved = s.resolver.resolveQuiet(ctx, PricingInput{Model: model, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
 		if resolved.Mode != BillingModeToken {
-			catalog := s.resolver.Resolve(ctx, PricingInput{Model: model, PricingAt: pricingAt})
+			catalog := s.resolver.resolveQuiet(ctx, PricingInput{Model: model, PricingAt: pricingAt})
 			catalog.longContextPricingEnabled = resolved.longContextPricingEnabled
 			resolved = catalog
 		}
@@ -307,6 +308,6 @@ func (s *GatewayService) calculateAdvisorTokenCost(ctx context.Context, apiKey *
 	}
 	return s.billingService.CalculateTokenCostForRequest(TokenCostRequest{
 		Ctx: ctx, Model: model, Group: apiKey.Group, Tokens: tokens, RateMultiplier: multiplier,
-		PricingAt: pricingAt, Resolver: s.resolver, Resolved: resolved,
+		PricingAt: pricingAt, Resolver: s.resolver, Resolved: resolved, deferFallbackWarn: true,
 	})
 }
