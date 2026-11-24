@@ -336,6 +336,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 			cost.ActualCost = standardCost.ActualCost
 		}
 	}
+	s.billingService.warnSelectedFallbackPricing(cost)
 
 	// Determine billing type
 	isSubscriptionBilling := subscription != nil && apiKey.Group != nil && apiKey.Group.IsSubscriptionType()
@@ -762,6 +763,7 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageTokenCost(
 		Ctx: ctx, Model: billingModel, Tokens: tokens, RequestCount: 1, RateMultiplier: multiplier,
 		PricingAt: pricingAt, ServiceTier: serviceTier, LongContextBillingEnabled: longContextBillingGate,
 		DisableModelLongContextPricing: modelLongContextExempt,
+		deferFallbackWarn:              true,
 	}
 	if s.resolver != nil && apiKey.Group != nil {
 		input.GroupID = &apiKey.Group.ID
@@ -991,7 +993,7 @@ func (s *OpenAIGatewayService) resolveOpenAIChannelPricing(ctx context.Context, 
 		return nil
 	}
 	gid := apiKey.Group.ID
-	resolved := s.resolver.Resolve(ctx, PricingInput{Model: billingModel, PricingAt: GatewayTokenRequestPricingAtFromContext(ctx), GroupID: &gid, Group: apiKey.Group})
+	resolved := s.resolver.resolveQuiet(ctx, PricingInput{Model: billingModel, PricingAt: GatewayTokenRequestPricingAtFromContext(ctx), GroupID: &gid, Group: apiKey.Group})
 	if resolved.Source == PricingSourceGroup || resolved.Source == PricingSourceChannel {
 		return resolved
 	}

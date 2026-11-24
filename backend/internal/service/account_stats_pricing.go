@@ -85,7 +85,7 @@ func tryModelFilePricing(billingService *BillingService, model string, tokens Us
 		reasoningEffort = reasoningEfforts[0]
 	}
 	resolver := NewModelPricingResolver(nil, billingService)
-	resolved := resolver.Resolve(context.Background(), PricingInput{Model: model, PricingAt: pricingAt})
+	resolved := resolver.resolveQuiet(context.Background(), PricingInput{Model: model, PricingAt: pricingAt})
 	// 无分组的解析结果默认开启长上下文，CostInput.LongContextBillingEnabled=false 无法否决，
 	// 因此直接覆写解析结果。
 	resolved.longContextPricingEnabled = longContextPricingEnabled

@@ -505,6 +505,8 @@ func TestAnthropicAdvisorBillingSourcesAndFallback(t *testing.T) {
 			if tt.name == "missing" {
 				require.Equal(t, 1, strings.Count(logs.String(), "billing.advisor_price_fallback"))
 				require.Contains(t, logs.String(), "level=WARN msg=billing.advisor_price_fallback advisor_model="+tt.model+" main_model="+advisorMainModel)
+				_, warned := svc.billingService.fallbackWarnSeen.Load(tt.model)
+				require.False(t, warned, "rejected advisor model should not be marked as warned")
 			}
 		})
 	}

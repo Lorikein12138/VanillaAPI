@@ -43,6 +43,7 @@ type ResolvedPricing struct {
 	channelPricing *ChannelModelPricing
 
 	longContextPricingEnabled bool
+	builtinFallback           bool
 }
 
 // ModelPricingResolver 统一模型定价解析器。
@@ -68,10 +69,17 @@ type PricingInput struct {
 	PricingAt time.Time
 }
 
-// Resolve 解析模型定价。
-// 1. 获取基础定价（LiteLLM → Fallback）
-// 2. 如果指定了 GroupID，查找渠道定价并覆盖
+// Resolve 解析计费定价。最终使用内置兜底价时记录告警。
 func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) *ResolvedPricing {
+	return r.resolve(ctx, input, true)
+}
+
+// resolveQuiet 供展示和候选探测使用。
+func (r *ModelPricingResolver) resolveQuiet(ctx context.Context, input PricingInput) *ResolvedPricing {
+	return r.resolve(ctx, input, false)
+}
+
+func (r *ModelPricingResolver) resolve(ctx context.Context, input PricingInput, warnOnFallback bool) *ResolvedPricing {
 	longContextPricingEnabled := input.Group == nil || input.Group.LongContextPricingEnabled
 	if groupPricing := matchGroupModelPricing(input.Group, input.Model); groupPricing != nil {
 		// Group token cards only override the first-tier / flat rates.
@@ -108,7 +116,7 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 	}
 
 	// 1. 获取基础定价
-	basePricing, source := r.resolveBasePricing(input.Model, input.PricingAt)
+	basePricing, source, builtinFallback := r.resolveBasePricing(input.Model, input.PricingAt)
 
 	resolved := &ResolvedPricing{
 		Mode:                   BillingModeToken,
@@ -127,6 +135,10 @@ func (r *ModelPricingResolver) Resolve(ctx context.Context, input PricingInput) 
 		r.applyChannelOverrides(ctx, *input.GroupID, input.Model, resolved)
 	}
 
+	resolved.builtinFallback = builtinFallback && resolved.channelPricing == nil
+	if warnOnFallback && resolved.builtinFallback {
+		r.billingService.warnBuiltinFallbackPricing(input.Model)
+	}
 	return resolved
 }
 
@@ -140,7 +152,7 @@ func (r *ModelPricingResolver) resolveConfiguredPricing(config *ChannelModelPric
 		r.applyRequestTierOverrides(config, resolved)
 		return resolved
 	}
-	resolved.BasePricing, _ = r.resolveBasePricing(model, pricingAt)
+	resolved.BasePricing, _, _ = r.resolveBasePricing(model, pricingAt)
 	resolved.SupportsCacheBreakdown = resolved.BasePricing != nil && resolved.BasePricing.SupportsCacheBreakdown
 	r.applyTokenOverrides(config, resolved)
 	return resolved
@@ -170,14 +182,14 @@ func matchGroupModelPricing(group *Group, model string) *ChannelModelPricing {
 }
 
 // resolveBasePricing 从 LiteLLM 或 Fallback 获取基础定价
-func (r *ModelPricingResolver) resolveBasePricing(model string, pricingAt time.Time) (*ModelPricing, string) {
-	pricing, err := r.billingService.getModelPricingAt(model, pricingAt)
+func (r *ModelPricingResolver) resolveBasePricing(model string, pricingAt time.Time) (*ModelPricing, string, bool) {
+	pricing, builtinFallback, err := r.billingService.lookupBaseModelPricingAt(model, pricingAt)
 	if err != nil {
 		slog.Debug("failed to get model pricing from LiteLLM, using fallback",
 			"model", model, "error", err)
-		return nil, PricingSourceFallback
+		return nil, PricingSourceFallback, false
 	}
-	return pricing, PricingSourceLiteLLM
+	return pricing, PricingSourceLiteLLM, builtinFallback
 }
 
 // lookupChannelPricingNormalized 查找渠道定价：先用字面模型名做精确/通配匹配，

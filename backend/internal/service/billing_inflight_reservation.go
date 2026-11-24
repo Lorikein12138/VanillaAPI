@@ -552,7 +552,7 @@ func (d inflightEstimateDeps) estimateOne(ctx context.Context, apiKey *APIKey, m
 			in.GroupID = apiKey.GroupID
 			in.Group = apiKey.Group
 		}
-		resolved = d.resolver.Resolve(ctx, in)
+		resolved = d.resolver.resolveQuiet(ctx, in)
 	}
 
 	inputTokens, outputTokens := tokenCounts(cfg, req.BodyBytes, req.MaxTokens)
@@ -562,7 +562,7 @@ func (d inflightEstimateDeps) estimateOne(ctx context.Context, apiKey *APIKey, m
 			pricing = d.resolver.GetIntervalPricing(resolved, inputTokens)
 		}
 		if pricing == nil && d.billing != nil {
-			pricing, _ = d.billing.GetModelPricing(model)
+			pricing, _ = d.billing.GetModelPricingQuiet(model)
 		}
 		if pricing == nil {
 			return 0

@@ -34,6 +34,33 @@ func newTestBillingService() *BillingService {
 	return NewBillingService(&config.Config{}, nil)
 }
 
+func TestBuiltinFallbackWarnOnLegacyBillingPaths(t *testing.T) {
+	const model = "claude-sonnet-4"
+	const warning = "Using fallback pricing for model: " + model
+	t.Run("nil channel", func(t *testing.T) {
+		billing := newTestBillingService()
+		logs := captureStdLog(t)
+		quiet, err := billing.GetModelPricingQuiet(model)
+		require.NoError(t, err)
+		require.NotContains(t, logs.String(), warning)
+
+		pricing, err := billing.GetModelPricingWithChannel(strings.ToUpper(model), nil)
+		require.NoError(t, err)
+		require.Equal(t, quiet, pricing)
+		require.Equal(t, 1, strings.Count(logs.String(), warning))
+	})
+	t.Run("without resolver", func(t *testing.T) {
+		billing := newTestBillingService()
+		logs := captureStdLog(t)
+		cost, err := billing.CalculateCostUnified(CostInput{
+			Model: model, Tokens: UsageTokens{InputTokens: 1_000_000}, RateMultiplier: 1,
+		})
+		require.NoError(t, err)
+		require.InDelta(t, 3, cost.InputCost, 1e-12)
+		require.Equal(t, 1, strings.Count(logs.String(), warning))
+	})
+}
+
 func newTestBillingServiceWithOpenAILadderCatalog(t *testing.T) *BillingService {
 	t.Helper()
 	return NewBillingService(&config.Config{}, newStubPricingServiceFromJSON(t, openAILadderCatalogJSON))

@@ -75,7 +75,7 @@ const contextProbeDelta = 1000
 
 // ResolveContextPricingSchedule 解析分组+模型的上下文阶梯单价表。
 //
-// 解析链与扣费完全一致：Resolver.Resolve（分组卡 → 渠道 → 目录 → 策略）给出定价，
+// 解析链与扣费完全一致：Resolver（分组卡 → 渠道 → 目录 → 策略）给出定价，
 // CalculateCostUnified 使用已经解析的价格给出路径（分组/渠道定价 → 内置目录）。
 // 断点只取自计费自身的规则输入（渠道区间边界、目录阶梯阈值），
 // 每一段的单价由真实计费函数在该段内两点探针的差商得到，因此倍率、策略等
@@ -98,7 +98,7 @@ func (s *BillingService) ResolveContextPricingSchedule(ctx context.Context, reso
 		gid := in.Group.ID
 		pricingInput.GroupID = &gid
 	}
-	resolved := resolver.Resolve(ctx, pricingInput)
+	resolved := resolver.resolveQuiet(ctx, pricingInput)
 	if resolved == nil {
 		return nil, ErrModelPricingUnavailable
 	}
