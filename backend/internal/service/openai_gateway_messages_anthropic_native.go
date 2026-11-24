@@ -105,6 +105,10 @@ func (s *OpenAIGatewayService) forwardAnthropicViaNativeAnthropicEndpoint(
 	upstreamReq, _, err := s.buildNativeAnthropicUpstreamRequest(upstreamCtx, c, account, body, apiKey, targetURL)
 	releaseUpstreamCtx()
 	if err != nil {
+		var blocked *BetaBlockedError
+		if errors.As(err, &blocked) {
+			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", blocked.Message)
+		}
 		return nil, err
 	}
 
@@ -169,19 +173,13 @@ func (s *OpenAIGatewayService) buildNativeAnthropicUpstreamRequest(
 	targetURL string,
 	sessionBodies ...[]byte,
 ) (*http.Request, []byte, error) {
-	// 能力维度 body sanitize：与 Anthropic 平台 passthrough 相同，按 beta
-	// header 决定是否保留 body 中的 beta 能力字段，避免客户端"body 带字段但
-	// header 忘带 token"的 bug 让第三方上游 400。
-	clientBeta := ""
-	if c != nil && c.Request != nil {
-		clientBeta = getHeaderRaw(c.Request.Header, "anthropic-beta")
+	model := gjson.GetBytes(body, "model").String()
+	beta, err := prepareAnthropicPassthroughBeta(ctx, c, s.settingService, account, model)
+	if err != nil {
+		return nil, nil, err
 	}
-	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
-		clientBeta = beta
-	}
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, clientBeta); changed {
-		body = sanitized
-	}
+	finalBeta := beta.finalize(beta.client, body, model)
+	body = beta.sanitizePassthroughBody(body, finalBeta)
 
 	// Ollama Cloud DeepSeek 出站 max_tokens clamp：判定与 nativeAnthropicTargetURL
 	// 的 base 取值同源（GetAnthropicProtocolBaseURL，adaptive 时是 Anthropic 协议
@@ -226,12 +224,7 @@ func (s *OpenAIGatewayService) buildNativeAnthropicUpstreamRequest(
 	// UA 会命中其前置 Cloudflare bot 拦截（CF 1010/403），并被计入账号 403 strike。
 	applyOpenCodeUpstreamUserAgent(account, targetURL, req.Header)
 
-	// 账号级请求头覆写（最终生效，覆盖上面所有来源的同名头）
-	account.ApplyHeaderOverrides(req.Header)
-	filterSonnet55ToolsetBetaHeader(req.Header, body, gjson.GetBytes(body, "model").String())
-	if c != nil && c.Request != nil {
-		restoreAnthropicAdvisorBeta(c.Request.Header, req.Header)
-	}
+	beta.applyHeaders(ctx, req.Header, account, finalBeta)
 	payloads := append([][]byte{body}, sessionBodies...)
 	applyOpenCodeSessionHeader(c, account, targetURL, req.Header, payloads...)
 

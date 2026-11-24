@@ -119,6 +119,10 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 	upstreamReq, forwardedBody, err := s.buildNativeAnthropicUpstreamRequest(upstreamCtx, c, account, anthropicBody, apiKey, targetURL, body)
 	releaseUpstreamCtx()
 	if err != nil {
+		var blocked *BetaBlockedError
+		if errors.As(err, &blocked) {
+			writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", blocked.Message)
+		}
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 

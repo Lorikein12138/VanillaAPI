@@ -312,20 +312,14 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 		targetURL = buildAnthropicMessagesURL(validatedURL)
 	}
 
-	// 能力维度 body sanitize：透传路径上 anthropic-beta header 原样透传客户端值，
-	// 依此决定是否保留 body 中的 context_management。避免“客户端 body 带字段但
-	// header 忘记带 beta token”的客户端 bug 在透传场景下让上游 400。
-	clientBeta := ""
-	if c != nil && c.Request != nil {
-		clientBeta = getHeaderRaw(c.Request.Header, "anthropic-beta")
+	model := gjson.GetBytes(body, "model").String()
+	beta, err := prepareAnthropicPassthroughBeta(ctx, c, s.settingService, account, model)
+	if err != nil {
+		return nil, nil, err
 	}
-	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值：净化以覆写值为准
-	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
-		clientBeta = beta
-	}
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, clientBeta); changed {
-		body = sanitized
-	}
+	finalBeta := beta.finalize(beta.client, body, model)
+	body = beta.sanitizePassthroughBody(body, finalBeta)
+	beginAnthropicAdvisorResponseForBeta(c, account, body, containsBetaToken(finalBeta, anthropicAdvisorBeta))
 
 	// Ollama Cloud DeepSeek 出站 max_tokens clamp：判定与上方 targetURL 的
 	// base 取值同源，详见 helper 注释。
@@ -365,12 +359,7 @@ func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
 		setHeaderRaw(req.Header, "anthropic-version", "2023-06-01")
 	}
 
-	// 账号级请求头覆写（最终生效，覆盖上面所有来源的同名头）
-	account.ApplyHeaderOverrides(req.Header)
-	filterSonnet55ToolsetBetaHeader(req.Header, body, gjson.GetBytes(body, "model").String())
-	if c != nil && c.Request != nil {
-		restoreAnthropicAdvisorBeta(c.Request.Header, req.Header)
-	}
+	beta.applyHeaders(ctx, req.Header, account, finalBeta)
 
 	return req, body, nil
 }

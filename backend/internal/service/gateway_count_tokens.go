@@ -153,7 +153,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	// 构建上游请求
 	upstreamReq, wireBody, err := s.buildCountTokensRequest(ctx, c, account, body, token, tokenType, reqModel, shouldMimicClaudeCode)
 	if err != nil {
-		s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		s.writeCountTokensBuildError(c, err)
 		return err
 	}
 	// 先记录首发 wire body；如果后面进入 400 retry，retry 会基于未签名的逻辑 body 重新构建。
@@ -287,7 +287,7 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 
 	upstreamReq, err := s.buildCountTokensRequestAnthropicAPIKeyPassthrough(ctx, c, account, body, token)
 	if err != nil {
-		s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
+		s.writeCountTokensBuildError(c, err)
 		return err
 	}
 
@@ -414,18 +414,13 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 	}
 	body = sanitizeCountTokensRequestBody(body)
 
-	// 同 buildUpstreamRequestAnthropicAPIKeyPassthrough：能力维度 sanitize。
-	clientBeta := ""
-	if c != nil && c.Request != nil {
-		clientBeta = getHeaderRaw(c.Request.Header, "anthropic-beta")
+	model := gjson.GetBytes(body, "model").String()
+	beta, err := prepareAnthropicPassthroughBeta(ctx, c, s.settingService, account, model)
+	if err != nil {
+		return nil, err
 	}
-	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值：净化以覆写值为准
-	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
-		clientBeta = beta
-	}
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, clientBeta); changed {
-		body = sanitized
-	}
+	finalBeta := beta.finalize(beta.client, body, model)
+	body = beta.sanitizePassthroughBody(body, finalBeta)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -460,9 +455,7 @@ func (s *GatewayService) buildCountTokensRequestAnthropicAPIKeyPassthrough(
 		setHeaderRaw(req.Header, "anthropic-version", "2023-06-01")
 	}
 
-	// 账号级请求头覆写（最终生效，覆盖上面所有来源的同名头）
-	account.ApplyHeaderOverrides(req.Header)
-	filterSonnet55ToolsetBetaHeader(req.Header, body, gjson.GetBytes(body, "model").String())
+	beta.applyHeaders(ctx, req.Header, account, finalBeta)
 
 	return req, nil
 }
@@ -535,21 +528,17 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 
 	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===
 	// 顺序约束同 buildUpstreamRequest。
-	ctEffectiveDropSet := mergeDropSets(s.getBetaPolicyFilterSet(ctx, c, account, modelID))
-	finalBetaHeader, finalBetaShouldSet := s.computeFinalCountTokensAnthropicBeta(
-		tokenType, mimicClaudeCode, modelID, clientHeaders, body, ctEffectiveDropSet,
-	)
-
-	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值：净化以覆写值为准
-	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
-		finalBetaHeader, finalBetaShouldSet = beta, true
+	beta, err := prepareAnthropicBeta(ctx, c, s.settingService, account, modelID, false)
+	if err != nil {
+		return nil, nil, err
 	}
-	finalBetaHeader = filterSonnet55ToolsetBeta(finalBetaHeader, body, modelID)
+	finalBetaHeader, _ := s.computeFinalCountTokensAnthropicBeta(
+		tokenType, mimicClaudeCode, modelID, clientHeaders, body, mergeDropSets(beta.filterSet),
+	)
+	finalBetaHeader = beta.finalize(finalBetaHeader, body, modelID)
 
 	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
-		body = sanitized
-	}
+	body = sanitizeAnthropicOverrideBody(body, finalBetaHeader)
 
 	body = sanitizeCountTokensRequestBody(body)
 
@@ -599,12 +588,6 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		applyClaudeCodeMimicHeaders(req, false, ctMimicUserAgent)
 	}
 
-	// 写入最终 anthropic-beta header（Del 一次避免白名单透传值残留）
-	deleteHeaderAllForms(req.Header, "anthropic-beta")
-	if finalBetaShouldSet {
-		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
-	}
-
 	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
 	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
@@ -615,8 +598,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 
 	// 账号级请求头覆写（仅 anthropic/openai api_key 账号启用时生效；OAuth 路径 no-op）
-	account.ApplyHeaderOverrides(req.Header)
-	filterSonnet55ToolsetBetaHeader(req.Header, body, modelID)
+	beta.applyHeaders(ctx, req.Header, account, finalBetaHeader)
 
 	if c != nil && tokenType == "oauth" {
 		c.Set(claudeMimicDebugInfoKey, newClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode))
@@ -649,6 +631,15 @@ func sanitizeCountTokensRequestBody(body []byte) []byte {
 		}
 	}
 	return out
+}
+
+func (s *GatewayService) writeCountTokensBuildError(c *gin.Context, err error) {
+	var blocked *BetaBlockedError
+	if errors.As(err, &blocked) {
+		s.countTokensError(c, http.StatusBadRequest, "invalid_request_error", blocked.Message)
+		return
+	}
+	s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
 }
 
 // countTokensError 返回 count_tokens 错误响应

@@ -120,6 +120,10 @@ func (s *OpenAIGatewayService) forwardResponsesViaNativeAnthropic(
 	upstreamReq, forwardedBody, err := s.buildNativeAnthropicUpstreamRequest(upstreamCtx, c, account, anthropicBody, apiKey, targetURL, body)
 	releaseUpstreamCtx()
 	if err != nil {
+		var blocked *BetaBlockedError
+		if errors.As(err, &blocked) {
+			writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", blocked.Message)
+		}
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 	// Bill the Anthropic effort actually sent upstream (for example xhigh → max).

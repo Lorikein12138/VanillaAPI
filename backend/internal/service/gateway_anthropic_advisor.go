@@ -73,12 +73,17 @@ type anthropicAdvisorResponse struct {
 }
 
 func beginAnthropicAdvisorResponse(c *gin.Context, account *Account, body []byte) *anthropicAdvisorResponse {
+	optedIn := c != nil && c.Request != nil && hasAnthropicAdvisorBeta(c.Request.Header)
+	return beginAnthropicAdvisorResponseForBeta(c, account, body, optedIn)
+}
+
+func beginAnthropicAdvisorResponseForBeta(c *gin.Context, account *Account, body []byte, enabled bool) *anthropicAdvisorResponse {
 	if c == nil {
 		return nil
 	}
 	var advisor *anthropicAdvisorResponse
 	if account != nil && !account.IsBedrock() &&
-		account.Type != AccountTypeServiceAccount && c.Request != nil && hasAnthropicAdvisorBeta(c.Request.Header) {
+		account.Type != AccountTypeServiceAccount && enabled {
 		tool := gjson.GetBytes(body, `tools.#(type=="advisor_20260301")`)
 		if model := tool.Get("model").String(); model != "" {
 			advisor = &anthropicAdvisorResponse{requestedModel: model}

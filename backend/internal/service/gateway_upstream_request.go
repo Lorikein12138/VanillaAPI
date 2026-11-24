@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/gin-gonic/gin"
 )
@@ -137,26 +138,18 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	//      被 Anthropic 判 third-party）
 	//   4) NewRequest（body 至此最终敲定）
 	//   5) 透传白名单 / fingerprint / mimic header / 写入 finalBeta
-	policyFilterSet := s.getBetaPolicyFilterSet(ctx, c, account, modelID)
-	effectiveDropSet := mergeDropSets(policyFilterSet)
-	finalBetaHeader, finalBetaShouldSet := s.computeFinalAnthropicBeta(
-		tokenType, mimicClaudeCode, modelID, clientHeaders, body, effectiveDropSet,
+	beta, err := prepareAnthropicBeta(ctx, c, s.settingService, account, modelID, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	finalBetaHeader, _ := s.computeFinalAnthropicBeta(
+		tokenType, mimicClaudeCode, modelID, clientHeaders, body, mergeDropSets(beta.filterSet),
 	)
-
-	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值（由下方 ApplyHeaderOverrides 写入）：
-	// body 能力净化必须以覆写值为准，否则 header/body 不对称会被上游 400。
-	if beta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
-		finalBetaHeader, finalBetaShouldSet = beta, true
-	}
-	if hasAnthropicAdvisorBeta(clientHeaders) {
-		finalBetaHeader, finalBetaShouldSet = retainAnthropicAdvisorBeta(finalBetaHeader), true
-	}
-	finalBetaHeader = filterSonnet55ToolsetBeta(finalBetaHeader, body, modelID)
+	finalBetaHeader = beta.finalize(finalBetaHeader, body, modelID)
 
 	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
-		body = sanitized
-	}
+	body = sanitizeAnthropicOverrideBody(body, finalBetaHeader)
+	beginAnthropicAdvisorResponseForBeta(c, account, body, containsBetaToken(finalBetaHeader, anthropicAdvisorBeta))
 
 	// Ollama Cloud DeepSeek 出站 max_tokens clamp：判定与上方 targetURL 的
 	// base 取值同源，仅实际上游为 ollama.com 且映射后出站模型
@@ -216,14 +209,6 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		applyClaudeCodeMimicHeaders(req, reqStream, mimicUserAgent)
 	}
 
-	// 写入最终 anthropic-beta header
-	// 注：透传分支白名单可能写入了客户端 anthropic-beta，无条件 Del 一次再按 finalBeta
-	// 决定是否 set，确保 dropSet 过滤后的结果一定覆盖客户端原始值。
-	deleteHeaderAllForms(req.Header, "anthropic-beta")
-	if finalBetaShouldSet {
-		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
-	}
-
 	// 同步 X-Claude-Code-Session-Id 头：取 body 中已处理的 metadata.user_id 的 session_id 覆盖
 	if sessionHeader := getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"); sessionHeader != "" {
 		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
@@ -235,9 +220,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 	// 账号级请求头覆写（仅 anthropic/openai api_key 账号启用时生效；OAuth 路径 no-op）。
 	// 放在所有 header 逻辑之后，确保配置值对同名头拥有最终决定权。
-	account.ApplyHeaderOverrides(req.Header)
-	filterSonnet55ToolsetBetaHeader(req.Header, body, modelID)
-	restoreAnthropicAdvisorBeta(clientHeaders, req.Header)
+	beta.applyHeaders(ctx, req.Header, account, finalBetaHeader)
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
 	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
@@ -337,6 +320,9 @@ func (s *GatewayService) buildUpstreamRequestAnthropicVertex(
 	clientBeta := ""
 	if c != nil && c.Request != nil {
 		clientBeta = getHeaderRaw(c.Request.Header, "anthropic-beta")
+		if hasAnthropicAdvisorBeta(c.Request.Header) {
+			clientBeta = retainAnthropicAdvisorBeta(clientBeta)
+		}
 	}
 	policy := s.evaluateBetaPolicy(ctx, clientBeta, account, modelID)
 	if policy.blockErr != nil {
@@ -495,18 +481,6 @@ func filterSonnet55ToolsetBeta(header string, body []byte, modelID string) strin
 	return header
 }
 
-func filterSonnet55ToolsetBetaHeader(headers http.Header, body []byte, modelID string) {
-	header := getHeaderRaw(headers, "anthropic-beta")
-	filtered := filterSonnet55ToolsetBeta(header, body, modelID)
-	if filtered == header {
-		return
-	}
-	deleteHeaderAllForms(headers, "anthropic-beta")
-	if filtered != "" {
-		setHeaderRaw(headers, "anthropic-beta", filtered)
-	}
-}
-
 func applyClaudeOAuthHeaderDefaults(req *http.Request) {
 	if req == nil {
 		return
@@ -597,7 +571,7 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 	defer func() { beta = filterSonnet55ToolsetBeta(beta, body, modelID) }()
 	clientBeta := ""
 	if clientHeaders != nil {
-		clientBeta = getHeaderRaw(clientHeaders, "anthropic-beta")
+		clientBeta = strings.Join(headerValuesFold(clientHeaders, "anthropic-beta"), ",")
 	}
 
 	if tokenType == "oauth" {
@@ -657,7 +631,7 @@ func (s *GatewayService) computeFinalCountTokensAnthropicBeta(
 	defer func() { beta = filterSonnet55ToolsetBeta(beta, body, modelID) }()
 	clientBeta := ""
 	if clientHeaders != nil {
-		clientBeta = getHeaderRaw(clientHeaders, "anthropic-beta")
+		clientBeta = strings.Join(headerValuesFold(clientHeaders, "anthropic-beta"), ",")
 	}
 
 	if tokenType == "oauth" {
@@ -738,10 +712,14 @@ type betaPolicyResult struct {
 
 // evaluateBetaPolicy loads settings once and evaluates all rules against the given request.
 func (s *GatewayService) evaluateBetaPolicy(ctx context.Context, betaHeader string, account *Account, model string) betaPolicyResult {
-	if s.settingService == nil {
+	return evaluateBetaPolicy(ctx, s.settingService, betaHeader, account, model)
+}
+
+func evaluateBetaPolicy(ctx context.Context, settingService *SettingService, betaHeader string, account *Account, model string) betaPolicyResult {
+	if settingService == nil {
 		return betaPolicyResult{}
 	}
-	settings, err := s.settingService.GetBetaPolicySettings(ctx)
+	settings, err := settingService.GetBetaPolicySettings(ctx)
 	if err != nil || settings == nil {
 		return betaPolicyResult{}
 	}
@@ -794,19 +772,122 @@ func mergeDropSets(policySet map[string]struct{}, extra ...string) map[string]st
 // betaPolicyFilterSetKey is the gin.Context key for caching the policy filter set within a request.
 const betaPolicyFilterSetKey = "betaPolicyFilterSet"
 
-// getBetaPolicyFilterSet returns the beta policy filter set, using the gin context cache if available.
-// In the /v1/messages path, Forward() evaluates the policy first and caches the result;
-// buildUpstreamRequest reuses it (zero extra DB calls). In the count_tokens path, this
-// evaluates on demand (one DB call).
-func (s *GatewayService) getBetaPolicyFilterSet(ctx context.Context, c *gin.Context, account *Account, model string) map[string]struct{} {
-	if c != nil {
-		if v, ok := c.Get(betaPolicyFilterSetKey); ok {
-			if fs, ok := v.(map[string]struct{}); ok {
-				return fs
+type anthropicBetaInput struct {
+	client     string
+	override   string
+	loggable   string
+	overridden bool
+	filterSet  map[string]struct{}
+}
+
+func readAnthropicBeta(ctx context.Context, c *gin.Context, account *Account) anthropicBetaInput {
+	var beta anthropicBetaInput
+	if c != nil && c.Request != nil {
+		beta.client = strings.Join(headerValuesFold(c.Request.Header, "anthropic-beta"), ",")
+	}
+	if value, ok := account.GetHeaderOverrides()["anthropic-beta"]; ok {
+		beta.overridden = true
+		beta.override, beta.loggable, _ = account.resolveHeaderOverride(ctx, value)
+	}
+	return beta
+}
+
+func (b anthropicBetaInput) policyTokens() string {
+	return b.client + "," + b.override
+}
+
+func prepareAnthropicBeta(ctx context.Context, c *gin.Context, settings *SettingService, account *Account, model string, useCachedPolicy bool) (anthropicBetaInput, error) {
+	beta := readAnthropicBeta(ctx, c, account)
+	if useCachedPolicy && c != nil {
+		if cached, exists := c.Get(betaPolicyFilterSetKey); exists {
+			if filterSet, ok := cached.(map[string]struct{}); ok {
+				beta.filterSet = filterSet
+				return beta, nil
 			}
 		}
 	}
-	return s.evaluateBetaPolicy(ctx, "", account, model).filterSet
+	return beta.withPolicy(ctx, settings, account, model)
+}
+
+func prepareAnthropicPassthroughBeta(ctx context.Context, c *gin.Context, settings *SettingService, account *Account, model string) (anthropicBetaInput, error) {
+	beta := readAnthropicBeta(ctx, c, account)
+	if beta.override == "" {
+		return beta, nil
+	}
+	return beta.withPolicy(ctx, settings, account, model)
+}
+
+func (b anthropicBetaInput) withPolicy(ctx context.Context, settings *SettingService, account *Account, model string) (anthropicBetaInput, error) {
+	policy := evaluateBetaPolicy(ctx, settings, b.policyTokens(), account, model)
+	if policy.blockErr != nil {
+		return b, policy.blockErr
+	}
+	b.filterSet = policy.filterSet
+	return b, nil
+}
+
+func (b anthropicBetaInput) sanitizePassthroughBody(body []byte, beta string) []byte {
+	if b.overridden {
+		return sanitizeAnthropicOverrideBody(body, beta)
+	}
+	body, _ = sanitizeAnthropicBodyForBetaTokens(body, beta)
+	return body
+}
+
+func (b anthropicBetaInput) finalize(base string, body []byte, model string) string {
+	if b.overridden {
+		if b.override == "" {
+			return ""
+		}
+		base = b.override
+	}
+	if containsBetaToken(b.client, anthropicAdvisorBeta) {
+		base = retainAnthropicAdvisorBeta(base)
+	}
+	return filterSonnet55ToolsetBeta(stripBetaTokensWithSet(base, b.filterSet), body, model)
+}
+
+func sanitizeAnthropicOverrideBody(body []byte, beta string) []byte {
+	body, _ = sanitizeAnthropicBodyForBetaTokens(body, beta)
+	if containsBetaToken(beta, anthropicAdvisorBeta) {
+		return body
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body
+	}
+	choice := gjson.GetBytes(body, "tool_choice")
+	chosenName := choice.Get("name").String()
+	removeChoice := false
+	items := tools.Array()
+	removed := 0
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i].Get("type").String() == anthropicAdvisorType {
+			if next, err := sjson.DeleteBytes(body, fmt.Sprintf("tools.%d", i)); err == nil {
+				body = next
+				removed++
+				removeChoice = removeChoice || (chosenName != "" && chosenName == items[i].Get("name").String())
+			}
+		}
+	}
+	if choice.Exists() && (removeChoice || removed > 0 && removed == len(items)) {
+		if next, err := sjson.DeleteBytes(body, "tool_choice"); err == nil {
+			body = next
+		}
+	}
+	return body
+}
+
+func (b anthropicBetaInput) applyHeaders(ctx context.Context, headers http.Header, account *Account, beta string) {
+	account.applyHeaderOverrides(ctx, headers, "anthropic-beta")
+	deleteHeaderAllForms(headers, "anthropic-beta")
+	if beta != "" {
+		setHeaderRaw(headers, "anthropic-beta", beta)
+	}
+	// Record the template only if its full expansion reached the wire.
+	if b.loggable != "" && (beta == b.override || beta == retainAnthropicAdvisorBeta(b.override)) {
+		headerOverrideScopeFromContext(ctx).record(account.ID, "anthropic-beta", b.loggable)
+	}
 }
 
 // betaPolicyScopeMatches checks whether a rule's scope matches the current account type.
