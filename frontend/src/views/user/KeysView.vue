@@ -1,6 +1,6 @@
 <template>
   <AppLayout>
-    <TablePageLayout>
+    <TablePageLayout :inert="deletingKeys" :aria-busy="deletingKeys">
       <template #filters>
         <div class="flex flex-col gap-3">
           <div class="flex flex-wrap items-center gap-3">
@@ -14,12 +14,14 @@
               :model-value="filterGroupId"
               class="w-40"
               :options="groupFilterOptions"
+              :disabled="deletingKeys"
               @update:model-value="onGroupFilterChange"
             />
             <Select
               :model-value="filterStatus"
               class="w-40"
               :options="statusFilterOptions"
+              :disabled="deletingKeys"
               @update:model-value="onStatusFilterChange"
             />
           </div>
@@ -34,13 +36,21 @@
             </span>
             <button
               class="btn btn-primary btn-sm"
-              :disabled="loading"
+              :disabled="loading || deletingKeys"
               data-test="bulk-edit-keys"
               @click="showBulkEditModal = true"
             >
               {{ t('keys.bulkEdit.title') }}
             </button>
-            <button class="btn btn-secondary btn-sm" @click="selectedIds = []">
+            <button
+              class="btn btn-danger btn-sm"
+              :disabled="bulkDeleteBlocked"
+              data-test="bulk-delete-keys"
+              @click="confirmBulkDelete"
+            >
+              {{ t('keys.bulkDelete.title') }}
+            </button>
+            <button class="btn btn-secondary btn-sm" :disabled="deletingKeys" @click="selectedIds = []">
               {{ t('keys.bulkEdit.clearSelection') }}
             </button>
           </div>
@@ -50,8 +60,8 @@
       <template #actions>
         <div class="flex justify-end gap-3">
           <button
-            @click="loadApiKeys"
-            :disabled="loading"
+            @click="loadApiKeys()"
+            :disabled="loading || deletingKeys"
             class="btn btn-secondary"
             :title="t('common.refresh')"
           >
@@ -89,7 +99,7 @@
               </button>
             </div>
           </div>
-          <button @click="showCreateModal = true" class="btn btn-primary" data-tour="keys-create-btn">
+          <button @click="showCreateModal = true" :disabled="deletingKeys" class="btn btn-primary" data-tour="keys-create-btn">
             <Icon name="plus" size="md" class="mr-2" />
             {{ t('keys.createKey') }}
           </button>
@@ -105,7 +115,7 @@
           row-key="id"
           :selected-keys="selectedIds"
           :selection-label="(key: ApiKey) => t('keys.bulkEdit.selectKey', { name: key.name })"
-          @update:selected-keys="handleSelectionChange"
+          @update:selected-keys="!deletingKeys && handleSelectionChange($event)"
           :server-side-sort="true"
           default-sort-key="created_at"
           default-sort-order="desc"
@@ -443,6 +453,7 @@
               <!-- Delete Button -->
               <button
                 @click="confirmDelete(row)"
+                :disabled="deletingKeys || deletingKey"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
               >
                 <Icon name="trash" size="sm" />
@@ -1054,6 +1065,17 @@
       @cancel="showDeleteDialog = false"
     />
 
+    <ConfirmDialog
+      :show="bulkDeleteIds.length > 0"
+      :title="t('keys.bulkDelete.title')"
+      :message="t('keys.bulkDelete.confirm', { count: bulkDeleteIds.length })"
+      :confirm-text="t('keys.bulkDelete.title')"
+      :cancel-text="t('common.cancel')"
+      :danger="true"
+      @confirm="handleBulkDelete"
+      @cancel="bulkDeleteIds = []"
+    />
+
     <!-- Reset Quota Confirmation Dialog -->
     <ConfirmDialog
       :show="showResetQuotaDialog"
@@ -1369,6 +1391,8 @@ const columns = computed<Column[]>(() =>
 const apiKeys = ref<ApiKey[]>([])
 const selectedIds = ref<number[]>([])
 const showBulkEditModal = ref(false)
+const bulkDeleteIds = ref<number[]>([])
+const deletingKeys = ref(false)
 const selectedApiKeys = computed(() => apiKeys.value.filter((key) => selectedIds.value.includes(key.id)))
 
 const handleSelectionChange = (ids: Array<string | number>) => {
@@ -1404,12 +1428,19 @@ const sortState = ref({
 
 // Filter state
 const filterSearch = ref('')
+const appliedSearch = ref('')
 const filterStatus = ref('')
 const filterGroupId = ref<string | number>('')
 
 const showCreateModal = ref(false)
 const showEditModal = ref(false)
 const showDeleteDialog = ref(false)
+const deletingKey = ref(false)
+const pendingKeyUpdates = ref(0)
+const bulkDeleteBlocked = computed(() =>
+  loading.value || deletingKeys.value || deletingKey.value || submitting.value ||
+  pendingKeyUpdates.value > 0 || showBulkEditModal.value || filterSearch.value !== appliedSearch.value
+)
 const showResetQuotaDialog = ref(false)
 const showResetRateLimitDialog = ref(false)
 const showUseKeyModal = ref(false)
@@ -1506,17 +1537,21 @@ const statusFilterOptions = computed(() => [
 ])
 
 const onFilterChange = () => {
+  if (deletingKeys.value) return
   selectedIds.value = []
   pagination.value.page = 1
+  appliedSearch.value = filterSearch.value
   loadApiKeys()
 }
 
 const onGroupFilterChange = (value: string | number | boolean | null) => {
+  if (deletingKeys.value) return
   filterGroupId.value = value as string | number
   onFilterChange()
 }
 
 const onStatusFilterChange = (value: string | number | boolean | null) => {
+  if (deletingKeys.value) return
   filterStatus.value = value as string
   onFilterChange()
 }
@@ -1595,7 +1630,9 @@ const isAbortError = (error: unknown) => {
   return name === 'AbortError' || code === 'ERR_CANCELED'
 }
 
-const loadApiKeys = async () => {
+const loadApiKeys = async ({ afterBulkDelete = false } = {}) => {
+  if (deletingKeys.value && !afterBulkDelete) return
+  bulkDeleteIds.value = []
   abortController?.abort()
   const controller = new AbortController()
   abortController = controller
@@ -1611,18 +1648,24 @@ const loadApiKeys = async () => {
       sort_by?: string
       sort_order?: 'asc' | 'desc'
     } = {}
-    if (filterSearch.value) filters.search = filterSearch.value
+    if (appliedSearch.value) filters.search = appliedSearch.value
     if (filterStatus.value) filters.status = filterStatus.value
     if (filterGroupId.value !== '') filters.group_id = filterGroupId.value
     filters.sort_by = sortState.value.sort_by
     filters.sort_order = sortState.value.sort_order
 
-    const response = await keysAPI.list(pagination.value.page, pagination.value.page_size, filters, {
-      signal
-    })
+    let page = pagination.value.page
+    const pageSize = pagination.value.page_size
+    let response = await keysAPI.list(page, pageSize, filters, { signal })
+    if (signal.aborted) return
+    if (page > 1 && response.items.length === 0 && (afterBulkDelete || page > response.pages)) {
+      page = Math.max(1, Math.min(page - 1, response.pages))
+      response = await keysAPI.list(page, pageSize, filters, { signal })
+    }
     if (signal.aborted) return
     apiKeys.value = response.items
     handleSelectionChange(selectedIds.value)
+    pagination.value.page = page
     pagination.value.total = response.total
     pagination.value.pages = response.pages
 
@@ -1635,7 +1678,7 @@ const loadApiKeys = async () => {
     if (isAbortError(error)) {
       return
     }
-    appStore.showError(t('keys.failedToLoad'))
+    appStore.showError(t(afterBulkDelete ? 'keys.bulkDelete.refreshFailed' : 'keys.failedToLoad'))
   } finally {
     if (abortController === controller) {
       loading.value = false
@@ -1694,12 +1737,14 @@ const closeUseKeyModal = () => {
 }
 
 const handlePageChange = (page: number) => {
+  if (deletingKeys.value) return
   selectedIds.value = []
   pagination.value.page = page
   loadApiKeys()
 }
 
 const handlePageSizeChange = (pageSize: number) => {
+  if (deletingKeys.value) return
   selectedIds.value = []
   pagination.value.page_size = pageSize
   pagination.value.page = 1
@@ -1707,6 +1752,7 @@ const handlePageSizeChange = (pageSize: number) => {
 }
 
 const handleSort = (key: string, order: 'asc' | 'desc') => {
+  if (deletingKeys.value) return
   selectedIds.value = []
   sortState.value.sort_by = key
   sortState.value.sort_order = order
@@ -1741,7 +1787,9 @@ const editKey = (key: ApiKey) => {
 }
 
 const toggleKeyStatus = async (key: ApiKey) => {
+  if (deletingKeys.value) return
   const newStatus = key.status === 'active' ? 'inactive' : 'active'
+  pendingKeyUpdates.value++
   try {
     await keysAPI.toggleStatus(key.id, newStatus)
     appStore.showSuccess(
@@ -1750,6 +1798,8 @@ const toggleKeyStatus = async (key: ApiKey) => {
     loadApiKeys()
   } catch (error) {
     appStore.showError(t('keys.failedToUpdateStatus'))
+  } finally {
+    pendingKeyUpdates.value--
   }
 }
 
@@ -1790,14 +1840,17 @@ const openGroupSelector = (key: ApiKey) => {
 const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
   groupSelectorKeyId.value = null
   dropdownPosition.value = null
-  if (key.group_id === newGroupId) return
+  if (deletingKeys.value || key.group_id === newGroupId) return
 
+  pendingKeyUpdates.value++
   try {
     await keysAPI.update(key.id, { group_id: newGroupId })
     appStore.showSuccess(t('keys.groupChangedSuccess'))
     loadApiKeys()
   } catch (error) {
     appStore.showError(t('keys.failedToChangeGroup'))
+  } finally {
+    pendingKeyUpdates.value--
   }
 }
 
@@ -1814,11 +1867,52 @@ const closeGroupSelector = (event: MouseEvent) => {
 }
 
 const confirmDelete = (key: ApiKey) => {
+  if (deletingKeys.value || deletingKey.value) return
   selectedKey.value = key
   showDeleteDialog.value = true
 }
 
+const confirmBulkDelete = () => {
+  if (bulkDeleteBlocked.value || bulkDeleteIds.value.length) return
+  bulkDeleteIds.value = selectedApiKeys.value.map(({ id }) => id)
+}
+
+const handleBulkDelete = async () => {
+  const ids = bulkDeleteIds.value
+  bulkDeleteIds.value = []
+  if (!ids.length || bulkDeleteBlocked.value) return
+
+  const visibleSelection = new Set(selectedApiKeys.value.map(({ id }) => id))
+  if (visibleSelection.size !== ids.length || ids.some((id) => !visibleSelection.has(id))) return
+
+  deletingKeys.value = true
+  try {
+    const { succeededIds, failures } = await keysAPI.bulkDelete(ids)
+    const succeeded = new Set(succeededIds)
+    const failedIds = failures.map(({ id }) => id)
+    apiKeys.value = apiKeys.value.filter(({ id }) => !succeeded.has(id))
+    handleSelectionChange(failedIds)
+
+    if (failedIds.length === 0) {
+      appStore.showSuccess(t('keys.bulkDelete.success', { count: succeeded.size }))
+    } else if (succeeded.size === 0) {
+      appStore.showError(t('keys.bulkDelete.failure', { count: failedIds.length, ids: failedIds.join(', ') }))
+    } else {
+      appStore.showWarning(t('keys.bulkDelete.partialFailure', {
+        success: succeeded.size,
+        failed: failedIds.length,
+        ids: failedIds.join(', ')
+      }))
+    }
+
+    await loadApiKeys({ afterBulkDelete: true })
+  } finally {
+    deletingKeys.value = false
+  }
+}
+
 const handleSubmit = async () => {
+  if (submitting.value || deletingKeys.value) return
   // Validate group_id is required
   if (formData.value.group_id === null) {
     appStore.showError(t('keys.groupRequired'))
@@ -1926,8 +2020,9 @@ const handleSubmit = async () => {
  * 若后端未返回消息则显示默认的国际化文本
  */
 const handleDelete = async () => {
-  if (!selectedKey.value) return
+  if (!showDeleteDialog.value || !selectedKey.value || deletingKeys.value || deletingKey.value) return
 
+  deletingKey.value = true
   try {
     await keysAPI.delete(selectedKey.value.id)
     appStore.showSuccess(t('keys.keyDeletedSuccess'))
@@ -1937,6 +2032,8 @@ const handleDelete = async () => {
     // 优先使用后端返回的错误消息，提供更具体的错误信息给用户
     const errorMsg = error?.message || t('keys.failedToDelete')
     appStore.showError(errorMsg)
+  } finally {
+    deletingKey.value = false
   }
 }
 
@@ -1981,8 +2078,9 @@ const setExpirationDays = (days: number) => {
 // Reset quota used for an API key
 const resetQuotaUsed = async () => {
   const key = selectedKey.value
-  if (!key) return
+  if (!key || deletingKeys.value) return
   showResetQuotaDialog.value = false
+  pendingKeyUpdates.value++
   try {
     const updatedKey = await keysAPI.update(key.id, { reset_quota: true })
     appStore.showSuccess(t('keys.quotaResetSuccess'))
@@ -1996,6 +2094,8 @@ const resetQuotaUsed = async () => {
   } catch (error: any) {
     const errorMsg = error.response?.data?.detail || t('keys.failedToResetQuota')
     appStore.showError(errorMsg)
+  } finally {
+    pendingKeyUpdates.value--
   }
 }
 
@@ -2012,8 +2112,9 @@ const confirmResetRateLimitFromTable = (row: ApiKey) => {
 
 // Reset rate limit usage for an API key
 const resetRateLimitUsage = async () => {
-  if (!selectedKey.value) return
+  if (!selectedKey.value || deletingKeys.value) return
   showResetRateLimitDialog.value = false
+  pendingKeyUpdates.value++
   try {
     await keysAPI.update(selectedKey.value.id, { reset_rate_limit_usage: true })
     appStore.showSuccess(t('keys.rateLimitResetSuccess'))
@@ -2027,6 +2128,8 @@ const resetRateLimitUsage = async () => {
   } catch (error: any) {
     const errorMsg = error.response?.data?.detail || t('keys.failedToResetRateLimit')
     appStore.showError(errorMsg)
+  } finally {
+    pendingKeyUpdates.value--
   }
 }
 
