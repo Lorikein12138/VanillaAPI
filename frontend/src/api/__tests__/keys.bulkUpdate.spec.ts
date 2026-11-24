@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
-import { bulkUpdate } from '../keys'
+import { bulkDelete, bulkUpdate } from '../keys'
 
-const { put } = vi.hoisted(() => ({ put: vi.fn() }))
-vi.mock('../client', () => ({ apiClient: { put } }))
+const { put, remove } = vi.hoisted(() => ({ put: vi.fn(), remove: vi.fn() }))
+vi.mock('../client', () => ({ apiClient: { put, delete: remove } }))
 
-describe('API key bulk updates', () => {
+describe('API key bulk operations', () => {
   beforeEach(() => {
     put.mockReset()
+    remove.mockReset()
   })
 
   it('updates each selected key once and preserves partial failures', async () => {
@@ -25,11 +26,14 @@ describe('API key bulk updates', () => {
     expect(result).toEqual({ succeededIds: [1, 3], failures: [{ id: 2, error: failure }] })
   })
 
-  it('limits in-flight requests and continues after a failed batch member', async () => {
+  it.each([
+    { name: 'updating', request: put, run: (ids: number[]) => bulkUpdate(ids, { status: 'inactive' }) },
+    { name: 'deleting', request: remove, run: bulkDelete },
+  ])('limits in-flight requests when $name and continues after a failure', async ({ request, run }) => {
     const settle: Array<() => void> = []
     let inFlight = 0
     let peak = 0
-    put.mockImplementation(() => new Promise((resolve, reject) => {
+    request.mockImplementation(() => new Promise((resolve, reject) => {
       inFlight++
       peak = Math.max(peak, inFlight)
       const index = settle.length
@@ -40,14 +44,16 @@ describe('API key bulk updates', () => {
       })
     }))
 
-    const pending = bulkUpdate([1, 2, 3, 4, 5, 6, 7], { status: 'inactive' })
-    expect(put).toHaveBeenCalledTimes(5)
+    const pending = run([1, 2, 3, 4, 5, 6, 7, 7])
+    expect(request).toHaveBeenCalledTimes(5)
     settle.slice(0, 4).forEach((finish) => finish())
     await flushPromises()
-    expect(put).toHaveBeenCalledTimes(5)
+    expect(request).toHaveBeenCalledTimes(5)
     settle[4]()
     await flushPromises()
-    expect(put).toHaveBeenCalledTimes(7)
+    expect(request.mock.calls.map(([url]) => url)).toEqual([
+      '/keys/1', '/keys/2', '/keys/3', '/keys/4', '/keys/5', '/keys/6', '/keys/7'
+    ])
     settle.slice(5).forEach((finish) => finish())
     const result = await pending
 

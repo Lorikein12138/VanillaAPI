@@ -9,24 +9,28 @@ import KeysView from '../KeysView.vue'
 const {
   listKeys,
   updateKey,
+  bulkDeleteKeys,
   getPublicSettings,
   getDashboardApiKeysUsage,
   getAvailableGroups,
   getUserGroupRates,
   showError,
   showSuccess,
+  showWarning,
   copyToClipboard,
   isCurrentStep,
   nextStep,
 } = vi.hoisted(() => ({
   listKeys: vi.fn(),
   updateKey: vi.fn(),
+  bulkDeleteKeys: vi.fn(),
   getPublicSettings: vi.fn(),
   getDashboardApiKeysUsage: vi.fn(),
   getAvailableGroups: vi.fn(),
   getUserGroupRates: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn(),
+  showWarning: vi.fn(),
   copyToClipboard: vi.fn(),
   isCurrentStep: vi.fn(),
   nextStep: vi.fn(),
@@ -63,6 +67,7 @@ vi.mock('@/api', () => ({
     list: listKeys,
     create: vi.fn(),
     update: updateKey,
+    bulkDelete: bulkDeleteKeys,
     delete: vi.fn(),
     toggleStatus: vi.fn(),
   },
@@ -82,6 +87,7 @@ vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError,
     showSuccess,
+    showWarning,
   }),
 }))
 
@@ -103,7 +109,9 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => messages[key] ?? key,
+      t: (key: string, params?: Record<string, unknown>) => key.startsWith('keys.bulkDelete.') && params
+        ? `${key} ${Object.values(params).join('/')}`
+        : messages[key] ?? key,
     }),
   }
 })
@@ -275,6 +283,7 @@ describe('user KeysView column settings', () => {
 
     listKeys.mockReset()
     updateKey.mockReset()
+    bulkDeleteKeys.mockReset()
     vi.mocked(keysAPI.create).mockReset()
     getPublicSettings.mockReset()
     getDashboardApiKeysUsage.mockReset()
@@ -282,6 +291,8 @@ describe('user KeysView column settings', () => {
     getUserGroupRates.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
+    showWarning.mockReset()
+    vi.mocked(keysAPI.delete).mockReset()
     copyToClipboard.mockReset()
     isCurrentStep.mockReset()
     nextStep.mockReset()
@@ -415,6 +426,269 @@ describe('user KeysView column settings', () => {
     await flushPromises()
     expect(table.props('selectedKeys')).toEqual([])
     wrapper.unmount()
+  })
+
+  describe('bulk deletion', () => {
+    const keys = [createApiKey(), { ...createApiKey(), id: 2, name: 'Second' }]
+
+    const openConfirmation = async (wrapper: VueWrapper, ids: number[]) => {
+      const table = wrapper.getComponent({ name: 'DataTable' })
+      table.vm.$emit('update:selectedKeys', ids)
+      await nextTick()
+      await wrapper.get('[data-test="bulk-delete-keys"]').trigger('click')
+      const dialog = wrapper.findAllComponents({ name: 'ConfirmDialog' })
+        .find((candidate) => candidate.props('title') === 'keys.bulkDelete.title')!
+      expect(dialog.props('show')).toBe(true)
+      expect(dialog.props('danger')).toBe(true)
+      return { table, dialog }
+    }
+
+    beforeEach(() => {
+      listKeys.mockResolvedValue({ items: keys, total: 2, pages: 1 })
+    })
+
+    it('cancels without deleting or clearing the selection', async () => {
+      const wrapper = await mountView()
+      const { table, dialog } = await openConfirmation(wrapper, [1, 2])
+
+      expect(dialog.props('message')).toBe('keys.bulkDelete.confirm 2')
+      dialog.vm.$emit('cancel')
+      await nextTick()
+
+      expect(dialog.props('show')).toBe(false)
+      expect(bulkDeleteKeys).not.toHaveBeenCalled()
+      expect(table.props('selectedKeys')).toEqual([1, 2])
+      wrapper.unmount()
+    })
+
+    it.each(['search', 'page', 'page size', 'sort', 'refresh'])(
+      'invalidates the confirmation when %s starts a list reload',
+      async (change) => {
+        const wrapper = await mountView()
+        const { table, dialog } = await openConfirmation(wrapper, [1])
+        if (change === 'search') {
+          // The search event arrives after the confirmation opens because the input is debounced.
+          const search = wrapper.getComponent({ name: 'SearchInput' })
+          search.vm.$emit('update:modelValue', 'Second')
+          search.vm.$emit('search', 'Second')
+        } else if (change === 'sort') {
+          table.vm.$emit('sort', 'created_at', 'asc')
+        } else {
+          const controls: Record<string, string> = {
+            page: '[data-test="page-2"]',
+            'page size': '[data-test="page-size-50"]',
+            refresh: 'button[title="Refresh"]',
+          }
+          void wrapper.get(controls[change]).trigger('click')
+        }
+        dialog.vm.$emit('confirm')
+        await flushPromises()
+
+        expect(listKeys).toHaveBeenCalledTimes(2)
+        expect(dialog.props('show')).toBe(false)
+        expect(bulkDeleteKeys).not.toHaveBeenCalled()
+        wrapper.unmount()
+      }
+    )
+
+    it.each(['opening', 'confirming'])(
+      'blocks %s bulk deletion on page 2 until the search applies on page 1',
+      async (stage) => {
+        listKeys.mockResolvedValue({ items: keys, total: 40, pages: 2 })
+        const wrapper = await mountView()
+        await wrapper.get('[data-test="page-2"]').trigger('click')
+        await flushPromises()
+        const table = wrapper.getComponent({ name: 'DataTable' })
+        const confirmation = stage === 'confirming'
+          ? (await openConfirmation(wrapper, [1])).dialog
+          : undefined
+        if (!confirmation) table.vm.$emit('update:selectedKeys', [1])
+
+        const search = wrapper.getComponent({ name: 'SearchInput' })
+        search.vm.$emit('update:modelValue', 'Second')
+        await nextTick()
+        const button = wrapper.get<HTMLButtonElement>('[data-test="bulk-delete-keys"]')
+        expect(button.element.disabled).toBe(true)
+        if (confirmation) confirmation.vm.$emit('confirm')
+        else await button.trigger('click')
+        await nextTick()
+
+        expect(bulkDeleteKeys).not.toHaveBeenCalled()
+        expect(listKeys.mock.calls.map(([page]) => page)).toEqual([1, 2])
+        expect(wrapper.findAllComponents({ name: 'ConfirmDialog' })
+          .find((dialog) => dialog.props('title') === 'keys.bulkDelete.title')?.props('show')).toBe(false)
+
+        search.vm.$emit('search', 'Second')
+        await flushPromises()
+        expect(listKeys).toHaveBeenLastCalledWith(
+          1, expect.any(Number), expect.objectContaining({ search: 'Second' }), expect.any(Object)
+        )
+        expect(table.props('selectedKeys')).toEqual([])
+        const { dialog } = await openConfirmation(wrapper, [2])
+        expect(dialog.props('message')).toBe('keys.bulkDelete.confirm 1')
+        wrapper.unmount()
+      }
+    )
+
+    it('rejects confirmation when the visible selection differs from the snapshot', async () => {
+      const wrapper = await mountView()
+      const { table, dialog } = await openConfirmation(wrapper, [1])
+      table.vm.$emit('update:selectedKeys', [1, 2])
+      dialog.vm.$emit('confirm')
+      await nextTick()
+
+      expect(dialog.props('show')).toBe(false)
+      expect(bulkDeleteKeys).not.toHaveBeenCalled()
+      expect(table.props('selectedKeys')).toEqual([1, 2])
+      wrapper.unmount()
+    })
+
+    it.each(['before opening', 'before confirming'])(
+      'blocks bulk deletion with a key edit still in flight %s',
+      async (stage) => {
+        const key = { ...keys[0], group_id: 1 }
+        listKeys.mockResolvedValueOnce({ items: [key, keys[1]], total: 2, pages: 1 })
+        let finishUpdate!: (result: ApiKey) => void
+        updateKey.mockReturnValue(new Promise((resolve) => { finishUpdate = resolve }))
+        const wrapper = await mountView()
+        const table = wrapper.getComponent({ name: 'DataTable' })
+        const confirmation = stage === 'before confirming'
+          ? (await openConfirmation(wrapper, [1])).dialog
+          : undefined
+        if (!confirmation) table.vm.$emit('update:selectedKeys', [1])
+
+        await getButtonByText(wrapper, 'common.edit').trigger('click')
+        await wrapper.get('#key-form').trigger('submit')
+        expect(updateKey).toHaveBeenCalledOnce()
+        await wrapper.get('[data-test="close-dialog"]').trigger('click')
+        const button = wrapper.get<HTMLButtonElement>('[data-test="bulk-delete-keys"]')
+        expect(button.element.disabled).toBe(true)
+        if (confirmation) confirmation.vm.$emit('confirm')
+        else await button.trigger('click')
+        await nextTick()
+
+        expect(bulkDeleteKeys).not.toHaveBeenCalled()
+        expect(wrapper.findAllComponents({ name: 'ConfirmDialog' })
+          .find((dialog) => dialog.props('title') === 'keys.bulkDelete.title')?.props('show')).toBe(false)
+        finishUpdate(key)
+        await flushPromises()
+        expect(button.element.disabled).toBe(false)
+        wrapper.unmount()
+      }
+    )
+
+    it('submits the visible snapshot once and locks conflicting controls until refresh', async () => {
+      let finishDelete!: (result: { succeededIds: number[]; failures: [] }) => void
+      bulkDeleteKeys.mockReturnValue(new Promise((resolve) => { finishDelete = resolve }))
+      const wrapper = await mountView()
+      const { table, dialog } = await openConfirmation(wrapper, [1, 99, 1])
+      expect(dialog.props('message')).toBe('keys.bulkDelete.confirm 1')
+
+      dialog.vm.$emit('confirm')
+      dialog.vm.$emit('confirm')
+      await nextTick()
+
+      expect(bulkDeleteKeys.mock.calls).toEqual([[[1]]])
+      expect(wrapper.get<HTMLButtonElement>('[data-test="bulk-edit-keys"]').element.disabled).toBe(true)
+      const singleDelete = getButtonByText(wrapper, 'common.delete')
+      expect(singleDelete.attributes('disabled')).toBeDefined()
+      table.vm.$emit('update:selectedKeys', [2])
+      await wrapper.get('[data-test="page-2"]').trigger('click')
+      wrapper.getComponent({ name: 'SearchInput' }).vm.$emit('search')
+      expect(table.props('selectedKeys')).toEqual([1])
+      expect(listKeys).toHaveBeenCalledOnce()
+
+      let finishRefresh!: (result: { items: ApiKey[]; total: number; pages: number }) => void
+      listKeys.mockReturnValueOnce(new Promise((resolve) => { finishRefresh = resolve }))
+      finishDelete({ succeededIds: [1], failures: [] })
+      await flushPromises()
+      expect(table.props('data')).toEqual([keys[1]])
+      expect(wrapper.get<HTMLButtonElement>('button[title="Refresh"]').element.disabled).toBe(true)
+
+      finishRefresh({ items: [keys[1]], total: 1, pages: 1 })
+      await flushPromises()
+      expect(wrapper.get<HTMLButtonElement>('button[title="Refresh"]').element.disabled).toBe(false)
+      expect(table.props('selectedKeys')).toEqual([])
+      expect(showSuccess).toHaveBeenCalledWith('keys.bulkDelete.success 1')
+      wrapper.unmount()
+    })
+
+    it('keeps visible failures selected and reports a partial result', async () => {
+      bulkDeleteKeys.mockResolvedValue({ succeededIds: [1], failures: [{ id: 2, error: new Error() }] })
+      const wrapper = await mountView()
+      const { table, dialog } = await openConfirmation(wrapper, [1, 2])
+      listKeys.mockResolvedValueOnce({ items: [keys[1]], total: 1, pages: 1 })
+      dialog.vm.$emit('confirm')
+      await flushPromises()
+
+      expect(showWarning).toHaveBeenCalledWith('keys.bulkDelete.partialFailure 1/1/2')
+      expect(table.props('data')).toEqual([keys[1]])
+      expect(table.props('selectedKeys')).toEqual([2])
+      await wrapper.get('[data-test="bulk-delete-keys"]').trigger('click')
+      expect(dialog.props('message')).toBe('keys.bulkDelete.confirm 1')
+      expect(dialog.props('show')).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('reports all failed IDs, including those that leave the page after refresh', async () => {
+      bulkDeleteKeys.mockResolvedValue({
+        succeededIds: [],
+        failures: keys.map(({ id, key }) => ({ id, error: new Error(key) })),
+      })
+      const wrapper = await mountView()
+      const { table, dialog } = await openConfirmation(wrapper, [1, 2])
+      listKeys.mockResolvedValueOnce({ items: [keys[1]], total: 1, pages: 1 })
+      dialog.vm.$emit('confirm')
+      await flushPromises()
+
+      expect(showError).toHaveBeenCalledWith('keys.bulkDelete.failure 2/1, 2')
+      expect(showSuccess).not.toHaveBeenCalled()
+      expect(table.props('selectedKeys')).toEqual([2])
+      wrapper.unmount()
+    })
+
+    it('reports refresh failure separately and leaves deleted rows removed', async () => {
+      bulkDeleteKeys.mockResolvedValue({ succeededIds: [1], failures: [{ id: 2, error: new Error() }] })
+      const wrapper = await mountView()
+      const { table, dialog } = await openConfirmation(wrapper, [1, 2])
+      listKeys.mockRejectedValueOnce(new Error('offline'))
+      dialog.vm.$emit('confirm')
+      await flushPromises()
+
+      expect(showWarning).toHaveBeenCalledWith('keys.bulkDelete.partialFailure 1/1/2')
+      expect(showError).toHaveBeenCalledWith('keys.bulkDelete.refreshFailed')
+      expect(table.props('data')).toEqual([keys[1]])
+      expect(table.props('selectedKeys')).toEqual([2])
+      wrapper.unmount()
+    })
+
+    it.each([false, true])('returns to the prior page after emptying the last page (refresh failure: %s)', async (refreshFails) => {
+      bulkDeleteKeys.mockResolvedValue({ succeededIds: [2], failures: [] })
+      listKeys.mockResolvedValueOnce({ items: [keys[0]], total: 21, pages: 2 })
+      const wrapper = await mountView()
+      listKeys.mockResolvedValueOnce({ items: [keys[1]], total: 21, pages: 2 })
+      await wrapper.get('[data-test="page-2"]').trigger('click')
+      await flushPromises()
+
+      const { table, dialog } = await openConfirmation(wrapper, [2])
+      if (refreshFails) listKeys.mockRejectedValueOnce(new Error('offline'))
+      listKeys.mockResolvedValueOnce({ items: [], total: 20, pages: 1 })
+      listKeys.mockResolvedValueOnce({ items: [keys[0]], total: 20, pages: 1 })
+      dialog.vm.$emit('confirm')
+      await flushPromises()
+
+      if (refreshFails) {
+        expect(table.props('data')).toEqual([])
+        expect(showError).toHaveBeenCalledWith('keys.bulkDelete.refreshFailed')
+        await wrapper.get('button[title="Refresh"]').trigger('click')
+        await flushPromises()
+      }
+      expect(listKeys.mock.calls.map(([page]) => page)).toEqual(refreshFails ? [1, 2, 2, 2, 1] : [1, 2, 2, 1])
+      expect(wrapper.getComponent({ name: 'Pagination' }).props('page')).toBe(1)
+      expect(table.props('data')).toEqual([keys[0]])
+      expect(table.props('selectedKeys')).toEqual([])
+      wrapper.unmount()
+    })
   })
 
   it('shows a hidden column when toggled and persists the preference', async () => {

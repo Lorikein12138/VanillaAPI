@@ -98,6 +98,14 @@ export default {
       partialFailure: '已更新 {success} 个密钥，{failed} 个失败',
       failureHint: '以下密钥更新失败，可修改设置后重试。再次提交只会更新失败的密钥。'
     },
+    bulkDelete: {
+      title: '批量删除',
+      confirm: '确定要删除选中的 {count} 个密钥吗？删除后密钥将立即失效，且无法恢复。',
+      success: '已删除 {count} 个密钥',
+      failure: '{count} 个密钥删除失败（ID：{ids}）',
+      partialFailure: '已删除 {success} 个密钥，{failed} 个删除失败（ID：{ids}）',
+      refreshFailed: '密钥列表刷新失败，请手动刷新。'
+    },
     deleteKey: '删除密钥',
     deleteConfirmMessage: "确定要删除 '{name}' 吗？此操作无法撤销。",
     id: 'ID',

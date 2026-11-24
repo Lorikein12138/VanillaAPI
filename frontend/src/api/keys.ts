@@ -121,11 +121,22 @@ export async function bulkUpdate(
   ids: number[],
   updates: UpdateApiKeyRequest
 ): Promise<BulkUpdateApiKeysResult> {
+  return runBulkKeyOperation(ids, (id) => update(id, updates))
+}
+
+export async function bulkDelete(ids: number[]) {
+  return runBulkKeyOperation(ids, deleteKey)
+}
+
+async function runBulkKeyOperation(
+  ids: number[],
+  operation: (id: number) => Promise<unknown>
+) {
   const uniqueIds = [...new Set(ids)]
   const result: BulkUpdateApiKeysResult = { succeededIds: [], failures: [] }
   for (let offset = 0; offset < uniqueIds.length; offset += 5) {
     const batch = uniqueIds.slice(offset, offset + 5)
-    const responses = await Promise.allSettled(batch.map((id) => update(id, updates)))
+    const responses = await Promise.allSettled(batch.map(operation))
     responses.forEach((response, index) => {
       if (response.status === 'fulfilled') {
         result.succeededIds.push(batch[index])
@@ -163,6 +174,7 @@ export const keysAPI = {
   create,
   update,
   bulkUpdate,
+  bulkDelete,
   delete: deleteKey,
   toggleStatus
 }
