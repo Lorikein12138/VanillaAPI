@@ -148,6 +148,145 @@ func TestAnthropicAdvisorForwardingHonorsBetaBlock(t *testing.T) {
 	require.Nil(t, result)
 }
 
+func TestAnthropicBetaHeaderOverrideKeepsWireBodyAndPolicyAligned(t *testing.T) {
+	resetGatewayForwardingSettingsCacheForTest(t)
+	const model = "claude-sonnet-4"
+	const contextBeta = anthropicBetaContextManagementToken
+	svc := newMinimalGatewayService()
+	policy := DefaultBetaPolicySettings()
+	policy.Rules = append(policy.Rules, []BetaPolicyRule{
+		{BetaToken: "blocked-7", Action: BetaPolicyActionBlock, Scope: BetaPolicyScopeAll},
+		{BetaToken: "filtered-7", Action: BetaPolicyActionFilter, Scope: BetaPolicyScopeAll},
+		{BetaToken: contextBeta, Action: BetaPolicyActionFilter, Scope: BetaPolicyScopeAll},
+		{BetaToken: anthropicAdvisorBeta, Action: BetaPolicyActionFilter, Scope: BetaPolicyScopeAll},
+	}...)
+	settings, err := json.Marshal(policy)
+	require.NoError(t, err)
+	svc.settingService = NewSettingService(&settingRepoStub{
+		values: map[string]string{SettingKeyBetaPolicySettings: string(settings)},
+	}, svc.cfg)
+	native := &OpenAIGatewayService{settingService: svc.settingService}
+	account := newAnthropicAPIKeyAccountForTest()
+	account.Credentials[credKeyHeaderOverrideEnabled] = true
+	body := []byte(fmt.Sprintf(`{"model":%q,"context_management":{"edits":[]},"tools":[%s],"tool_choice":{"type":"tool","name":"advisor"}}`, model, advisorTool(advisorWireModel)))
+	builders := map[string]func(context.Context, *gin.Context) (*http.Request, error){
+		"ordinary": func(ctx context.Context, c *gin.Context) (*http.Request, error) {
+			req, _, err := svc.buildUpstreamRequest(ctx, c, account, body, "key", "apikey", model, false, false)
+			return req, err
+		},
+		"passthrough": func(ctx context.Context, c *gin.Context) (*http.Request, error) {
+			req, _, err := svc.buildUpstreamRequestAnthropicAPIKeyPassthrough(ctx, c, account, body, "key")
+			return req, err
+		},
+		"native": func(ctx context.Context, c *gin.Context) (*http.Request, error) {
+			req, _, err := native.buildNativeAnthropicUpstreamRequest(ctx, c, account, body, "key", claudeAPIURL)
+			return req, err
+		},
+		"count-tokens": func(ctx context.Context, c *gin.Context) (*http.Request, error) {
+			req, _, err := svc.buildCountTokensRequest(ctx, c, account, body, "key", "apikey", model, false)
+			return req, err
+		},
+		"count-tokens-passthrough": func(ctx context.Context, c *gin.Context) (*http.Request, error) {
+			return svc.buildCountTokensRequestAnthropicAPIKeyPassthrough(ctx, c, account, body, "key")
+		},
+	}
+	for name, build := range builders {
+		t.Run(name, func(t *testing.T) {
+			const clientBetas = "fast-mode-2026-02-01,context-1m-2025-08-07," + contextBeta
+			c := newVertexBetaTestContext(t, clientBetas)
+			c.Request.Header.Add("Anthropic-Beta", anthropicAdvisorBeta)
+			ctx := WithHeaderOverrideRequestScope(context.Background(), 7, 31, nil)
+
+			account.Credentials[credKeyHeaderOverrides] = map[string]any{"anthropic-beta": "allowed-{{user_id}},filtered-{{user_id}}," + contextBeta}
+			req, err := build(ctx, c)
+			require.NoError(t, err)
+			require.Equal(t, []string{"allowed-7"}, headerValuesFold(req.Header, "anthropic-beta"))
+			wire, err := io.ReadAll(req.Body)
+			require.NoError(t, err)
+			require.False(t, gjson.GetBytes(wire, "context_management").Exists())
+			require.False(t, gjson.GetBytes(wire, "tools.0").Exists())
+			require.False(t, gjson.GetBytes(wire, "tool_choice").Exists())
+			require.Nil(t, anthropicAdvisorResponseFromContext(c))
+
+			account.Credentials[credKeyHeaderOverrides] = map[string]any{"anthropic-beta": "blocked-{{user_id}}"}
+			_, err = build(ctx, c)
+			var blocked *BetaBlockedError
+			require.ErrorAs(t, err, &blocked)
+
+			req, err = build(context.Background(), c)
+			require.NoError(t, err)
+			require.Empty(t, headerValuesFold(req.Header, "anthropic-beta"))
+			wire, err = io.ReadAll(req.Body)
+			require.NoError(t, err)
+			require.False(t, gjson.GetBytes(wire, "context_management").Exists())
+			require.False(t, gjson.GetBytes(wire, "tools.0").Exists())
+			require.False(t, gjson.GetBytes(wire, "tool_choice").Exists())
+			switch name {
+			case "passthrough", "native", "count-tokens-passthrough":
+				for _, enabled := range []bool{true, false} {
+					account.Credentials[credKeyHeaderOverrides] = map[string]any{"x-other": "{{user_id}}"}
+					account.Credentials[credKeyHeaderOverrideEnabled] = enabled
+					req, err = build(ctx, c)
+					require.NoError(t, err)
+					require.Equal(t, clientBetas+","+anthropicAdvisorBeta, getHeaderRaw(req.Header, "anthropic-beta"))
+					wire, err = io.ReadAll(req.Body)
+					require.NoError(t, err)
+					require.True(t, gjson.GetBytes(wire, "context_management").Exists())
+				}
+				account.Credentials[credKeyHeaderOverrideEnabled] = true
+			}
+		})
+	}
+}
+
+func TestAnthropicOrdinaryMessagesBetaPolicyUsesMappedWireModel(t *testing.T) {
+	resetGatewayForwardingSettingsCacheForTest(t)
+	const alias = "claude-client-alias"
+	const wireModel = "claude-sonnet-4"
+	rules := []BetaPolicyRule{
+		{BetaToken: "alias-only-block", Action: BetaPolicyActionBlock, Scope: BetaPolicyScopeAll, ModelWhitelist: []string{alias}},
+		{BetaToken: "wire-only-block", Action: BetaPolicyActionBlock, Scope: BetaPolicyScopeAll, ModelWhitelist: []string{wireModel}},
+		{BetaToken: anthropicBetaContextManagementToken, Action: BetaPolicyActionFilter, Scope: BetaPolicyScopeAll, ModelWhitelist: []string{wireModel}},
+	}
+	settings, err := json.Marshal(BetaPolicySettings{Rules: rules})
+	require.NoError(t, err)
+	for _, block := range []bool{false, true} {
+		t.Run(fmt.Sprintf("block=%t", block), func(t *testing.T) {
+			svc := newMinimalGatewayService()
+			svc.settingService = NewSettingService(&settingRepoStub{
+				values: map[string]string{SettingKeyBetaPolicySettings: string(settings)},
+			}, svc.cfg)
+			account := newAnthropicAPIKeyAccountForTest()
+			account.Extra["anthropic_passthrough"] = false
+			account.Credentials["model_mapping"] = map[string]any{alias: wireModel}
+			upstream := &anthropicHTTPUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(`{"model":"claude-sonnet-4","content":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			}}
+			svc.httpUpstream = upstream
+			clientBetas := "alias-only-block," + anthropicBetaContextManagementToken
+			if block {
+				clientBetas += ",wire-only-block"
+			}
+			c := newVertexBetaTestContext(t, clientBetas)
+			body := []byte(`{"model":"claude-client-alias","context_management":{"edits":[]},"messages":[{"role":"user","content":"hi"}]}`)
+			_, err := svc.Forward(context.Background(), c, account, &ParsedRequest{Body: NewRequestBodyRef(body), Model: alias})
+			if block {
+				var blocked *BetaBlockedError
+				require.ErrorAs(t, err, &blocked)
+				require.Contains(t, blocked.Message, "wire-only-block")
+				require.Nil(t, upstream.lastReq)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, "alias-only-block", getHeaderRaw(upstream.lastReq.Header, "anthropic-beta"))
+			require.Equal(t, wireModel, gjson.GetBytes(upstream.lastBody, "model").String())
+			require.False(t, gjson.GetBytes(upstream.lastBody, "context_management").Exists())
+		})
+	}
+}
+
 func TestAnthropicAdvisorAntigravityUpstreamRelay(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {

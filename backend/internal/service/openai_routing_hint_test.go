@@ -220,6 +220,62 @@ func TestBuildOpenAIWSHeadersSendsOAuthRoutingHintOnly(t *testing.T) {
 	require.Empty(t, build(t, &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, "priority").Get(openAICodexRoutingHintHeader))
 }
 
+func TestOpenAIRoutingHintOverrideIsAbsentFromWireAndOps(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	body := []byte(`{"model":"gpt-5.6-codex"}`)
+	builders := map[string]func(context.Context, *gin.Context, *Account) (http.Header, error){
+		"http": func(ctx context.Context, c *gin.Context, account *Account) (http.Header, error) {
+			req, err := svc.buildUpstreamRequest(ctx, c, account, body, "test-token", false, "", true)
+			if err != nil {
+				return nil, err
+			}
+			return req.Header, nil
+		},
+		"http-passthrough": func(ctx context.Context, c *gin.Context, account *Account) (http.Header, error) {
+			req, err := svc.buildUpstreamRequestOpenAIPassthrough(ctx, c, account, body, "test-token")
+			if err != nil {
+				return nil, err
+			}
+			return req.Header, nil
+		},
+		"websocket": func(ctx context.Context, c *gin.Context, account *Account) (http.Header, error) {
+			decision := OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2}
+			headers, _, err := svc.buildOpenAIWSHeaders(ctx, c, account, "test-token", decision, true, "", "", "", "gpt-5.6-codex", "priority")
+			return headers, err
+		},
+	}
+	for name, build := range builders {
+		t.Run(name, func(t *testing.T) {
+			account := &Account{
+				ID: 42, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+				Credentials: map[string]any{
+					credKeyHeaderOverrideEnabled: true,
+					credKeyHeaderOverrides: map[string]any{
+						openAICodexRoutingHintHeader: "{{user_id}}",
+						"x-end-user":                 "{{user_id}}",
+					},
+				},
+			}
+			ctx := WithHeaderOverrideRequestScope(context.Background(), 7, 31, nil)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)).WithContext(ctx)
+			c.Request.Header.Set(openAICodexRoutingHintHeader, "caller-spoof")
+
+			headers, err := build(ctx, c, account)
+			require.NoError(t, err)
+			require.Empty(t, headerValuesFold(headers, openAICodexRoutingHintHeader))
+			require.Equal(t, []string{"7"}, headerValuesFold(headers, "x-end-user"))
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{AccountID: account.ID, UpstreamStatusCode: 400})
+			raw, ok := c.Get(OpsUpstreamErrorsKey)
+			require.True(t, ok)
+			events, ok := raw.([]*OpsUpstreamErrorEvent)
+			require.True(t, ok)
+			require.Len(t, events, 1)
+			require.Equal(t, map[string]string{"x-end-user": "7"}, events[0].ReportedHeaders)
+		})
+	}
+}
+
 func TestOpenAIRoutingDiagnosticsUseFinalDerivedValuesOnly(t *testing.T) {
 	logSink, restore := captureStructuredLog(t)
 	defer restore()

@@ -142,6 +142,10 @@ func (s *GatewayService) ForwardAsChatCompletions(
 		upstreamReq, forwardedBody, err = s.buildUpstreamRequest(upstreamCtx, c, account, anthropicBody, token, tokenType, mappedModel, reqStream, shouldMimicClaudeCode)
 		releaseUpstreamCtx()
 		if err != nil {
+			var blocked *BetaBlockedError
+			if errors.As(err, &blocked) {
+				writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", blocked.Message)
+			}
 			return nil, fmt.Errorf("build upstream request: %w", err)
 		}
 		resp, err = adaptiveHTTP(upstreamReq.Context(), func() (*http.Response, error) {

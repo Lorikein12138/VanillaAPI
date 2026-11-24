@@ -131,7 +131,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	if parsed == nil {
 		return nil, fmt.Errorf("parse request: empty request")
 	}
-	advisor := beginAnthropicAdvisorResponse(c, account, parsed.Body.Bytes())
+	beginAnthropicAdvisorResponse(c, account, parsed.Body.Bytes())
 	// API-key mappings and OAuth native IDs are resolved before mimicry.
 	validationModel := parsed.Model
 	if account != nil {
@@ -154,7 +154,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// partial-stream results all use the same billing and usage-log path.
 	defer func() {
 		if result != nil {
-			result.advisor = advisor
+			result.advisor = anthropicAdvisorResponseFromContext(c)
 			if tier := anthropicSpeedServiceTier(account, parsed.Speed, anthropicSpeedModel(parsed, result)); tier != nil {
 				result.ServiceTier = tier
 			}
@@ -189,24 +189,6 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	if account != nil && account.IsBedrock() {
 		return s.forwardBedrock(ctx, c, account, parsed, startTime)
-	}
-
-	// Beta policy: evaluate once; block check + cache filter set for buildUpstreamRequest.
-	// Always overwrite the cache to prevent stale values from a previous retry with a different account.
-	if account.Platform == PlatformAnthropic && c != nil {
-		clientBeta := c.GetHeader("anthropic-beta")
-		if c.Request != nil && hasAnthropicAdvisorBeta(c.Request.Header) {
-			clientBeta = retainAnthropicAdvisorBeta(clientBeta)
-		}
-		policy := s.evaluateBetaPolicy(ctx, clientBeta, account, parsed.Model)
-		if policy.blockErr != nil {
-			return nil, policy.blockErr
-		}
-		filterSet := policy.filterSet
-		if filterSet == nil {
-			filterSet = map[string]struct{}{}
-		}
-		c.Set(betaPolicyFilterSetKey, filterSet)
 	}
 
 	body := parsed.Body.Bytes()
@@ -338,6 +320,17 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		reqModel = mappedModel
 		parsed.Model = mappedModel
 		logger.LegacyPrintf("service.gateway", "Model mapping applied: %s -> %s (account: %s, source=%s)", originalModel, mappedModel, account.Name, mappingSource)
+	}
+
+	// Cache the policy for the selected wire model so request rebuilds use the same filters.
+	// Vertex evaluates the policy in its builder after normalizing its model ID.
+	if account.Platform == PlatformAnthropic && account.Type != AccountTypeServiceAccount && c != nil {
+		beta := readAnthropicBeta(ctx, c, account)
+		policy := s.evaluateBetaPolicy(ctx, beta.policyTokens(), account, reqModel)
+		if policy.blockErr != nil {
+			return nil, policy.blockErr
+		}
+		c.Set(betaPolicyFilterSetKey, policy.filterSet)
 	}
 
 	if s.shouldInjectAnthropicCacheTTL1h(ctx, account) {
