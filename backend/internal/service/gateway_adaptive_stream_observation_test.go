@@ -71,7 +71,7 @@ func TestGatewayAdaptiveStreamHealthReadsNormalizedEffort(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const model = "glm-5.2"
-			const body = "{\"model\":\"glm-5.2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"reasoning_effort\":\"xhigh\",\"stream\":true}"
+			const body = "{\"instructions\":\"be concise\",\"tool_stream\":false,\"model\":\"glm-5.2\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"reasoning_effort\":\"xhigh\",\"stream\":true}"
 			account := adaptiveTestAccount(801, tc.platform, 1)
 			account.Credentials = map[string]any{"api_protocol": APIProtocolChatCompletions, "api_key": "test-key", "base_url": "https://upstream.example"}
 			account.Extra = map[string]any{"openai_responses_mode": "force_chat_completions"}
@@ -116,6 +116,9 @@ func TestGatewayAdaptiveStreamHealthReadsNormalizedEffort(t *testing.T) {
 			key, ok := adaptiveStreamCandidateKey(next, route, &account, model)
 			require.True(t, ok)
 			require.True(t, strings.HasPrefix(key.sample.route.effort, tc.want+"/"))
+			require.Equal(t, adaptiveWorkText|adaptiveWorkInstructions|adaptiveWorkToolStream, key.work)
+			choice := adaptiveStreamChoice{key: key, requestedModel: model, rate: account.BillingRateMultiplier()}
+			require.True(t, choice.matches(next, &account))
 			require.Len(t, telemetry.streamHealth.series[key], 1)
 			require.Equal(t, 12*time.Second, telemetry.streamHealth.series[key][0].latency)
 		})
@@ -134,14 +137,36 @@ func TestGatewayAdaptiveStreamHealthReadsNormalizedEffort(t *testing.T) {
 }
 
 func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
-	for _, name := range []string{"protected-success", "canceled-drain", "client-disconnect", "truncated", "role-only", "double-http", "http-redirect", "model-conflict",
+	for _, name := range []string{"protected-success", "canceled-drain", "client-disconnect", "truncated", "role-only", "double-http", "http-redirect", "model-conflict", "unknown-ingress", "unknown-outbound", "unknown-ingress-outbound-media", "missing-ingress",
+		"duplicate-content", "duplicate-messages", "duplicate-ingress-tool-stream", "duplicate-outbound-tool-stream",
+		"rewritten", "native-session-override", "native-session-generated", "cache-breakpoint", "opaque-history", "reasoning-text-output-only", "deepseek-standard-alias", "deepseek-economy-alias",
+		"deepseek-standard-to-economy", "deepseek-economy-to-standard", "deepseek-unrelated-alias", "other-platform-alias",
 		"tier-conflict", "tool-first", "unexpected-late-tool", "escaped-late-tool", "reasoning-first", "unsupported-media", "normalized-effort", "switch-disabled",
 		"failed-finish-eof", "error-event-then-done", "error-payload-then-done", "interim-usage-truncated", "usage-before-more-output", "empty-usage-eof", "success-finish-eof", "final-usage-eof", "multi-partial", "multi-complete", "multi-duplicate", "multi-out-of-order", "multi-invalid-index", "multi-missing-index", "multi-unknown-count", "multi-over-limit", "multi-unknown-done", "multi-unknown-usage"} {
 		t.Run(name, func(t *testing.T) {
 			parent, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			group := int64(72)
-			account, _, _ := streamHealthFixture(group)
+			account, standard, _ := streamHealthFixture(group)
+			sentModel, echoModel := streamHealthEconomyModel, streamHealthEconomyModel
+			switch name {
+			case "deepseek-standard-alias", "deepseek-standard-to-economy":
+				account = standard
+				sentModel, echoModel = streamHealthPublicModel, "deepseek-v4-1-flash"
+				if name == "deepseek-standard-to-economy" {
+					echoModel += "-economy"
+				}
+			case "deepseek-economy-alias", "other-platform-alias":
+				echoModel = "deepseek-v4-1-flash-economy"
+				if name == "other-platform-alias" {
+					account.Platform = PlatformOpenAI
+					account.Extra = map[string]any{"openai_responses_mode": "force_chat_completions"}
+				}
+			case "deepseek-economy-to-standard":
+				echoModel = "deepseek-v4-1-flash"
+			case "deepseek-unrelated-alias":
+				echoModel = "deepseek-v4-1-pro"
+			}
 			now := time.Now().Truncate(time.Microsecond)
 			telemetry := &adaptiveTelemetry{}
 			telemetry.streamHealth.clock = func() time.Time { return now }
@@ -162,12 +187,62 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 				}
 				body = "{\"n\":" + count + "," + body[1:]
 			}
-			ctx := protectAdaptiveSelection(streamHealthContext(parent, telemetry, group, body))
+			if strings.HasPrefix(name, "deepseek-") || name == "other-platform-alias" || strings.HasPrefix(name, "native-session-") {
+				body = "{\"instructions\":\"be concise\",\"tool_stream\":true,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"search\"}}]," + body[1:]
+				body = strings.Replace(body, "[{\"role\":\"user\"", "[{\"role\":\"assistant\",\"content\":\"earlier\",\"reasoning_text\":\"plan\"},{\"role\":\"user\"", 1)
+			}
+			switch name {
+			case "cache-breakpoint":
+				body = strings.Replace(body, "\"hello\"", "[{\"type\":\"text\",\"text\":\"hello\",\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}}]", 1)
+			case "opaque-history":
+				body = strings.Replace(body, "[{\"role\":\"user\"", "[{\"role\":\"assistant\",\"content\":\"earlier\",\"reasoning_opaque\":\"\"},{\"role\":\"user\"", 1)
+			}
+			unknown := "\"x_fixture_shape\":null,"
+			media := "[{\"type\":\"text\",\"text\":\"hello\",\"input_audio\":{}}]"
+			ingress, forward := body, body
+			switch name {
+			case "duplicate-content":
+				forward = strings.Replace(body, `"content":"hello"`, `"content":"hello","content":`+media, 1)
+				ingress = forward
+			case "duplicate-messages":
+				forward = body[:len(body)-1] + `,"messages":[{"role":"user","content":` + media + `}]}`
+				ingress = forward
+			case "duplicate-ingress-tool-stream", "duplicate-outbound-tool-stream":
+				body = `{"tools":[{"type":"function","function":{"name":"search"}}],"tool_stream":true,` + body[1:]
+				duplicate := body[:len(body)-1] + `,"tool_stream":false}`
+				ingress, forward = duplicate, duplicate
+				if name == "duplicate-outbound-tool-stream" {
+					ingress = body
+				}
+			case "unknown-ingress":
+				ingress = "{" + unknown + body[1:]
+			case "unknown-outbound":
+				forward = "{" + unknown + body[1:]
+			case "unknown-ingress-outbound-media":
+				ingress = "{" + unknown + body[1:]
+				forward = strings.Replace(body, "\"hello\"", media, 1)
+			case "missing-ingress":
+				ingress = ""
+			case "rewritten":
+				forward = "{\"instructions\":\"be concise\"," + body[1:]
+			case "native-session-generated":
+				account.Credentials["base_url"] = "https://opencode.ai/zen/go/v1"
+			case "native-session-override":
+				account.Credentials[credKeyHeaderOverrideEnabled] = true
+				account.Credentials[credKeyHeaderOverrides] = map[string]any{"x-conversation-id": "fixture-session"}
+			}
+			ctx := streamHealthContext(parent, telemetry, group, ingress)
+			if name == "missing-ingress" {
+				ctx = WithGatewayAdaptiveIngress(parent, &SettingService{
+					settingRepo: adaptiveTestSettings{}, adaptiveTelemetry: telemetry,
+				}, "POST /v1/chat/completions", "sse")
+			}
+			ctx = protectAdaptiveSelection(ctx)
 			if name == "switch-disabled" {
 				ctx = parent
 			}
 
-			prefix := "data: {\"model\":\"" + streamHealthEconomyModel + "\",\"choices\":[{\"index\":0,\"delta\":"
+			prefix := "data: {\"model\":\"" + echoModel + "\",\"choices\":[{\"index\":0,\"delta\":"
 			frames := []adaptiveStreamTestFrame{
 				{step: time.Millisecond, line: prefix + "{\"role\":\"assistant\"}}]}\n\n"},
 				{step: time.Millisecond, line: ": upstream heartbeat\n\n"},
@@ -243,6 +318,8 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 			case "model-conflict":
 				frames[2].line = strings.Replace(frames[2].line, streamHealthEconomyModel, streamHealthPublicModel, 1)
 				want = streamMismatch
+			case "deepseek-standard-to-economy", "deepseek-economy-to-standard", "deepseek-unrelated-alias", "other-platform-alias":
+				want = streamMismatch
 			case "tier-conflict":
 				frames[2].line = strings.Replace(frames[2].line, "{\"model\":", "{\"service_tier\":\"priority\",\"model\":", 1)
 				want = streamMismatch
@@ -256,15 +333,22 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 				}
 			case "reasoning-first":
 				frames[2].line = prefix + "{\"reasoning\":\"thinking\"}}]}\n\n"
-			case "unsupported-media":
-				want = streamUnsupported
+			case "unsupported-media", "unknown-ingress-outbound-media", "duplicate-content", "duplicate-messages":
+				want = streamUnsupportedNonText
+			case "unknown-ingress", "missing-ingress", "duplicate-ingress-tool-stream":
+				want = streamUnsupportedIngress
+			case "unknown-outbound", "duplicate-outbound-tool-stream":
+				want = streamUnsupportedOutbound
+			case "reasoning-text-output-only":
+				frames[2].line = prefix + "{\"reasoning_text\":\"plan\"}}]}\n\n"
+				want = streamNoToken
 			}
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
 			if name == "client-disconnect" {
 				c.Writer = adaptiveStreamDisconnectedWriter{c.Writer}
 			}
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(ingress)).WithContext(ctx)
 			upstream := &adaptiveStreamTestUpstream{secondHTTP: name == "double-http"}
 			upstream.resp = &http.Response{StatusCode: http.StatusOK,
 				Header: http.Header{"Content-Type": {"text/event-stream"}},
@@ -273,7 +357,7 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 				upstream.resp.Request = &http.Request{Response: &http.Response{StatusCode: http.StatusTemporaryRedirect}}
 			}
 			svc := &OpenAIGatewayService{cfg: &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}}, httpUpstream: upstream}
-			result, err := svc.ForwardAsChatCompletions(ctx, c, &account, []byte(body), "", "")
+			result, err := svc.ForwardAsChatCompletions(ctx, c, &account, []byte(forward), "", "")
 			if name == "truncated" {
 				require.Error(t, err)
 			} else {
@@ -300,14 +384,62 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 				require.Less(t, *result.FirstTokenMs, 39800)
 			}
 			require.EqualValues(t, 1, telemetry.streamHealth.counters[want].Load())
+			for reason := streamUnsupportedNonText; reason <= streamUnsupportedOutbound; reason++ {
+				if reason != want {
+					require.Zero(t, telemetry.streamHealth.counters[reason].Load())
+				}
+			}
 			if want != streamSampled {
+				switch name {
+				case "duplicate-content":
+					require.Equal(t, 2, strings.Count(string(upstream.lastBody), `"content":`))
+				case "duplicate-messages":
+					require.Equal(t, 2, strings.Count(string(upstream.lastBody), `"messages":`))
+				case "duplicate-ingress-tool-stream", "duplicate-outbound-tool-stream":
+					require.Equal(t, 2, strings.Count(string(upstream.lastBody), `"tool_stream":`))
+				}
 				require.Empty(t, telemetry.streamHealth.series)
 				return
 			}
 			require.NotNil(t, result.FirstTokenMs)
 			require.Less(t, *result.FirstTokenMs, 39800)
 			require.Len(t, telemetry.streamHealth.series, 1)
-			key := streamHealthKey(t, ctx, &account)
+			next := streamHealthContext(parent, telemetry, group, ingress)
+			var key adaptiveStreamKey
+			if strings.HasPrefix(name, "native-session-") {
+				route, _ := gatewayAdaptiveRoute(next)
+				_, ok := adaptiveStreamCandidateKey(next, route, &account, streamHealthPublicModel)
+				require.False(t, ok)
+				require.True(t, adaptiveNativeSession(upstream.lastReq.Header))
+				for stored := range telemetry.streamHealth.series {
+					key = stored
+				}
+				require.Equal(t, adaptiveWorkText|adaptiveWorkInstructions|adaptiveWorkReasoningText|
+					adaptiveWorkDeclaredTools|adaptiveWorkToolStream|adaptiveWorkToolStreamTrue|
+					adaptiveWorkState|adaptiveWorkRewritten, key.work)
+			} else {
+				key = streamHealthKey(t, next, &account)
+				choice := adaptiveStreamChoice{key: key, requestedModel: streamHealthPublicModel, rate: account.BillingRateMultiplier()}
+				require.True(t, choice.matches(next, &account))
+			}
+			switch name {
+			case "cache-breakpoint":
+				require.Equal(t, adaptiveWorkText|adaptiveWorkCache|adaptiveWorkState, key.work)
+			case "opaque-history":
+				require.Equal(t, adaptiveWorkText|adaptiveWorkReasoningOpaque|adaptiveWorkState, key.work)
+			}
+			if name == "rewritten" {
+				require.Empty(t, telemetry.streamHealth.series[key])
+				key.work |= adaptiveWorkInstructions | adaptiveWorkRewritten
+			}
+			if name == "deepseek-standard-alias" || name == "deepseek-economy-alias" {
+				require.Equal(t, sentModel, gjson.GetBytes(upstream.lastBody, "model").Str)
+				require.Equal(t, sentModel, key.sample.model)
+				require.Equal(t, adaptiveWorkText|adaptiveWorkInstructions|adaptiveWorkReasoningText|
+					adaptiveWorkDeclaredTools|adaptiveWorkToolStream|adaptiveWorkToolStreamTrue, key.work)
+				require.NotEmpty(t, gjson.GetBytes(upstream.lastBody, "messages.0.reasoning_content").Str)
+				require.Equal(t, gjson.True, gjson.GetBytes(upstream.lastBody, "stream_options.include_usage").Type)
+			}
 			if name == "tool-first" || name == "unexpected-late-tool" || name == "escaped-late-tool" {
 				require.Empty(t, telemetry.streamHealth.series[key])
 				key.work |= adaptiveWorkUnexpectedTools

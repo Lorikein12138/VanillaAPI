@@ -7,7 +7,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const adaptiveStreamHistoryKey = "gateway:adaptive:stream-health:samples:v1"
+const adaptiveStreamHistoryKey = "gateway:adaptive:stream-health:samples:v2"
 
 var _ service.AdaptiveStreamHistoryStore = (*adaptiveHistoryStore)(nil)
 

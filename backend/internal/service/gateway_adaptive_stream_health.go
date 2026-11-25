@@ -17,21 +17,6 @@ import (
 
 const adaptiveStreamWindow = 15 * time.Minute
 
-type adaptiveWorkload uint8
-
-const (
-	adaptiveWorkUnknown adaptiveWorkload = 0
-	adaptiveWorkText    adaptiveWorkload = 1 << (iota - 1)
-	adaptiveWorkDeclaredTools
-	adaptiveWorkToolHistory
-	adaptiveWorkState
-	adaptiveWorkUnexpectedTools
-	adaptiveWorkRewritten
-)
-
-const adaptiveWorkKnown = adaptiveWorkText | adaptiveWorkDeclaredTools | adaptiveWorkToolHistory | adaptiveWorkState | adaptiveWorkUnexpectedTools | adaptiveWorkRewritten
-
-type adaptiveWorkloadKey struct{}
 type adaptiveStreamEffortKey struct{}
 
 type adaptiveStreamEffort struct {
@@ -93,111 +78,55 @@ func (effort adaptiveStreamEffort) outbound(account *Account, model string, work
 }
 
 func adaptiveNativeSession(headers http.Header) bool {
-	return strings.TrimSpace(headers.Get(grokConversationIDHeader)) != "" ||
-		strings.TrimSpace(headers.Get(openCodeSessionHeader)) != "" ||
-		strings.TrimSpace(headers.Get(codeBuddyConversationHeader)) != ""
+	for name, values := range headers {
+		if adaptiveNativeSessionHeader(name) {
+			for _, value := range values {
+				if strings.TrimSpace(value) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func adaptiveNativeSessionHeader(name string) bool {
+	return strings.EqualFold(name, grokConversationIDHeader) ||
+		strings.EqualFold(name, openCodeSessionHeader) || strings.EqualFold(name, codeBuddyConversationHeader)
+}
+
+func adaptiveMayAddNativeSession(account *Account) bool {
+	if account.IsGrok() || (account.Type == AccountTypeAPIKey && shouldSendOpenCodeSessionHeader(account, account.GetOpenAIBaseURL())) {
+		return true
+	}
+	for name := range account.GetHeaderOverrides() {
+		if adaptiveNativeSessionHeader(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// DeepSeek echoes these two sent models with a hyphen in the version.
+// Keep the sent model in the stream-health key, including its rate suffix.
+func adaptiveStreamModelMatches(account *Account, sent, echoed string) bool {
+	echoed = normalizeOpenAIModelForUpstream(account, echoed)
+	if strings.EqualFold(sent, echoed) {
+		return true
+	}
+	if account.Platform == PlatformDeepseek {
+		switch strings.ToLower(sent) {
+		case "deepseek-v4.1-flash":
+			return strings.EqualFold(echoed, "deepseek-v4-1-flash")
+		case "deepseek-v4.1-flash-economy":
+			return strings.EqualFold(echoed, "deepseek-v4-1-flash-economy")
+		}
+	}
+	return false
 }
 
 func adaptiveStreamOperation(operation string) bool {
 	return strings.HasPrefix(operation, "POST ") && strings.HasSuffix(operation, "/chat/completions")
-}
-
-func adaptiveChatWorkload(payload gjson.Result, nativeSession bool) adaptiveWorkload {
-	messages := payload.Get("messages")
-	if !messages.IsArray() || len(messages.Array()) == 0 || payload.Get("input").Exists() {
-		return adaptiveWorkUnknown
-	}
-	work := adaptiveWorkText
-	if nativeSession {
-		work |= adaptiveWorkState
-	}
-	supported := true
-	payload.ForEach(func(field, value gjson.Result) bool {
-		switch field.String() {
-		case "messages", "model", "stream", "stream_options", "service_tier",
-			"tools", "tool_choice", "functions", "function_call", "parallel_tool_calls",
-			"reasoning", "reasoning_effort", "thinking", "reasoning_enabled", "modalities",
-			"max_tokens", "max_completion_tokens", "max_output_tokens", "temperature", "top_p", "top_k", "min_p",
-			"presence_penalty", "frequency_penalty", "repetition_penalty", "stop", "n", "seed",
-			"logit_bias", "logprobs", "top_logprobs", "response_format", "user", "store",
-			"safety_identifier", "verbosity", "include_reasoning":
-		case "prompt_cache_key", "prompt_cache_retention", "cache_control", "cachedContent", "cached_content",
-			"session_id", "conversation_id", "previous_response_id", "conversation", "metadata", "file_ids":
-			work |= adaptiveWorkState
-		default:
-			supported = false
-		}
-		return supported
-	})
-	if !supported {
-		return adaptiveWorkUnknown
-	}
-	for _, modality := range payload.Get("modalities").Array() {
-		if modality.String() != "text" {
-			return adaptiveWorkUnknown
-		}
-	}
-	for _, field := range []string{"tools", "functions"} {
-		if tools := payload.Get(field); tools.Exists() {
-			if !tools.IsArray() {
-				return adaptiveWorkUnknown
-			}
-			for _, tool := range tools.Array() {
-				if field == "tools" && tool.Get("type").String() != "function" {
-					return adaptiveWorkUnknown
-				}
-				work |= adaptiveWorkDeclaredTools
-			}
-		}
-	}
-	if payload.Get("tool_choice").Exists() || payload.Get("function_call").Exists() {
-		work |= adaptiveWorkDeclaredTools
-	}
-	for _, message := range messages.Array() {
-		switch message.Get("role").String() {
-		case "tool", "function":
-			work |= adaptiveWorkToolHistory
-		case "system", "developer", "user", "assistant":
-		default:
-			return adaptiveWorkUnknown
-		}
-		supported := true
-		message.ForEach(func(field, value gjson.Result) bool {
-			switch field.String() {
-			case "role", "name", "content", "reasoning", "reasoning_content", "refusal":
-			case "tool_calls", "tool_call_id", "function_call":
-				work |= adaptiveWorkToolHistory
-			case "reasoning_details", "encrypted_content", "reasoning_content_encrypted", "audio_id", "file_id", "cache_control":
-				work |= adaptiveWorkState
-			default:
-				supported = false
-			}
-			return supported
-		})
-		if !supported {
-			return adaptiveWorkUnknown
-		}
-		content := message.Get("content")
-		if content.IsArray() {
-			for _, part := range content.Array() {
-				switch part.Get("type").String() {
-				case "text", "input_text", "output_text":
-					if part.Get("cache_control").Exists() {
-						work |= adaptiveWorkState
-					}
-				case "file", "input_file", "file_reference":
-					work |= adaptiveWorkState
-				case "tool_result":
-					work |= adaptiveWorkToolHistory
-				default:
-					return adaptiveWorkUnknown
-				}
-			}
-		} else if content.Type != gjson.String && content.Type != gjson.Null {
-			return adaptiveWorkUnknown
-		}
-	}
-	return work
 }
 
 type adaptiveSemanticDelta uint8
@@ -293,7 +222,7 @@ type adaptiveStreamFacts struct {
 	model             string
 	tier              string
 	effort            string
-	work              adaptiveWorkload
+	outbound          adaptiveChatShape
 	sent              bool
 	terminal          bool
 	aborted           bool
@@ -326,6 +255,7 @@ func observeAdaptiveStreamResult(ctx context.Context, o *adaptiveObservation, ac
 	o.streamObserved = true
 	facts, first, calls, status := o.streamFacts, o.first, o.calls, o.status
 	o.mu.Unlock()
+	ingress, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveChatShape)
 	switch {
 	case ctx.Err() != nil || facts.aborted || (result != nil && result.ClientDisconnect):
 		health.count(streamCanceled)
@@ -333,8 +263,12 @@ func observeAdaptiveStreamResult(ctx context.Context, o *adaptiveObservation, ac
 		health.count(streamMultiAttempt)
 	case route.transport != "sse" || !facts.sent || (result != nil && (!result.Stream || result.OpenAIWSMode)):
 		health.count(streamUnknownWire)
-	case facts.work == adaptiveWorkUnknown || route.nonText || ctx.Value(adaptiveWorkloadKey{}) == nil:
-		health.count(streamUnsupported)
+	case route.nonText || ingress.nonText || facts.outbound.nonText:
+		health.count(streamUnsupportedNonText)
+	case ingress.work == adaptiveWorkUnknown:
+		health.count(streamUnsupportedIngress)
+	case facts.outbound.work == adaptiveWorkUnknown:
+		health.count(streamUnsupportedOutbound)
 	case calls != 1 || status < 200 || status >= 300 || err != nil || result == nil || !facts.terminal:
 		health.count(streamNoTerminal)
 	default:
@@ -345,16 +279,18 @@ func observeAdaptiveStreamResult(ctx context.Context, o *adaptiveObservation, ac
 		}
 		observedTier, tierConflict := facts.observedTier.value()
 		outboundTier := adaptiveTierBucket(adaptiveTier(facts.tier))
-		observedModel := normalizeOpenAIModelForUpstream(account, result.UpstreamResponseModel)
 		if account == nil || facts.model == "" || len(facts.model) > 128 || facts.effort == "unknown" || outboundTier == "unknown" || tierConflict ||
-			result.UpstreamResponseModelConflict || (result.UpstreamResponseModel != "" && !strings.EqualFold(facts.model, observedModel)) ||
+			result.UpstreamResponseModelConflict || (result.UpstreamResponseModel != "" && !adaptiveStreamModelMatches(account, facts.model, result.UpstreamResponseModel)) ||
 			(observedTier != "" && adaptiveTierBucket(adaptiveTier(observedTier)) != outboundTier &&
 				!(account.IsOpenAIOAuthLike() && codexOAuthResponseTierIsNonAuthoritative(observedTier))) {
 			health.count(streamMismatch)
 			return
 		}
 		route.tier, route.effort = outboundTier, facts.effort
-		work := facts.work
+		work := facts.outbound.work
+		if work != ingress.work {
+			work |= ingress.work | adaptiveWorkRewritten
+		}
 		if facts.unexpectedTools {
 			work |= adaptiveWorkUnexpectedTools
 		}
@@ -422,7 +358,9 @@ type adaptiveStreamCounter uint8
 const (
 	streamSampled adaptiveStreamCounter = iota
 	streamUnknownWire
-	streamUnsupported
+	streamUnsupportedNonText
+	streamUnsupportedIngress
+	streamUnsupportedOutbound
 	streamNoTerminal
 	streamMultiAttempt
 	streamCanceled
@@ -448,7 +386,8 @@ const (
 )
 
 var adaptiveStreamCounterNames = [streamCounterCount]string{
-	"sampled", "not_streaming_or_wire_unknown", "unsupported_workload", "non_2xx_or_no_terminal",
+	"sampled", "not_streaming_or_wire_unknown",
+	"unsupported_workload_non_text", "unsupported_workload_ingress", "unsupported_workload_outbound", "non_2xx_or_no_terminal",
 	"multi_attempt", "cancel_or_disconnect", "no_semantic_token_or_invalid_ttft", "model_or_tier_mismatch",
 	"queued", "queue_full", "flushed", "flush_failed", "restored", "restore_failed", "capacity_truncated",
 	"binding_miss", "binding_unknown", "no_comparable_alternate", "slow_demoted", "recovered",
@@ -475,10 +414,17 @@ func (h *adaptiveStreamHealth) count(counter adaptiveStreamCounter) { h.counters
 
 func (h *adaptiveStreamHealth) summarize() {
 	var fields []slog.Attr
+	var unsupported uint64
 	for i, name := range adaptiveStreamCounterNames {
 		if count := h.counters[i].Swap(0); count > 0 {
 			fields = append(fields, slog.Uint64(name, count))
+			if i >= int(streamUnsupportedNonText) && i <= int(streamUnsupportedOutbound) {
+				unsupported += count
+			}
 		}
+	}
+	if unsupported > 0 {
+		fields = append(fields, slog.Uint64("unsupported_workload", unsupported))
 	}
 	if len(fields) > 0 {
 		slog.LogAttrs(context.Background(), slog.LevelInfo, "gateway.adaptive_stream_health", fields...)
@@ -557,10 +503,11 @@ const (
 
 func withAdaptiveStreamPermission(ctx context.Context, state adaptiveBindingState, eligible bool) context.Context {
 	route, ok := gatewayAdaptiveRoute(ctx)
-	work, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveWorkload)
+	shape, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveChatShape)
+	work := shape.work
 	_, guardian := openAIGuardianParentAffinityFromContext(ctx)
 	if !ok || !eligible || guardian || route.protected || route.transport != "sse" ||
-		work == 0 || work & ^(adaptiveWorkText|adaptiveWorkDeclaredTools) != 0 {
+		work == 0 || work & ^adaptiveWorkSortable != 0 {
 		return ctx
 	}
 	health := &adaptiveTelemetryForContext(ctx).streamHealth
@@ -583,12 +530,16 @@ type adaptiveStreamChoice struct {
 }
 
 func adaptiveStreamCandidateKey(ctx context.Context, route adaptiveRoute, account *Account, requestedModel string) (adaptiveStreamKey, bool) {
-	work, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveWorkload)
+	shape, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveChatShape)
+	work := shape.work
 	if work == 0 || requestedModel == "" {
 		return adaptiveStreamKey{}, false
 	}
 	model := normalizeOpenAIModelForUpstream(account, resolveOpenAIForwardModel(account, requestedModel, ""))
 	if model == "" || !synchronousNativeChatProtocol(account, model) {
+		return adaptiveStreamKey{}, false
+	}
+	if work&adaptiveWorkCompat != 0 && adaptiveMayAddNativeSession(account) {
 		return adaptiveStreamKey{}, false
 	}
 	effort, _ := ctx.Value(adaptiveStreamEffortKey{}).(adaptiveStreamEffort)

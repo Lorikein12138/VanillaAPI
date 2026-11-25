@@ -277,14 +277,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 		facts.model = payload.Get("model").String()
 		facts.tier = payload.Get("service_tier").String()
 		facts.effort = adaptiveEffort(payload)
-		facts.work = adaptiveChatWorkload(payload, adaptiveNativeSession(upstreamReq.Header))
-		inbound, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveWorkload)
-		if inbound == adaptiveWorkUnknown {
-			facts.work = adaptiveWorkUnknown
-		} else if facts.work != adaptiveWorkUnknown && facts.work != inbound {
-			// Keep rewritten workload out of the bucket queried before normalization.
-			facts.work |= inbound | adaptiveWorkRewritten
-		}
+		facts.outbound = adaptiveChatWorkload(payload, adaptiveNativeSession(upstreamReq.Header))
 	}
 
 	proxyURL := ""

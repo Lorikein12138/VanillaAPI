@@ -22,6 +22,9 @@ func TestAdaptiveHistoryStoreStreamHealthIsolatedIdempotentAndExpiring(t *testin
 	stream := store.(service.AdaptiveStreamHistoryStore)
 	now := time.Unix(1_800_000_000, 0)
 	cutoff := now.Add(-15 * time.Minute)
+	const oldStreamHistoryKey = "gateway:adaptive:stream-health:samples:v1"
+	require.NoError(t, rdb.ZAdd(ctx, oldStreamHistoryKey, redis.Z{Score: float64(now.UnixMicro()), Member: "old-stream"}).Err())
+	require.True(t, rdb.Expire(ctx, oldStreamHistoryKey, 10*time.Minute).Val())
 	require.NoError(t, store.Merge(ctx, now.Add(-service.AdaptiveHistoryRetention), []service.AdaptiveHistoryRecord{{At: now, Payload: "legacy"}}))
 	records := []service.AdaptiveHistoryRecord{
 		{At: cutoff, Payload: "excluded-boundary"},
@@ -43,7 +46,13 @@ func TestAdaptiveHistoryStoreStreamHealthIsolatedIdempotentAndExpiring(t *testin
 	require.NoError(t, err)
 	require.Len(t, legacy, 1)
 	require.Equal(t, "legacy", legacy[0].Payload)
+	require.Equal(t, 10*time.Minute, server.TTL(oldStreamHistoryKey))
+	require.Equal(t, 15*time.Minute, server.TTL("gateway:adaptive:stream-health:samples:v2"))
+	oldStream, err := rdb.ZRange(ctx, oldStreamHistoryKey, 0, -1).Result()
+	require.NoError(t, err)
+	require.Equal(t, []string{"old-stream"}, oldStream)
 	server.FastForward(15 * time.Minute)
+	require.False(t, server.Exists(oldStreamHistoryKey))
 	require.False(t, server.Exists(adaptiveStreamHistoryKey))
 	require.True(t, server.Exists(adaptiveHistoryKey))
 }
