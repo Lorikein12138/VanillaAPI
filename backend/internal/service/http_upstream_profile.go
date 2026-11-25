@@ -16,6 +16,20 @@ const (
 type httpUpstreamProfileContextKey struct{}
 type httpUpstreamDisableRedirectsContextKey struct{}
 type httpUpstreamPublicHostsOnlyContextKey struct{}
+type httpUpstreamRetryObserverKey struct{}
+
+// WithHTTPUpstreamRetryObserver registers a request-local observer for explicit
+// transport retries. The transport calls it synchronously before resending.
+func WithHTTPUpstreamRetryObserver(ctx context.Context, observe func()) context.Context {
+	return context.WithValue(ctx, httpUpstreamRetryObserverKey{}, observe)
+}
+
+// NotifyHTTPUpstreamRetry signals an explicit resend of the current request.
+func NotifyHTTPUpstreamRetry(ctx context.Context) {
+	if observe, _ := ctx.Value(httpUpstreamRetryObserverKey{}).(func()); observe != nil {
+		observe()
+	}
+}
 
 // WithHTTPUpstreamProfile injects an upstream transport profile into ctx.
 func WithHTTPUpstreamProfile(ctx context.Context, profile HTTPUpstreamProfile) context.Context {

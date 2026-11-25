@@ -27,17 +27,9 @@ func ProvideAdaptiveHistoryStore(rdb *redis.Client) service.AdaptiveHistoryStore
 }
 
 func (s *adaptiveHistoryStore) Read(ctx context.Context, after, through time.Time) ([]service.AdaptiveHistoryRecord, error) {
-	rows, err := s.redis.ZRevRangeByScoreWithScores(ctx, adaptiveHistoryKey, &redis.ZRangeBy{
-		Min: "(" + adaptiveHistoryTime(after), Max: adaptiveHistoryTime(through), Count: adaptiveHistoryLimit,
-	}).Result()
+	records, err := s.readSamples(ctx, adaptiveHistoryKey, after, through)
 	if err != nil {
 		return nil, err
-	}
-	records := make([]service.AdaptiveHistoryRecord, 0, len(rows))
-	for _, row := range rows {
-		if payload, ok := row.Member.(string); ok && len(payload) <= service.AdaptiveHistoryMaxMember {
-			records = append(records, service.AdaptiveHistoryRecord{At: time.UnixMicro(int64(row.Score)), Payload: payload})
-		}
 	}
 	states, err := s.redis.Eval(ctx, adaptiveHealthRead, []string{adaptiveHealthIndex, adaptiveHealthData},
 		adaptiveHistoryTime(through.Add(-adaptiveHealthTTL)), adaptiveHistoryTime(through), adaptiveHealthLimit).StringSlice()
@@ -50,6 +42,22 @@ func (s *adaptiveHistoryStore) Read(ctx context.Context, after, through time.Tim
 			records = append(records, service.AdaptiveHistoryRecord{
 				At: time.UnixMicro(score), Payload: states[i+2], StateKey: states[i],
 			})
+		}
+	}
+	return records, nil
+}
+
+func (s *adaptiveHistoryStore) readSamples(ctx context.Context, key string, after, through time.Time) ([]service.AdaptiveHistoryRecord, error) {
+	rows, err := s.redis.ZRevRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+		Min: "(" + adaptiveHistoryTime(after), Max: adaptiveHistoryTime(through), Count: adaptiveHistoryLimit,
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+	records := make([]service.AdaptiveHistoryRecord, 0, len(rows))
+	for _, row := range rows {
+		if payload, ok := row.Member.(string); ok && len(payload) <= service.AdaptiveHistoryMaxMember {
+			records = append(records, service.AdaptiveHistoryRecord{At: time.UnixMicro(int64(row.Score)), Payload: payload})
 		}
 	}
 	return records, nil

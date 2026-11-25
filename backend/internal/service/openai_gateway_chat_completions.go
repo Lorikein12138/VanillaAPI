@@ -99,6 +99,8 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	originalAdaptiveContext := ctx
 	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
 	if adaptiveObservation != nil {
+		adaptiveObservation.streamOwner = true
+		adaptiveObservation.streamFacts.clock = adaptiveTelemetryForContext(ctx).streamHealth.now
 		defer func() {
 			observeAdaptiveOpenAIResultWithObserver(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr, upstreamResponseModelObserverFromContext(c))
 		}()

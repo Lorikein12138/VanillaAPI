@@ -417,6 +417,7 @@ func (t *grokAccessDeniedFallbackTransport) RoundTrip(req *http.Request) (*http.
 	if err != nil {
 		return resp, nil
 	}
+	service.NotifyHTTPUpstreamRetry(req.Context())
 	fallbackResp, fallbackErr := t.base.RoundTrip(fallbackReq)
 	if fallbackErr != nil {
 		slog.Debug("grok_cli_access_denied_api_fallback_failed", "path", req.URL.EscapedPath(), "error", fallbackErr)

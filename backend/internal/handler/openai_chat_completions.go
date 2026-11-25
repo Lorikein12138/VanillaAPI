@@ -86,6 +86,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	} else if changed {
 		body = cappedBody
+		c.Request = c.Request.WithContext(service.SetGatewayAdaptiveChatPolicyInput(c.Request.Context(), body))
 	}
 	reqStream, ok := parseOpenAICompatibleStream(body)
 	if !ok {

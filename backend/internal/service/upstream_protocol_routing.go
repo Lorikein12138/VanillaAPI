@@ -48,6 +48,17 @@ func resolveUpstreamProtocol(account *Account, inbound, model string, catalog []
 	return APIProtocolResponses
 }
 
+func synchronousNativeChatProtocol(account *Account, model string) bool {
+	if account.routesByModel() && !isNativeUpstreamProtocol(account.GetAPIProtocol()) {
+		return false
+	}
+	// These accounts can select a bridge based on the full request body.
+	if account.IsGrokOAuth() {
+		return false
+	}
+	return resolveUpstreamProtocol(account, APIProtocolChatCompletions, model, nil) == APIProtocolChatCompletions
+}
+
 // resolveModelRoutedProtocol 返回按模型分流账号对该模型的首选上游协议（不考虑入站
 // 协议与上游模型目录），供连接测试等没有入站协议的场景使用。
 func (a *Account) resolveModelRoutedProtocol(model string) string {

@@ -1924,22 +1924,8 @@ func NormalizeGLMOpenAIReasoningEffort(body []byte, mappedModel string) ([]byte,
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mappedModel)), "glm-") {
 		return body, false
 	}
-
-	path := "reasoning.effort"
-	raw := strings.TrimSpace(gjson.GetBytes(body, path).String())
-	if raw == "" {
-		path = "reasoning_effort"
-		raw = strings.TrimSpace(gjson.GetBytes(body, path).String())
-	}
-	if raw == "" {
-		return body, false
-	}
-
-	mapped := normalizeGLMOpenAIReasoningEffort(raw)
-	if isGLM53Model(mappedModel) && mapped == "high" && normalizeEffortToken(raw) == "low" {
-		mapped = "low"
-	}
-	if mapped == "" || mapped == raw {
+	path, mapped := glmOpenAIReasoningRewrite(mappedModel, gjson.GetBytes(body, "reasoning.effort").String(), gjson.GetBytes(body, "reasoning_effort").String())
+	if mapped == "" {
 		return body, false
 	}
 
@@ -1948,6 +1934,26 @@ func NormalizeGLMOpenAIReasoningEffort(body []byte, mappedModel string) ([]byte,
 		return body, false
 	}
 	return modified, true
+}
+
+// glmOpenAIReasoningRewrite is the scalar part of raw CC normalization. The
+// scheduler can predict the same edit using its request descriptor.
+func glmOpenAIReasoningRewrite(model, nested, flat string) (path, mapped string) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "glm-") {
+		return "", ""
+	}
+	path, raw := "reasoning.effort", strings.TrimSpace(nested)
+	if raw == "" {
+		path, raw = "reasoning_effort", strings.TrimSpace(flat)
+	}
+	mapped = normalizeGLMOpenAIReasoningEffort(raw)
+	if isGLM53Model(model) && mapped == "high" && normalizeEffortToken(raw) == "low" {
+		mapped = "low"
+	}
+	if mapped == raw {
+		return "", ""
+	}
+	return path, mapped
 }
 
 func normalizeEffortToken(raw string) string {

@@ -85,6 +85,11 @@ func SetGatewayAdaptiveInput(ctx context.Context, body []byte) context.Context {
 
 // WithGatewayAdaptiveUpstreamSession protects provider-native continuity.
 func WithGatewayAdaptiveUpstreamSession(ctx context.Context, headers http.Header) context.Context {
+	if adaptiveNativeSession(headers) {
+		if work, ok := ctx.Value(adaptiveWorkloadKey{}).(adaptiveWorkload); ok && work != adaptiveWorkUnknown {
+			ctx = context.WithValue(ctx, adaptiveWorkloadKey{}, work|adaptiveWorkState)
+		}
+	}
 	if strings.TrimSpace(headers.Get(grokConversationIDHeader)) != "" {
 		return protectAdaptiveSelection(ctx)
 	}
@@ -147,6 +152,14 @@ func withGatewayAdaptiveRoute(ctx context.Context, operation, transport string, 
 		route.thinkingLevel = geminiThinkingLevelFromClaudeBody(body, thinking)
 		route.thinkingEnabled = thinking != nil && (thinking.Type == "enabled" || thinking.Type == "adaptive")
 	}
+	if adaptiveStreamOperation(operation) && payload.Get("messages").IsArray() && !payload.Get("input").Exists() {
+		work := adaptiveChatWorkload(payload, false)
+		if requestHasGrokEncryptedReasoning(body) && work != adaptiveWorkUnknown {
+			work |= adaptiveWorkState
+		}
+		ctx = context.WithValue(ctx, adaptiveWorkloadKey{}, work)
+		ctx = withAdaptiveStreamEffort(ctx, payload, route.effort)
+	}
 	return WithGatewayAdaptiveRequestModel(context.WithValue(ctx, adaptiveRouteKey{}, route), payload.Get("model").String())
 }
 
@@ -156,11 +169,7 @@ func adaptiveEffort(payload gjson.Result) string {
 	if effort == "" {
 		effort = payload.Get("reasoning_effort").String()
 	}
-	switch effort {
-	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
-	default:
-		effort = "custom"
-	}
+	effort = adaptiveEffortToken(effort)
 	for _, field := range []string{"thinking.budget_tokens", "generationConfig.thinkingConfig.thinkingBudget", "max_tokens", "max_output_tokens", "max_completion_tokens", "generationConfig.maxOutputTokens", "n"} {
 		value := payload.Get(field)
 		if value.Type == gjson.Number {
@@ -185,6 +194,15 @@ func adaptiveEffort(payload gjson.Result) string {
 		effort += "/tools"
 	}
 	return effort
+}
+
+func adaptiveEffortToken(value string) string {
+	switch value {
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return value
+	default:
+		return "custom"
+	}
 }
 
 func adaptiveDurationBucket(value gjson.Result) (string, bool) {
@@ -414,11 +432,12 @@ type adaptiveSeries struct {
 }
 
 type adaptiveTelemetry struct {
-	mu          sync.Mutex
-	series      map[adaptiveSampleKey]*adaptiveSeries
-	history     *adaptiveHistory
-	exploration adaptiveExploration
-	recovery    adaptiveRecovery
+	mu           sync.Mutex
+	series       map[adaptiveSampleKey]*adaptiveSeries
+	history      *adaptiveHistory
+	exploration  adaptiveExploration
+	recovery     adaptiveRecovery
+	streamHealth adaptiveStreamHealth
 }
 
 var gatewayAdaptiveTelemetry adaptiveTelemetry
@@ -613,13 +632,16 @@ func (t *adaptiveTelemetry) score(key adaptiveSampleKey, now time.Time) adaptive
 type adaptivePeerMatch func(*Account, *Account) bool
 
 type adaptiveProbeOptions[T any] struct {
-	scope       adaptiveProbeScope
-	opportunity func() bool
-	canProbe    func(*Account) bool
-	healthPeers adaptivePeerMatch
-	waitOrder   *[]T
-	reserve     func(adaptiveSampleKey) bool
-	immediate   bool
+	scope        adaptiveProbeScope
+	opportunity  func() bool
+	canProbe     func(*Account) bool
+	healthPeers  adaptivePeerMatch
+	waitOrder    *[]T
+	reserve      func(adaptiveSampleKey) bool
+	immediate    bool
+	streamChoice *adaptiveStreamChoice
+	streamModel  string
+	streamRank   func([]T, map[int64]adaptiveSampleKey) bool
 }
 
 // rankAdaptivePool expects a baseline order and an equivalence relation for
@@ -651,6 +673,11 @@ func rankAdaptivePoolWithProbe[T any](ctx context.Context, pool []T, account fun
 	probe.scope.groupID, _ = ctx.Value(adaptiveProbeGroupKey{}).(int64)
 	probe.scope.model, _ = ctx.Value(adaptiveProbeModelKey{}).(string)
 	telemetry := adaptiveTelemetryForContext(ctx)
+	now := time.Now()
+	if probe.streamChoice != nil && ctx.Value(adaptiveStreamPermissionKey{}) != nil {
+		now = telemetry.streamHealth.now()
+	}
+	var reserveStream func(adaptiveSampleKey, adaptiveStreamKey) bool
 	if explore && ctx.Value(adaptiveNoExploreKey{}) == nil {
 		if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); ingress != nil {
 			probe.opportunity = func() bool { return ingress.explored.CompareAndSwap(false, true) }
@@ -658,11 +685,27 @@ func rankAdaptivePoolWithProbe[T any](ctx context.Context, pool []T, account fun
 				scope := probe.scope
 				scope.route = route
 				scope.route.replayable = false
-				probe.reserve = telemetry.recovery.opportunity(ctx, ingress, scope, time.Now())
+				reserveStream = telemetry.recovery.opportunityWithStream(ctx, ingress, scope, now)
+				if reserveStream != nil {
+					probe.reserve = func(key adaptiveSampleKey) bool { return reserveStream(key, adaptiveStreamKey{}) }
+				}
 			}
 		}
 	}
-	return rankAdaptiveWithTelemetry(telemetry, route, pool, account, model, peers, probe, time.Now(), func(candidate *Account, upstreamModel string) string {
+	if probe.streamChoice != nil && ctx.Value(adaptiveStreamPermissionKey{}) != nil {
+		probe.streamRank = func(ordered []T, oldKeys map[int64]adaptiveSampleKey) bool {
+			var reserve func(adaptiveStreamKey) bool
+			if reserveStream != nil {
+				reserve = func(key adaptiveStreamKey) bool {
+					oldKey, ok := oldKeys[key.sample.accountID]
+					return ok && reserveStream(oldKey, key)
+				}
+			}
+			*probe.streamChoice = chooseAdaptiveStreamAccount(ctx, ordered, account, peers, probe.canProbe, probe.streamModel, now, reserve)
+			return probe.streamChoice.accountID != 0
+		}
+	}
+	return rankAdaptiveWithTelemetry(telemetry, route, pool, account, model, peers, probe, now, func(candidate *Account, upstreamModel string) string {
 		return adaptiveCandidateTier(ctx, route, candidate, upstreamModel)
 	})
 }
@@ -752,6 +795,9 @@ func rankAdaptiveWithTelemetry[T any](telemetry *adaptiveTelemetry, route adapti
 				pool[i], pool[j] = pool[j], pool[i]
 			}
 		}
+	}
+	if probe.streamRank != nil && probe.streamRank(pool, keys) {
+		return true, 0
 	}
 	baseline := account(pool[0])
 	if probe.reserve != nil {
@@ -999,6 +1045,9 @@ type adaptiveObservation struct {
 	calls           int
 	status          int
 	failureRecorded bool
+	streamOwner     bool
+	streamObserved  bool
+	streamFacts     adaptiveStreamFacts
 }
 
 func beginAdaptiveObservation(ctx context.Context) (context.Context, *adaptiveObservation) {
@@ -1015,7 +1064,11 @@ func (o *adaptiveObservation) recordHTTP(send func() (*http.Response, error)) (*
 	}
 	o.mu.Lock()
 	if o.calls == 0 {
-		o.first = time.Now()
+		if o.streamFacts.clock != nil {
+			o.first = o.streamFacts.clock()
+		} else {
+			o.first = time.Now()
+		}
 	}
 	o.calls++
 	o.mu.Unlock()
@@ -1099,6 +1152,7 @@ func observeAdaptiveOpenAIResult(ctx context.Context, observation *adaptiveObser
 }
 
 func observeAdaptiveOpenAIResultWithObserver(ctx context.Context, observation *adaptiveObservation, account *Account, result *OpenAIForwardResult, err error, observer *upstreamResponseModelObserver) {
+	observeAdaptiveStreamResult(ctx, observation, account, result, err)
 	if result != nil && (result.ClientDisconnect || result.UpstreamResponseModelConflict) {
 		return
 	}

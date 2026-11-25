@@ -26,16 +26,15 @@ const ollamaCloudDefaultMaxTokensCap = 65535
 // clamp；非 DeepSeek 模型仅保留既有 openai 平台 Ollama 账号（force_chat_completions
 // 判定）的 clamp，不扩展到其它平台。
 func clampOllamaCloudUpstreamMaxTokens(account *Account, body []byte) []byte {
-	if account == nil || len(body) == 0 {
-		return body
-	}
-	if !isOllamaCloudBaseURL(account.GetOpenAIBaseURL()) {
-		return body
-	}
-	if !isDeepSeekModel(gjson.GetBytes(body, "model").String()) && !isOllamaCloudRawChatCompletionsAccount(account) {
+	if len(body) == 0 || !rawChatHasOutputTokenClamp(account, gjson.GetBytes(body, "model").String()) {
 		return body
 	}
 	return clampOllamaCloudMaxTokens(account, body)
+}
+
+func rawChatHasOutputTokenClamp(account *Account, model string) bool {
+	return account != nil && isOllamaCloudBaseURL(account.GetOpenAIBaseURL()) &&
+		(isDeepSeekModel(model) || isOllamaCloudRawChatCompletionsAccount(account))
 }
 
 // ollamaCloudResponsesUpstreamBaseURL 返回原生 /v1/responses 本次实际选用的上游
