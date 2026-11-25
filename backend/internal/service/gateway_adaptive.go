@@ -86,8 +86,9 @@ func SetGatewayAdaptiveInput(ctx context.Context, body []byte) context.Context {
 // WithGatewayAdaptiveUpstreamSession protects provider-native continuity.
 func WithGatewayAdaptiveUpstreamSession(ctx context.Context, headers http.Header) context.Context {
 	if adaptiveNativeSession(headers) {
-		if work, ok := ctx.Value(adaptiveWorkloadKey{}).(adaptiveWorkload); ok && work != adaptiveWorkUnknown {
-			ctx = context.WithValue(ctx, adaptiveWorkloadKey{}, work|adaptiveWorkState)
+		if shape, ok := ctx.Value(adaptiveWorkloadKey{}).(adaptiveChatShape); ok && shape.work != adaptiveWorkUnknown {
+			shape.work |= adaptiveWorkState
+			ctx = context.WithValue(ctx, adaptiveWorkloadKey{}, shape)
 		}
 	}
 	if strings.TrimSpace(headers.Get(grokConversationIDHeader)) != "" {
@@ -152,12 +153,12 @@ func withGatewayAdaptiveRoute(ctx context.Context, operation, transport string, 
 		route.thinkingLevel = geminiThinkingLevelFromClaudeBody(body, thinking)
 		route.thinkingEnabled = thinking != nil && (thinking.Type == "enabled" || thinking.Type == "adaptive")
 	}
-	if adaptiveStreamOperation(operation) && payload.Get("messages").IsArray() && !payload.Get("input").Exists() {
-		work := adaptiveChatWorkload(payload, false)
-		if requestHasGrokEncryptedReasoning(body) && work != adaptiveWorkUnknown {
-			work |= adaptiveWorkState
+	if adaptiveStreamOperation(operation) && len(body) != 0 {
+		shape := adaptiveChatWorkload(payload, false)
+		if requestHasGrokEncryptedReasoning(body) && shape.work != adaptiveWorkUnknown {
+			shape.work |= adaptiveWorkState
 		}
-		ctx = context.WithValue(ctx, adaptiveWorkloadKey{}, work)
+		ctx = context.WithValue(ctx, adaptiveWorkloadKey{}, shape)
 		ctx = withAdaptiveStreamEffort(ctx, payload, route.effort)
 	}
 	return WithGatewayAdaptiveRequestModel(context.WithValue(ctx, adaptiveRouteKey{}, route), payload.Get("model").String())

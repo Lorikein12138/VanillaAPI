@@ -215,10 +215,8 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, upstreamBody, upstreamModel)
 	var streamFacts *adaptiveStreamFacts
 	if o := adaptiveHTTPObservation(ctx); o != nil && o.streamOwner && clientStream {
-		if ctx.Value(adaptiveWorkloadKey{}) != nil {
-			streamFacts = &o.streamFacts
-			ctx = context.WithValue(ctx, adaptiveRawChatSendKey{}, streamFacts)
-		}
+		streamFacts = &o.streamFacts
+		ctx = context.WithValue(ctx, adaptiveRawChatSendKey{}, streamFacts)
 	}
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
 	if err != nil {
@@ -419,7 +417,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 					frame := gjson.Parse(trimmedPayload)
 					choices := frame.Get("choices").Array()
 					healthTerminal.observe(frame, choices)
-					undeclaredTools := facts.work&(adaptiveWorkDeclaredTools|adaptiveWorkToolHistory) == 0 && !facts.unexpectedTools
+					undeclaredTools := facts.outbound.work&(adaptiveWorkDeclaredTools|adaptiveWorkToolHistory) == 0 && !facts.unexpectedTools
 					if facts.firstDelta == adaptiveNoDelta || undeclaredTools {
 						delta := adaptiveChatDelta(choices)
 						if facts.firstDelta == adaptiveNoDelta && delta != adaptiveNoDelta {

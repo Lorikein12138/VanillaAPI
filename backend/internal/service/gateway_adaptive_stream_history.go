@@ -18,6 +18,8 @@ type AdaptiveStreamHistoryStore interface {
 	MergeStreamHealth(ctx context.Context, cutoff time.Time, records []AdaptiveHistoryRecord) (int64, error)
 }
 
+const adaptiveStreamHistoryVersion = 2
+
 type adaptiveStreamStoredSample struct {
 	Version int
 	Wire    string
@@ -84,7 +86,7 @@ func (h *adaptiveStreamHistory) restore(ctx context.Context, health *adaptiveStr
 		record := records[i]
 		var data adaptiveStreamStoredSample
 		if len(record.Payload) > AdaptiveHistoryMaxMember || json.Unmarshal([]byte(record.Payload), &data) != nil ||
-			data.Version != 1 || data.Wire != APIProtocolChatCompletions ||
+			data.Version != adaptiveStreamHistoryVersion || data.Wire != APIProtocolChatCompletions ||
 			data.Work&adaptiveWorkText == 0 || data.Work & ^adaptiveWorkKnown != 0 {
 			continue
 		}
@@ -115,7 +117,7 @@ func (h *adaptiveStreamHistory) fill(health *adaptiveStreamHealth) {
 		select {
 		case entry := <-h.queue:
 			payload, err := json.Marshal(adaptiveStreamStoredSample{
-				Version: 1, Wire: entry.key.wire, Work: entry.key.work,
+				Version: adaptiveStreamHistoryVersion, Wire: entry.key.wire, Work: entry.key.work,
 				Sample: adaptiveStoredObservation(entry.key.sample, entry.sample),
 			})
 			if err != nil || len(payload) > AdaptiveHistoryMaxMember {

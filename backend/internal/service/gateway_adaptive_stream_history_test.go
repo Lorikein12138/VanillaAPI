@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -55,8 +57,10 @@ func TestGatewayAdaptiveStreamHealthHistoryRestart(t *testing.T) {
 			store := &adaptiveStreamHistoryFake{failNext: true}
 			telemetry := &adaptiveTelemetry{}
 			c, _, _ := streamHealthFixture(72)
-			ctx := streamHealthContext(context.Background(), telemetry, 72, streamHealthBody)
+			body := "{\"instructions\":\"guide\",\"prompt_cache_options\":{\"ttl\":\"5m\"}," + streamHealthBody[1:]
+			ctx := streamHealthContext(context.Background(), telemetry, 72, body)
 			key := streamHealthKey(t, ctx, &c)
+			require.Equal(t, adaptiveWorkText|adaptiveWorkInstructions|adaptiveWorkCache|adaptiveWorkState, key.work)
 			health := &telemetry.streamHealth
 			health.attach(store)
 			defer health.history.stopAccepting()
@@ -69,11 +73,19 @@ func TestGatewayAdaptiveStreamHealthHistoryRestart(t *testing.T) {
 			require.Error(t, health.history.flush(ctx, health, now))
 			require.NoError(t, health.history.flush(ctx, health, now))
 			require.Equal(t, store.batches[0], store.batches[1])
+			var stored adaptiveStreamStoredSample
+			require.NoError(t, json.Unmarshal([]byte(store.rows[0].Payload), &stored))
+			require.Equal(t, 2, stored.Version)
+			require.Equal(t, key.work, stored.Work)
+			legacy := store.rows[0]
+			legacy.Payload = strings.Replace(legacy.Payload, "\"Version\":2", "\"Version\":1", 1)
+			store.rows = append(store.rows, legacy)
 			restarted := &adaptiveStreamHealth{}
 			restarted.attach(store)
 			defer restarted.history.stopAccepting()
 			require.NoError(t, restarted.history.restore(ctx, restarted, now))
 			require.True(t, restarted.ready.Load())
+			require.EqualValues(t, (count+3)*2, restarted.counters[streamRestored].Load())
 			require.Len(t, restarted.series[key], count+3)
 			require.Equal(t, adaptiveStreamStatus(health.series[key], now), adaptiveStreamStatus(restarted.series[key], now))
 			require.Equal(t, adaptiveStreamState{}, adaptiveStreamStatus(restarted.series[key], now.Add(adaptiveStreamWindow)))
