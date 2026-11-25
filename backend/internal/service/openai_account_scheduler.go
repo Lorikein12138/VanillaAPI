@@ -165,6 +165,7 @@ type OpenAIAccountScheduleRequest struct {
 	// and compact_model_mapping; native remote compaction v2 leaves it false.
 	RequireCompact bool
 	ExcludedIDs    map[int64]struct{}
+	streamBinding  adaptiveBindingState
 }
 
 type OpenAIAccountScheduleDecision struct {
@@ -376,10 +377,11 @@ type defaultOpenAIAccountScheduler struct {
 }
 
 type openAISelectionProbeBudget struct {
-	acquires  int
-	rechecks  int
-	attempted map[int64]struct{}
-	limited   bool
+	acquires    int
+	rechecks    int
+	attempted   map[int64]struct{}
+	limited     bool
+	streamTried map[int64]struct{}
 }
 
 func newOpenAISelectionProbeBudget() *openAISelectionProbeBudget {
@@ -530,9 +532,16 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
+	binding := req.streamBinding
+	if strings.TrimSpace(req.SessionHash) == "" {
+		binding = adaptiveBindingMiss
+	}
+	if req.StickyAccountID > 0 {
+		binding = adaptiveBindingHit
+	}
 	_, adaptive := gatewayAdaptiveRoute(ctx)
 	if !req.StickyWeighted || adaptive {
-		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
+		selection, escapedSticky, err := s.selectBySessionHash(ctx, req, &binding)
 		if err != nil {
 			return nil, decision, err
 		}
@@ -551,6 +560,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
+	ctx = withAdaptiveStreamPermission(ctx, binding, req.PreviousResponseID == "" && req.StickyPreviousAccountID == 0 &&
+		req.GuardianParentAccountID == 0 && !req.PreserveStickyBinding && !req.RequireCompact && len(req.ExcludedIDs) == 0)
 	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
 	decision.Layer = openAIAccountScheduleLayerLoadBalance
 	decision.CandidateCount = candidateCount
@@ -577,6 +588,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
+	binding ...*adaptiveBindingState,
 ) (*AccountSelectionResult, bool, error) {
 	sessionHash := strings.TrimSpace(req.SessionHash)
 	if sessionHash == "" || s == nil || s.service == nil || s.service.cache == nil {
@@ -591,7 +603,11 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	}
 	if accountID <= 0 {
 		var err error
-		accountID, err = s.service.getStickySessionAccountID(ctx, req.GroupID, sessionHash)
+		var state adaptiveBindingState
+		accountID, err, state = s.service.readStickySessionAccountID(ctx, req.GroupID, sessionHash)
+		if len(binding) > 0 && *binding[0] != adaptiveBindingHit {
+			*binding[0] = state
+		}
 		if err != nil || accountID <= 0 {
 			return nil, false, nil
 		}
@@ -759,6 +775,7 @@ type openAIAccountCandidateScore struct {
 	ttft              float64
 	hasTTFT           bool
 	adaptiveProbeOnly bool
+	streamChoice      *adaptiveStreamChoice
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore
@@ -1187,13 +1204,24 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			originalFirst := ordered[0].account.ID
 			var normalOrder []openAIAccountCandidateScore
 			var probeBaseline int
+			var streamChoice adaptiveStreamChoice
 			adaptiveFirst, probeBaseline = rankAdaptivePoolWithProbe(ctx, ordered, func(item openAIAccountCandidateScore) *Account { return item.account },
 				adaptiveOpenAIModel(ctx, req.RequestedModel, req.RequireCompact), func(a, b *Account) bool {
 					return healthPeers(a, b) && rateOrder.compare(a, b) == 0
-				}, explore && len(req.ExcludedIDs) == 0, adaptiveProbeOptions[openAIAccountCandidateScore]{waitOrder: &normalOrder, healthPeers: healthPeers, canProbe: func(a *Account) bool {
+				}, explore && len(req.ExcludedIDs) == 0, adaptiveProbeOptions[openAIAccountCandidateScore]{waitOrder: &normalOrder, healthPeers: healthPeers, streamChoice: &streamChoice, streamModel: req.RequestedModel, canProbe: func(a *Account) bool {
 					item := loads[a.ID]
 					return !item.loadKnown || a.Concurrency <= 0 || item.loadInfo.CurrentConcurrency < a.Concurrency
 				}})
+			if streamChoice.accountID > 0 {
+				for _, item := range ordered {
+					if item.account.ID == streamChoice.accountID {
+						item.adaptiveProbeOnly = true
+						item.streamChoice = &streamChoice
+						immediateProbe = []openAIAccountCandidateScore{item}
+						break
+					}
+				}
+			}
 			if probeBaseline > 0 {
 				probe := ordered[0]
 				probe.adaptiveProbeOnly = true
@@ -1338,6 +1366,28 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			continue
 		}
 
+		if _, tried := budget.streamTried[candidate.account.ID]; tried {
+			continue
+		}
+		if candidate.streamChoice != nil {
+			if budget.streamTried == nil {
+				budget.streamTried = make(map[int64]struct{})
+			}
+			budget.streamTried[candidate.account.ID] = struct{}{}
+			streamBudget := budget
+			if candidate.streamChoice.evidence {
+				streamBudget = newOpenAISelectionProbeBudget()
+			}
+			selection := s.service.tryAdaptiveStreamSlot(ctx, candidate.account, *candidate.streamChoice, req.GroupID,
+				req.Platform, req.RequestedModel, req.RequiredCapability, streamBudget, func(fresh *Account) bool {
+					return s.isAccountTransportCompatible(fresh, req.RequiredTransport) && s.isAccountRequestCompatible(ctx, fresh, req)
+				})
+			if selection != nil {
+				_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, selection.Account.ID)
+				return selection, compactBlocked, nil
+			}
+			continue
+		}
 		candidateBudget := budget
 		if candidate.adaptiveProbeOnly {
 			// Exploration must leave the normal slot and wait budgets intact.
@@ -1759,7 +1809,11 @@ func (s *defaultOpenAIAccountScheduler) trySelectByLoadBalancePool(
 	if s.service.concurrencyService != nil && !budget.acquireExhausted() {
 		loadReq := buildOpenAIAccountLoadRequest(filtered)
 		if freshLoadMap, loadErr := s.service.concurrencyService.GetAccountsLoadBatchFresh(ctx, loadReq); loadErr == nil {
-			freshPlan := s.buildOpenAIAccountLoadPlan(withoutAdaptiveExploration(ctx), req, filtered, freshLoadMap)
+			freshCtx := withoutAdaptiveExploration(ctx)
+			if len(budget.streamTried) > 0 {
+				freshCtx = context.WithValue(freshCtx, adaptiveStreamPermissionKey{}, nil)
+			}
+			freshPlan := s.buildOpenAIAccountLoadPlan(freshCtx, req, filtered, freshLoadMap)
 			if openAICostOverflowExpanded(req, freshPlan) {
 				budget.enableLimit()
 			}
@@ -2690,10 +2744,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 
 	var stickyAccountID int64
-	if sessionHash != "" && s.cache != nil {
-		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil && accountID > 0 {
-			stickyAccountID = accountID
-		}
+	accountID, stickyErr, binding := s.readStickySessionAccountID(ctx, groupID, sessionHash)
+	if stickyErr == nil && accountID > 0 {
+		stickyAccountID = accountID
 	}
 	stickyWeighted := s.isOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx)
 	subscriptionPriority := s.isOpenAIAdvancedSchedulerSubscriptionPriorityEnabled(ctx)
@@ -2707,6 +2760,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		Platform:                platform,
 		SessionHash:             sessionHash,
 		StickyAccountID:         stickyAccountID,
+		streamBinding:           binding,
 		GuardianParentAccountID: guardianParentAccountID,
 		StickyPreviousAccountID: stickyPreviousAccountID,
 		StickyWeighted:          stickyWeighted,

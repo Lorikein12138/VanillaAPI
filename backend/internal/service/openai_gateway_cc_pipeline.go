@@ -16,6 +16,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -201,6 +202,8 @@ func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey
 // 统一由 handleOpenAIUpstreamTransportError 归一为 failover。
 //
 // userAgent 为空时保留默认 UA；Grok 的默认 UA 兜底由调用方解析后传入。
+type adaptiveRawChatSendKey struct{}
+
 func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	ctx context.Context,
 	c *gin.Context,
@@ -263,12 +266,36 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	// 使配置值获得除共享传输层强制头之外的最高优先级。
 	account.ApplyHeaderOverrides(upstreamReq.Context(), upstreamReq.Header)
 	applyOpenCodeSessionHeader(c, account, targetURL, upstreamReq.Header, body)
+	facts, _ := ctx.Value(adaptiveRawChatSendKey{}).(*adaptiveStreamFacts)
+	if facts != nil {
+		upstreamReq = upstreamReq.WithContext(WithHTTPUpstreamRetryObserver(upstreamReq.Context(), func() {
+			facts.transportRepeated = true
+		}))
+		payload := gjson.ParseBytes(body)
+		facts.expectedChoices = adaptiveChatExpectedChoices(payload.Get("n"))
+		facts.sent = stream && payload.Get("stream").Bool()
+		facts.model = payload.Get("model").String()
+		facts.tier = payload.Get("service_tier").String()
+		facts.effort = adaptiveEffort(payload)
+		facts.work = adaptiveChatWorkload(payload, adaptiveNativeSession(upstreamReq.Header))
+		inbound, _ := ctx.Value(adaptiveWorkloadKey{}).(adaptiveWorkload)
+		if inbound == adaptiveWorkUnknown {
+			facts.work = adaptiveWorkUnknown
+		} else if facts.work != adaptiveWorkUnknown && facts.work != inbound {
+			// Keep rewritten workload out of the bucket queried before normalization.
+			facts.work |= inbound | adaptiveWorkRewritten
+		}
+	}
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	if facts != nil && resp != nil && resp.Request != nil {
+		// net/http populates Request.Response on requests issued after redirects.
+		facts.transportRepeated = facts.transportRepeated || resp.Request.Response != nil
+	}
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}

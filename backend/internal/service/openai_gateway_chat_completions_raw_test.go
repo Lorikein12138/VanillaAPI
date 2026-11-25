@@ -1188,6 +1188,63 @@ func TestBufferRawChatCompletions_RejectsOversizedResponse(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rec.Code)
 }
 
+type grokStreamTransportRetryFixture struct {
+	httpUpstreamRecorder
+	retry bool
+}
+
+func (u *grokStreamTransportRetryFixture) Do(req *http.Request, proxyURL string, id int64, concurrency int) (*http.Response, error) {
+	accepted := req
+	if u.retry {
+		NotifyHTTPUpstreamRetry(req.Context())
+		accepted = req.Clone(req.Context())
+		accepted.URL.Host = "api.x.ai"
+	}
+	u.resp.Request = accepted
+	return u.httpUpstreamRecorder.Do(req, proxyURL, id, concurrency)
+}
+
+func TestForwardAsChatCompletions_GrokTransportRetryHealth(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		name := "single-attempt"
+		if retry {
+			name = "transport-retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			const model = "grok-4.7"
+			body := []byte("{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stop\":\"done\",\"stream\":true}")
+			account := healthyGrokOAuthGatewayTestAccount(89111, "access-token")
+			now := time.Now()
+			telemetry := &adaptiveTelemetry{}
+			telemetry.streamHealth.clock = func() time.Time { return now }
+			ctx := streamHealthContext(context.Background(), telemetry, 72, string(body))
+			c, rec := grokAuditContext("/v1/chat/completions")
+			c.Request = c.Request.WithContext(ctx)
+			upstream := &grokStreamTransportRetryFixture{retry: retry}
+			upstream.resp = &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}},
+				Body: io.NopCloser(&adaptiveStreamTestReader{now: &now, frames: []adaptiveStreamTestFrame{
+					{step: 12 * time.Second, line: "data: {\"model\":\"" + model + "\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"},
+				}})}
+			svc := grokAuditOAuthService(&upstream.httpUpstreamRecorder, account)
+			svc.httpUpstream = upstream
+			result, err := svc.ForwardAsChatCompletions(ctx, c, account, body, "", "")
+			require.NoError(t, err)
+			require.Equal(t, grokChatRawEndpoint, result.UpstreamEndpoint)
+			require.Equal(t, "cli-chat-proxy.grok.com", upstream.lastReq.URL.Hostname())
+			require.Contains(t, rec.Body.String(), "data: [DONE]")
+			if retry {
+				require.Equal(t, "api.x.ai", upstream.resp.Request.URL.Hostname())
+				require.Nil(t, upstream.resp.Request.Response)
+				require.EqualValues(t, 1, telemetry.streamHealth.counters[streamMultiAttempt].Load())
+				require.Empty(t, telemetry.streamHealth.series)
+			} else {
+				require.EqualValues(t, 1, telemetry.streamHealth.counters[streamSampled].Load())
+				require.Len(t, telemetry.streamHealth.series, 1)
+			}
+		})
+	}
+}
+
 func rawChatCompletionsTestConfig() *config.Config {
 	return &config.Config{
 		Security: config.SecurityConfig{

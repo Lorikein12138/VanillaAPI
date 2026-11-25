@@ -900,13 +900,13 @@ func resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel string) strin
 }
 
 func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, error) {
-	account, _, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate, nil)
+	account, _, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate, nil, nil)
 	return account, err
 }
 
 // selectAccountForModelWithExclusionsStickyHit 与 selectAccountForModelWithExclusions 相同，
 // 另返回账号是否来自粘性会话命中。
-func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool, probe **Account) (*Account, bool, error) {
+func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool, probe **Account, streamChoice *adaptiveStreamChoice) (*Account, bool, error) {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
@@ -917,7 +917,11 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 
 	// 1. 尝试粘性会话命中
 	// Try sticky session hit
-	owner := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability)
+	binding := adaptiveBindingMiss
+	if stickyAccountID > 0 {
+		binding = adaptiveBindingHit
+	}
+	owner := s.tryStickySessionHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, &binding)
 	if owner != nil {
 		if probe != nil {
 			return owner, true, nil
@@ -944,7 +948,10 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 	if stickyAccountID > 0 && owner == nil {
 		ctx = protectAdaptiveSelection(ctx)
 	}
-	selected, compactBlocked, filterStats := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate, probe)
+	if streamChoice != nil {
+		ctx = withAdaptiveStreamPermission(ctx, binding, owner == nil && !requireCompact && len(excludedIDs) == 0)
+	}
+	selected, compactBlocked, filterStats := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate, probe, streamChoice)
 
 	if owner != nil && (selected == nil || !adaptiveStickyTrialAllows(ctx, selected)) {
 		return owner, true, nil
@@ -966,14 +973,15 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 			return hydrated, false, nil // The caller binds the account selected after the immediate probe.
 		}
 		*probe = nil
+		if streamChoice != nil {
+			streamChoice.failed(ctx)
+		}
 	}
 
 	// 4. 设置粘性会话绑定（利润门下推迟到 handler 终检通过后再绑定，
 	// 终检否决的账号不得成为新的粘性目标；无门保持既有 eager 绑定与 TTL）
 	// Set sticky session binding (deferred until terminal admission under a profit gate)
-	if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
-		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, selected.ID, openaiStickySessionTTL)
-	}
+	s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, selected.ID)
 
 	return hydrated, false, nil
 }
@@ -983,7 +991,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 //
 // tryStickySessionHit attempts to get account from sticky session.
 // Returns account if hit and usable; clears session and returns nil if account is unavailable.
-func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID *int64, platform string, sessionHash, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability) *Account {
+func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID *int64, platform string, sessionHash, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, stickyAccountID int64, requiredCapability OpenAIEndpointCapability, binding *adaptiveBindingState) *Account {
 	if sessionHash == "" {
 		return nil
 	}
@@ -992,7 +1000,9 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	accountID := stickyAccountID
 	if accountID <= 0 {
 		var err error
-		accountID, err = s.getStickySessionAccountID(ctx, groupID, sessionHash)
+		var state adaptiveBindingState
+		accountID, err, state = s.readStickySessionAccountID(ctx, groupID, sessionHash)
+		*binding = state
 		if err != nil || accountID <= 0 {
 			return nil
 		}
@@ -1054,7 +1064,7 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 // (only meaningful when the legacy /responses/compact requireCompact flag is
 // true); the third contains deterministic
 // exclusion diagnostics for the evaluated snapshot.
-func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool, probe **Account) (*Account, bool, openAISelectionFilterStats) {
+func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool, probe **Account, streamChoice *adaptiveStreamChoice) (*Account, bool, openAISelectionFilterStats) {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	compactBlocked := false
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
@@ -1121,7 +1131,15 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		}
 		return s.isBetterAccount(a, b)
 	})
-	_, probeBaseline := rankAdaptivePoolWithProbe(ctx, eligible, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), len(excludedIDs) == 0, adaptiveProbeOptions[*Account]{immediate: probe != nil, healthPeers: adaptiveOpenAIHealthPeers(requireCompact)})
+	_, probeBaseline := rankAdaptivePoolWithProbe(ctx, eligible, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), len(excludedIDs) == 0, adaptiveProbeOptions[*Account]{immediate: probe != nil, healthPeers: adaptiveOpenAIHealthPeers(requireCompact), streamChoice: streamChoice, streamModel: requestedModel})
+	if probe != nil && streamChoice != nil && streamChoice.accountID > 0 {
+		for _, candidate := range eligible {
+			if candidate.ID == streamChoice.accountID {
+				*probe = candidate
+				return eligible[0], compactBlocked, filterStats
+			}
+		}
+	}
 	if probe != nil && probeBaseline > 0 {
 		*probe = eligible[0]
 		return eligible[probeBaseline], compactBlocked, filterStats
@@ -1185,15 +1203,16 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	preferLowUpstreamRate := useUpstreamTokenCost && s.isOpenAILowUpstreamRatePriorityEnabled(ctx)
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var stickyAccountID int64
-	if sessionHash != "" && s.cache != nil {
-		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil {
-			stickyAccountID = accountID
-		}
+	accountID, stickyErr, binding := s.readStickySessionAccountID(ctx, groupID, sessionHash)
+	if stickyErr == nil {
+		stickyAccountID = accountID
 	}
 	ctx = withOpenAIImageSizeStickyAccount(ctx, stickyAccountID)
+	defer cancelUnacquiredAdaptiveProbe(ctx)
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
 		var probe *Account
-		account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate, &probe)
+		var choice adaptiveStreamChoice
+		account, stickyHit, err := s.selectAccountForModelWithExclusionsStickyHit(ctx, groupID, platform, sessionHash, requestedModel, excludedIDs, requireCompact, stickyAccountID, requiredCapability, preferLowUpstreamRate, &probe, &choice)
 		if err != nil {
 			return nil, err
 		}
@@ -1203,16 +1222,22 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			}
 		}
 		if probe != nil {
-			probeSlot, probeErr := s.tryAcquireAccountSlot(ctx, probe.ID, probe.Concurrency)
-			if probeErr == nil && probeSlot != nil && probeSlot.Acquired {
-				if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, probe.ID, openaiStickySessionTTL)
+			if choice.accountID > 0 {
+				if choice.matches(ctx, probe) {
+					if slot, err := s.tryAcquireAccountSlot(ctx, probe.ID, probe.Concurrency); err == nil && slot != nil && slot.Acquired {
+						s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, probe.ID)
+						return attachSelectionProfitGate(ctx, &AccountSelectionResult{Account: probe, Acquired: true, ReleaseFunc: slot.ReleaseFunc}), nil
+					}
 				}
-				return s.newAcquiredSelectionResult(ctx, probe, probeSlot.ReleaseFunc)
+				choice.failed(ctx)
+			} else {
+				probeSlot, probeErr := s.tryAcquireAccountSlot(ctx, probe.ID, probe.Concurrency)
+				if probeErr == nil && probeSlot != nil && probeSlot.Acquired {
+					s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, probe.ID)
+					return s.newAcquiredSelectionResult(ctx, probe, probeSlot.ReleaseFunc)
+				}
 			}
-			if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
-				_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, account.ID, openaiStickySessionTTL)
-			}
+			s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, account.ID)
 		}
 		result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 		if err == nil && result != nil && result.Acquired {
@@ -1372,6 +1397,16 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		rateOrder = newOpenAILegacyUpstreamRateOrder(candidates, time.Now(), s.openAIOAuthSchedulingRateMultiplier(ctx))
 	}
 
+	ctx = withAdaptiveStreamPermission(ctx, binding, !requireCompact && len(excludedIDs) == 0)
+	var streamTried int64
+	tryStreamChoice := func(choice adaptiveStreamChoice, account *Account) *AccountSelectionResult {
+		streamTried = account.ID
+		selection := s.tryAdaptiveStreamSlot(ctx, account, choice, groupID, platform, requestedModel, requiredCapability, nil, nil)
+		if selection != nil && !stickySpillover {
+			s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, selection.Account.ID)
+		}
+		return selection
+	}
 	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
 	for _, acc := range candidates {
 		accountLoads = append(accountLoads, AccountWithConcurrency{
@@ -1444,8 +1479,24 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			selectionOrder = append(selectionOrder, available...)
 		}
 
-		rankAdaptivePoolWithProbe(ctx, selectionOrder, adaptiveLoadedAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), explore && stickyAccountID == 0 && len(excludedIDs) == 0, adaptiveProbeOptions[accountWithLoad]{immediate: true, healthPeers: adaptiveOpenAIHealthPeers(requireCompact)})
+		var choice adaptiveStreamChoice
+		var choiceOutput *adaptiveStreamChoice
+		if streamTried == 0 {
+			choiceOutput = &choice
+		}
+		rankAdaptivePoolWithProbe(ctx, selectionOrder, adaptiveLoadedAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), explore && stickyAccountID == 0 && len(excludedIDs) == 0, adaptiveProbeOptions[accountWithLoad]{immediate: true, healthPeers: adaptiveOpenAIHealthPeers(requireCompact), streamChoice: choiceOutput, streamModel: requestedModel})
 		for _, item := range selectionOrder {
+			if item.account.ID == choice.accountID {
+				if selection := tryStreamChoice(choice, item.account); selection != nil {
+					return selection, true, nil
+				}
+				break
+			}
+		}
+		for _, item := range selectionOrder {
+			if item.account.ID == streamTried {
+				continue
+			}
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
 				continue
@@ -1463,8 +1514,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if selectErr != nil {
 					return nil, true, selectErr
 				}
-				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+				if !stickySpillover {
+					s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, fresh.ID)
 				}
 				return selection, true, nil
 			}
@@ -1484,8 +1535,20 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if requireCompact {
 			ordered = prioritizeOpenAICompactAccounts(ordered)
 		}
-		rankAdaptivePoolWithProbe(ctx, ordered, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), stickyAccountID == 0 && len(excludedIDs) == 0, adaptiveProbeOptions[*Account]{immediate: true, healthPeers: adaptiveOpenAIHealthPeers(requireCompact)})
+		var choice adaptiveStreamChoice
+		rankAdaptivePoolWithProbe(ctx, ordered, adaptiveAccount, adaptiveOpenAIModel(ctx, requestedModel, requireCompact), adaptiveOpenAIPeers(requireCompact, rateOrder), stickyAccountID == 0 && len(excludedIDs) == 0, adaptiveProbeOptions[*Account]{immediate: true, healthPeers: adaptiveOpenAIHealthPeers(requireCompact), streamChoice: &choice, streamModel: requestedModel})
 		for _, acc := range ordered {
+			if acc.ID == choice.accountID {
+				if selection := tryStreamChoice(choice, acc); selection != nil {
+					return selection, nil
+				}
+				break
+			}
+		}
+		for _, acc := range ordered {
+			if acc.ID == streamTried {
+				continue
+			}
 			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 			if fresh == nil {
 				continue
@@ -1503,8 +1566,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 				if selectErr != nil {
 					return nil, selectErr
 				}
-				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+				if !stickySpillover {
+					s.bindLegacyOpenAISelection(ctx, groupID, sessionHash, fresh.ID)
 				}
 				return selection, nil
 			}
@@ -1593,6 +1656,56 @@ func (s *OpenAIGatewayService) listSchedulableAccounts(ctx context.Context, grou
 		accounts = s.filterGrokFreeQuotaAccountsForOpenAI(ctx, accounts)
 	}
 	return accounts, nil
+}
+
+// tryAdaptiveStreamSlot is the bounded immediate path shared by the advanced
+// scheduler and legacy batch scheduling. Non-batch already rechecks its pool.
+func (s *OpenAIGatewayService) tryAdaptiveStreamSlot(ctx context.Context, account *Account, choice adaptiveStreamChoice, groupID *int64,
+	platform, model string, capability OpenAIEndpointCapability, budget *openAISelectionProbeBudget, eligible func(*Account) bool,
+) (selection *AccountSelectionResult) {
+	defer func() {
+		if selection == nil {
+			choice.failed(ctx)
+		}
+	}()
+	if budget != nil && s.concurrencyService != nil && account.Concurrency > 0 && !budget.recordAcquire(account.ID) {
+		return nil
+	}
+	slot, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
+	if err != nil || slot == nil || !slot.Acquired {
+		return nil
+	}
+	defer func() {
+		if selection == nil && slot.ReleaseFunc != nil {
+			slot.ReleaseFunc()
+		}
+	}()
+	fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, platform, model, false, capability)
+	if fresh == nil {
+		return nil
+	}
+	if budget != nil && s.schedulerSnapshot != nil && s.accountRepo != nil && !budget.recordRecheck() {
+		return nil
+	}
+	fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, groupID, platform, model, false, capability)
+	if fresh == nil || fresh.Concurrency != account.Concurrency || !choice.matches(ctx, fresh) ||
+		(eligible != nil && !eligible(fresh)) {
+		return nil
+	}
+	if s.needsUpstreamChannelRestrictionCheck(ctx, groupID) && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, model, false) {
+		return nil
+	}
+	selection, _ = s.newSelectionResult(ctx, fresh, true, slot.ReleaseFunc, nil)
+	if selection != nil && !choice.matches(ctx, selection.Account) {
+		return nil
+	}
+	return selection
+}
+
+func (s *OpenAIGatewayService) bindLegacyOpenAISelection(ctx context.Context, groupID *int64, sessionHash string, accountID int64) {
+	if sessionHash != "" && !gatewayProfitControlGateActive(ctx) {
+		_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, accountID, openaiStickySessionTTL)
+	}
 }
 
 func (s *OpenAIGatewayService) tryAcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int) (*AcquireResult, error) {

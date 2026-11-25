@@ -213,6 +213,13 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	// the outbound request (for example GLM xhigh is forwarded as max).
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(upstreamBody, upstreamModel, billingModel, originalModel)
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, upstreamBody, upstreamModel)
+	var streamFacts *adaptiveStreamFacts
+	if o := adaptiveHTTPObservation(ctx); o != nil && o.streamOwner && clientStream {
+		if ctx.Value(adaptiveWorkloadKey{}) != nil {
+			streamFacts = &o.streamFacts
+			ctx = context.WithValue(ctx, adaptiveRawChatSendKey{}, streamFacts)
+		}
+	}
 	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
 	if err != nil {
 		return nil, err
@@ -269,7 +276,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	var result *OpenAIForwardResult
 	var forwardErr error
 	if clientStream {
-		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body))
+		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body), streamFacts)
 	} else {
 		result, forwardErr = s.bufferRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
@@ -309,6 +316,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	serviceTier *string,
 	startTime time.Time,
 	requestBodyLen int,
+	streamObservation ...*adaptiveStreamFacts,
 ) (*OpenAIForwardResult, error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
@@ -334,6 +342,19 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
+	var healthTerminal adaptiveChatHealthTerminal
+	var facts *adaptiveStreamFacts
+	if len(streamObservation) > 0 {
+		facts = streamObservation[0]
+	}
+	if facts != nil {
+		healthTerminal.expected = facts.expectedChoices
+		defer func() {
+			facts.terminal = healthTerminal.successful()
+			facts.aborted = clientDisconnected || c.Request.Context().Err() != nil ||
+				errors.Is(scanner.Err(), context.Canceled) || errors.Is(scanner.Err(), context.DeadlineExceeded)
+		}()
+	}
 
 	writeLine := func(line string) {
 		if clientDisconnected {
@@ -382,10 +403,37 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			}
 			continue
 		}
+		if facts != nil {
+			if event, ok := extractOpenAISSEEventLine(line); ok && strings.EqualFold(event, "error") {
+				healthTerminal.failed = true
+			}
+		}
 		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
 			terminal.ObserveDataLine(trimmedPayload)
+			if facts != nil {
+				if trimmedPayload == "[DONE]" {
+					healthTerminal.done = true
+				} else {
+					frame := gjson.Parse(trimmedPayload)
+					choices := frame.Get("choices").Array()
+					healthTerminal.observe(frame, choices)
+					undeclaredTools := facts.work&(adaptiveWorkDeclaredTools|adaptiveWorkToolHistory) == 0 && !facts.unexpectedTools
+					if facts.firstDelta == adaptiveNoDelta || undeclaredTools {
+						delta := adaptiveChatDelta(choices)
+						if facts.firstDelta == adaptiveNoDelta && delta != adaptiveNoDelta {
+							facts.firstDelta, facts.firstOutputAt = delta, facts.clock()
+						}
+						if undeclaredTools && delta == adaptiveToolDelta {
+							facts.unexpectedTools = true
+						}
+					}
+					if tier := frame.Get("service_tier"); tier.Exists() && tier.Type != gjson.Null {
+						facts.observedTier.observe(adaptiveTier(tier.String()), false)
+					}
+				}
+			}
 			if trimmedPayload != "[DONE]" {
 				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
 				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)

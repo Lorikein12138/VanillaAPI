@@ -2,6 +2,7 @@ package repository
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -316,6 +317,50 @@ func TestHTTPUpstreamDoFallsBackToOfficialGrokAPIOnCLIAccessDenied(t *testing.T)
 	require.Empty(t, fallbackHeaders.Get("x-grok-client-mode"))
 	require.Empty(t, fallbackHeaders.Get("x-authenticateresponse"))
 	require.Empty(t, fallbackHeaders.Get("User-Agent"))
+}
+
+func TestGrokAccessDeniedFallbackReportsChatTransportRetry(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		name := "single-round-trip"
+		if retry {
+			name = "cli-denial-then-official-api"
+		}
+		t.Run(name, func(t *testing.T) {
+			var hosts []string
+			retries := 0
+			client := httpClientWithGrokAccessDeniedFallback(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				hosts = append(hosts, req.URL.Hostname())
+				require.Equal(t, "/v1/chat/completions", req.URL.Path)
+				if retry && len(hosts) == 1 {
+					return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Request: req,
+						Body: io.NopCloser(strings.NewReader("{\"code\":\"permission_denied\",\"error\":\"Access to the chat endpoint is denied. Please ensure you're using the correct credentials. If you believe this is a mistake, please contact support.\"}"))}, nil
+				}
+				if retry {
+					require.Equal(t, 1, retries)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: req,
+					Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n"))}, nil
+			})})
+			ctx := service.WithHTTPUpstreamRetryObserver(context.Background(), func() { retries++ })
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://cli-chat-proxy.grok.com/v1/chat/completions",
+				strings.NewReader("{\"model\":\"grok-4.7\",\"stop\":\"done\",\"stream\":true}"))
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer oauth-token")
+			req.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Nil(t, resp.Request.Response)
+			require.NoError(t, resp.Body.Close())
+			if retry {
+				require.Equal(t, []string{grokCLIProxyHost, grokOfficialAPIHost}, hosts)
+				require.Equal(t, 1, retries)
+			} else {
+				require.Equal(t, []string{grokCLIProxyHost}, hosts)
+				require.Zero(t, retries)
+			}
+		})
+	}
 }
 
 func TestGrokAccessDeniedFallbackRecognizesChatEndpointPermissionDenied(t *testing.T) {

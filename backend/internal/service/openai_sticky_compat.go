@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -120,35 +121,46 @@ func (s *OpenAIGatewayService) openAIStickyLegacyTTL(ttl time.Duration) time.Dur
 }
 
 func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) (int64, error) {
-	if s == nil || s.cache == nil {
-		return 0, nil
-	}
+	id, err, _ := s.readStickySessionAccountID(ctx, groupID, sessionHash)
+	return id, err
+}
 
+func (s *OpenAIGatewayService) readStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) (int64, error, adaptiveBindingState) {
 	primaryKey := s.openAISessionCacheKey(sessionHash)
 	if primaryKey == "" {
-		return 0, nil
+		return 0, nil, adaptiveBindingMiss
+	}
+	if s == nil || s.cache == nil {
+		return 0, nil, adaptiveBindingUnknown
 	}
 
 	accountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), primaryKey)
 	if err == nil && accountID > 0 {
-		return accountID, nil
+		return accountID, nil, adaptiveBindingHit
+	}
+	state := adaptiveBindingUnknown
+	if errors.Is(err, ErrStickySessionNotFound) {
+		state = adaptiveBindingMiss
 	}
 	if !s.openAISessionHashReadOldFallbackEnabled() {
-		return accountID, err
+		return accountID, err, state
 	}
 
 	legacyKey := s.openAILegacySessionCacheKey(ctx, sessionHash)
 	if legacyKey == "" {
-		return accountID, err
+		return accountID, err, state
 	}
 
 	openAIStickyLegacyReadFallbackTotal.Add(1)
 	legacyAccountID, legacyErr := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), legacyKey)
 	if legacyErr == nil && legacyAccountID > 0 {
 		openAIStickyLegacyReadFallbackHit.Add(1)
-		return legacyAccountID, nil
+		return legacyAccountID, nil, adaptiveBindingHit
 	}
-	return accountID, err
+	if !errors.Is(legacyErr, ErrStickySessionNotFound) {
+		state = adaptiveBindingUnknown
+	}
+	return accountID, err, state
 }
 
 func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string, accountID int64, ttl time.Duration) error {

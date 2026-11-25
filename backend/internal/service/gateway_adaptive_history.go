@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -91,6 +92,14 @@ func newAdaptiveTelemetry(store AdaptiveHistoryStore) *adaptiveTelemetry {
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
 			t.history.run(ctx, t, ticker.C)
+		}()
+	}
+	if streamStore, ok := store.(AdaptiveStreamHistoryStore); ok {
+		ctx := t.streamHealth.attach(streamStore)
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			t.streamHealth.history.run(ctx, &t.streamHealth, ticker.C)
 		}()
 	}
 	return t
@@ -336,12 +345,19 @@ func (s *SettingService) StopGatewayAdaptiveHistory(ctx context.Context) error {
 		return nil
 	}
 	h := s.adaptiveTelemetry.history
+	stream := s.adaptiveTelemetry.streamHealth.history
+	if stream != nil {
+		stream.stopAccepting()
+	}
 	h.mu.Lock()
 	h.stopped = true
 	h.stop()
 	h.mu.Unlock()
 	select {
 	case <-h.done:
+		if stream != nil {
+			return errors.Join(h.stopErr, stream.wait(ctx))
+		}
 		return h.stopErr
 	case <-ctx.Done():
 		return ctx.Err()

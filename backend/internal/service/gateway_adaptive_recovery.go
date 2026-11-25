@@ -145,21 +145,23 @@ type adaptiveRecoveryPool struct {
 }
 
 type adaptiveRecovery struct {
-	mu        sync.Mutex
-	pools     map[adaptiveProbeScope]*adaptiveRecoveryPool
-	active    map[adaptiveSampleKey]struct{}
-	lastProbe time.Time
-	pruneAt   time.Time
-	inFlight  int
+	mu             sync.Mutex
+	pools          map[adaptiveProbeScope]*adaptiveRecoveryPool
+	active         map[adaptiveSampleKey]struct{}
+	lastProbe      time.Time
+	streamCooldown map[adaptiveStreamKey]time.Time
+	pruneAt        time.Time
+	inFlight       int
 }
 
 type adaptiveRecoveryLease struct {
-	recovery *adaptiveRecovery
-	pool     *adaptiveRecoveryPool
-	key      adaptiveSampleKey
-	acquired atomic.Bool
-	observed atomic.Bool
-	once     sync.Once
+	recovery  *adaptiveRecovery
+	pool      *adaptiveRecoveryPool
+	key       adaptiveSampleKey
+	streamKey adaptiveStreamKey
+	acquired  atomic.Bool
+	observed  atomic.Bool
+	once      sync.Once
 }
 
 func (l *adaptiveRecoveryLease) finish() {
@@ -173,12 +175,25 @@ func (l *adaptiveRecoveryLease) finish() {
 }
 
 func (r *adaptiveRecovery) opportunity(ctx context.Context, ingress *adaptiveIngress, scope adaptiveProbeScope, now time.Time) func(adaptiveSampleKey) bool {
+	reserve := r.opportunityWithStream(ctx, ingress, scope, now)
+	if reserve == nil {
+		return nil
+	}
+	return func(key adaptiveSampleKey) bool { return reserve(key, adaptiveStreamKey{}) }
+}
+
+func (r *adaptiveRecovery) opportunityWithStream(ctx context.Context, ingress *adaptiveIngress, scope adaptiveProbeScope, now time.Time) func(adaptiveSampleKey, adaptiveStreamKey) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !now.Before(r.pruneAt) {
 		for key, pool := range r.pools {
 			if !pool.inFlight && now.Sub(pool.lastSeen) >= time.Hour {
 				delete(r.pools, key)
+			}
+		}
+		for key, until := range r.streamCooldown {
+			if !now.Before(until) {
+				delete(r.streamCooldown, key)
 			}
 		}
 		r.pruneAt = now.Add(time.Minute)
@@ -200,17 +215,28 @@ func (r *adaptiveRecovery) opportunity(ctx context.Context, ingress *adaptiveIng
 		pool.next = (pool.next + 1) % len(pool.arrivals)
 		pool.sinceProbe = min(pool.sinceProbe+1, len(pool.arrivals))
 	}
-	return func(key adaptiveSampleKey) bool {
+	return func(key adaptiveSampleKey, streamKey adaptiveStreamKey) bool {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		_, sameHealthKeyInFlight := r.active[key]
+		if streamKey.wire != "" {
+			if until, exists := r.streamCooldown[streamKey]; (exists && now.Before(until)) || (!exists && len(r.streamCooldown) >= adaptiveCapacity) {
+				return false
+			}
+		}
 		busyPool := now.Sub(pool.arrivals[pool.next]) < time.Minute
 		if ctx.Err() != nil || pool.inFlight || sameHealthKeyInFlight || r.inFlight >= 8 || now.Sub(r.lastProbe) < time.Second ||
 			(busyPool && pool.sinceProbe < len(pool.arrivals)) ||
 			!ingress.explored.CompareAndSwap(false, true) {
 			return false
 		}
-		lease := &adaptiveRecoveryLease{recovery: r, pool: pool, key: key}
+		if streamKey.wire != "" {
+			if r.streamCooldown == nil {
+				r.streamCooldown = make(map[adaptiveStreamKey]time.Time)
+			}
+			r.streamCooldown[streamKey] = now.Add(time.Minute)
+		}
+		lease := &adaptiveRecoveryLease{recovery: r, pool: pool, key: key, streamKey: streamKey}
 		ingress.recovery.Store(lease)
 		if r.active == nil {
 			r.active = make(map[adaptiveSampleKey]struct{})
@@ -272,7 +298,7 @@ func observeAdaptiveAttempt(ctx context.Context, route adaptiveRoute, account *A
 	key := adaptiveContextKey(ctx, route, account, model)
 	probe := false
 	if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); ingress != nil {
-		if lease := ingress.recovery.Load(); lease != nil && lease.key == key && lease.acquired.Load() {
+		if lease := ingress.recovery.Load(); lease != nil && lease.streamKey.wire == "" && lease.key == key && lease.acquired.Load() {
 			if !lease.observed.CompareAndSwap(false, true) {
 				return
 			}
