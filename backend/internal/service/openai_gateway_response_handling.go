@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,13 +51,20 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel, reasoningEffort string) (*openaiStreamingResult, error) {
-	observer := upstreamResponseModelObserverFromContext(c)
-	if observer == nil {
-		observer = beginUpstreamResponseModelObservation(c)
-	}
 	firstOutputTimeout := time.Duration(0)
 	if account != nil && account.Platform == PlatformOpenAI {
 		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffort)
+	}
+	return s.handleStreamingResponseWithFirstOutput(ctx, resp, c, account, startTime, originalModel, mappedModel,
+		reasoningEffort, firstOutputTimeout, false, false)
+}
+
+func (s *OpenAIGatewayService) handleStreamingResponseWithFirstOutput(ctx context.Context, resp *http.Response, c *gin.Context, account *Account,
+	startTime time.Time, originalModel, mappedModel, reasoningEffort string, firstOutputTimeout time.Duration, adaptiveFirstOutput, replayable bool,
+) (_ *openaiStreamingResult, streamErr error) {
+	observer := upstreamResponseModelObserverFromContext(c)
+	if observer == nil {
+		observer = beginUpstreamResponseModelObservation(c)
 	}
 	guardFirstOutput := firstOutputTimeout > 0
 	stageFirstOutput := account != nil && account.Platform == PlatformOpenAI
@@ -164,6 +172,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	var firstOutputScanGuard atomic.Bool
 	firstOutputScanGuard.Store(stageFirstOutput)
 	scanner := bufio.NewScanner(resp.Body)
+	var adaptiveReader *adaptiveResponsesStreamReader
+	if adaptiveFirstOutput {
+		adaptiveReader = &adaptiveResponsesStreamReader{Reader: resp.Body}
+		scanner = bufio.NewScanner(adaptiveReader)
+	}
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 	scanner.Split(newBoundedSSESplit(s.cfg, maxLineSize, nil))
@@ -214,8 +227,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 
 	var firstOutputTimer *time.Timer
 	var firstOutputCh <-chan time.Time
+	firstOutputDeadline := startTime.Add(firstOutputTimeout)
 	if firstOutputTimeout > 0 {
-		remaining := time.Until(startTime.Add(firstOutputTimeout))
+		remaining := time.Until(firstOutputDeadline)
 		if remaining <= 0 {
 			remaining = time.Nanosecond
 		}
@@ -246,6 +260,23 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	// 否则下游 SDK（例如 OpenCode）会因为类型校验失败而报错。
 	errorEventSent := false
 	clientDisconnected := false // 客户端断开后继续 drain 上游以收集 usage
+	stopEarlyFailure := false
+	if adaptiveFirstOutput {
+		defer func() {
+			if clientDisconnected || ctx.Err() != nil {
+				streamErr = ErrAdaptiveOpenAIResponsesClientDisconnected
+				return
+			}
+			// Scanner/staging errors and incomplete streams leave unknown upstream
+			// state. Only the explicit deadline path can grant pre-output replay.
+			var failoverErr *UpstreamFailoverError
+			if errors.As(streamErr, &failoverErr) && failoverErr.Reason != AdaptiveOpenAIResponsesFirstOutputTimeout &&
+				(stopEarlyFailure || openAIUsageHasTokens(usage)) {
+				failoverErr.NextAccountAction = NextAccountStop
+				failoverErr.RetryableOnSameAccount = false
+			}
+		}()
+	}
 	sawTerminalEvent := false
 	sawFailedEvent := false
 	sawBareError := false
@@ -270,6 +301,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	eventShouldFlush := false
 	handlePendingWriteError := func(err error) {
 		if firstOutputStage != nil && !firstOutputStage.closed {
+			stopEarlyFailure = !firstOutputProgressObserved
 			message := "OpenAI first-output staging failed"
 			if errors.Is(err, errOpenAIFirstOutputStageLimit) {
 				message = "OpenAI first-output staging limit exceeded"
@@ -287,7 +319,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	completeGuardedEvent := func(queueDrained bool) {
 		completedProgressEvent := eventStartsClientOutput
 		completedTTFTEvent := eventStartsTTFTOutput
-		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted)
+		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted) || (adaptiveFirstOutput && completedProgressEvent)
 		eventInProgress = false
 		if !clientDisconnected {
 			if completedProgressEvent {
@@ -396,6 +428,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			s.clearOpenAIProxyStreamDisconnect(account)
 		}
 		if !sawTerminalEvent && !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+			stopEarlyFailure = !firstOutputProgressObserved
 			return resultWithUsage(), s.newOpenAIStreamFailoverError(
 				c,
 				account,
@@ -422,6 +455,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if scanErr == nil {
 			return nil, nil, false
 		}
+		stopEarlyFailure = !firstOutputProgressObserved
 		if errors.Is(scanErr, errOpenAIFirstOutputScannerLimit) && !firstOutputProgressObserved {
 			logger.LegacyPrintf("service.openai_gateway", "SSE token exceeded guarded first-output limit: account=%d limit=%d error_type=%T", account.ID, openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance, scanErr)
 			failoverErr := s.newOpenAIStreamFailoverError(
@@ -492,7 +526,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	// private until semantic output. The bytes do not count as client output.
 	keepaliveEventDirect := false
 	forwardsKeepaliveDirect := func(eventType string) bool {
-		return eventType == "keepalive" && stageFirstOutput && !firstOutputStage.closed && !failureDelivered && !suppressCurrentEvent
+		return eventType == "keepalive" && stageFirstOutput && !adaptiveFirstOutput &&
+			!firstOutputStage.closed && !failureDelivered && !suppressCurrentEvent
 	}
 	writeKeepaliveDirect := func(value string) {
 		if clientDisconnected {
@@ -728,7 +763,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if stageFirstOutput {
 				eventStartsClientOutput = eventStartsClientOutput || startsClientOutput
 				eventStartsTTFTOutput = eventStartsTTFTOutput || startsTTFTOutput
-				if startsClientOutput {
+				if startsClientOutput && !adaptiveFirstOutput {
 					firstOutputScanGuard.Store(false)
 				}
 			}
@@ -890,6 +925,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		line      string
 		err       error
 		processed chan struct{}
+		scannedAt time.Time
+		eof       bool
 	}
 	// 独立 goroutine 读取上游，避免读取阻塞影响 keepalive/超时处理
 	// Guard mode permits one queued token plus the token being processed. With
@@ -898,9 +935,25 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	events := make(chan scanEvent, openAIFirstOutputEventQueueSize(guardFirstOutput))
 	done := make(chan struct{})
 	queueBudget := newSSEQueueBudget(s.cfg)
+	var scanSlots chan struct{}
+	var scanHandoff sync.Mutex
+	var clientDone <-chan struct{}
+	if adaptiveFirstOutput {
+		scanSlots = make(chan struct{}, cap(events))
+		clientDone = ctx.Done()
+	}
 	sendEvent := func(ev scanEvent) bool {
 		if !queueBudget.acquire(len(ev.line), done) {
 			return false
+		}
+		if adaptiveFirstOutput {
+			// A reservation guarantees space. Timestamp and publish as one
+			// operation relative to the deadline's final queue check.
+			scanHandoff.Lock()
+			ev.scannedAt = time.Now()
+			events <- ev
+			scanHandoff.Unlock()
+			return true
 		}
 		if firstOutputScanGuard.Load() {
 			ev.processed = make(chan struct{})
@@ -926,11 +979,34 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			close(ev.processed)
 		}
 	}
+	releaseScanEvent := func(ev scanEvent) {
+		queueBudget.release(len(ev.line))
+		if adaptiveFirstOutput {
+			<-scanSlots
+		}
+	}
 	var lastReadAt int64
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 	go func(scanBuf *sseScannerBuf64K) {
-		defer putSSEScannerBuf64K(scanBuf)
 		defer close(events)
+		defer putSSEScannerBuf64K(scanBuf)
+		if adaptiveFirstOutput {
+			for {
+				select {
+				case scanSlots <- struct{}{}:
+				case <-done:
+					return
+				}
+				if !documentScanner.Scan() {
+					_ = sendEvent(scanEvent{err: documentScanner.Err(), eof: true})
+					return
+				}
+				atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
+				if !sendEvent(scanEvent{line: documentScanner.Text()}) {
+					return
+				}
+			}
+		}
 		for documentScanner.Scan() {
 			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 			if !sendEvent(scanEvent{line: documentScanner.Text()}) {
@@ -941,41 +1017,85 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			_ = sendEvent(scanEvent{err: err})
 		}
 	}(scanBuf)
-	defer close(done)
+	defer func() {
+		close(done)
+		if adaptiveFirstOutput {
+			adaptiveReader.stopped.Store(true)
+			_ = resp.Body.Close()
+			for ev := range events {
+				releaseScanEvent(ev)
+			}
+		}
+	}()
 
+	replayEventType := ""
+	replayEventOpen := false
+	inspectAdaptiveLine := func(line string, discarded bool) {
+		if eventType, ok := extractOpenAISSEEventLine(line); ok {
+			replayEventOpen = true
+			replayEventType = eventType
+			switch eventType {
+			case "response.created", "response.queued", "response.in_progress":
+			default:
+				replayable = false
+			}
+			return
+		}
+		if line == "" {
+			replayEventType = ""
+			replayEventOpen = false
+			return
+		}
+		if strings.HasPrefix(line, ":") {
+			return
+		}
+		data, ok := extractOpenAISSEDataLine(line)
+		if !ok {
+			replayable = false
+			return
+		}
+		replayEventOpen = true
+		dataBytes := []byte(data)
+		eventType := effectiveOpenAISSEEventType(dataBytes, replayEventType)
+		s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+		if discarded {
+			observer.ObserveOpenAI(dataBytes, eventType)
+			imageCounter.AddSSEData(dataBytes)
+		}
+		if replayable && !adaptiveResponsesPreambleAllowsReplay(data, eventType) {
+			replayable = false
+		}
+	}
+	stopAdaptiveStream := func() {
+		adaptiveReader.stopped.Store(true)
+		_ = resp.Body.Close()
+		for ev := range events {
+			releaseScanEvent(ev)
+			if !ev.eof {
+				inspectAdaptiveLine(ev.line, true)
+			}
+		}
+	}
+	timeoutAdaptiveStream := func() (*openaiStreamingResult, error) {
+		if replayEventOpen || eventStartsClientOutput {
+			replayable = false
+		}
+		stopAdaptiveStream()
+		if clientDisconnected || ctx.Err() != nil {
+			return resultWithUsage(), ErrAdaptiveOpenAIResponsesClientDisconnected
+		}
+		return resultWithUsage(), s.adaptiveResponsesTimeoutError(ctx, c, account, startTime, originalModel, reasoningEffort,
+			firstOutputTimeout, "semantic_output", resp.Header, replayable && !replayEventOpen &&
+				!openAIUsageHasTokens(usage) && imageCounter.Count() == 0 &&
+				!openAIStreamClientOutputStarted(c, clientOutputStarted))
+	}
+
+	var deadlineReady chan time.Time
 	for {
+		var ev scanEvent
+		var ok bool
 		select {
-		case ev, ok := <-events:
-			if ok {
-				queueBudget.release(len(ev.line))
-			}
-			if !ok {
-				if stageFirstOutput && eventInProgress {
-					// EOF dispatches the final SSE event even without a trailing blank
-					// line. Do not synthesize extra bytes on the downstream wire.
-					completeGuardedEvent(true)
-				}
-				return finalizeStream()
-			}
-			if result, err, done := handleScanErr(ev.err); done {
-				markEventProcessed(ev)
-				return result, err
-			}
-			processSSELine(ev.line, len(events) == 0)
-			markEventProcessed(ev)
-			if streamEarlyErr != nil {
-				return resultWithUsage(), streamEarlyErr
-			}
-			// Terminal 事件（response.completed 等）已完整写出后不再等上游 EOF：
-			// 上游在 keep-alive/HTTP2 复用连接上可能拖延关闭连接，空等期间只能
-			// 靠 keepalive 维持，白白拉长尾延迟。usage 已在 terminal 事件中解析。
-			// Codex bare error 序列（error 后可能跟 response.failed 或翻盘的 completed）
-			// 必须继续读取，不适用提前结束。
-			if sawTerminalEvent && !eventInProgress && (!codexFailureTerminal || !sawBareError) {
-				_ = resp.Body.Close()
-				return finalizeStream()
-			}
-
+		case ev, ok = <-events:
 		case <-intervalCh:
 			if failureDelivered {
 				return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
@@ -993,10 +1113,17 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if clientDisconnected {
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete after timeout")
 			}
+			if adaptiveFirstOutput && ctx.Err() != nil {
+				if !firstOutputProgressObserved {
+					stopAdaptiveStream()
+				}
+				return resultWithUsage(), ErrAdaptiveOpenAIResponsesClientDisconnected
+			}
 			logger.LegacyPrintf("service.openai_gateway", "Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
 			// 处理流超时，可能标记账户为临时不可调度或错误状态
 			if account != nil && account.Platform == PlatformOpenAI &&
 				!openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+				stopEarlyFailure = !firstOutputProgressObserved
 				_ = resp.Body.Close()
 				return resultWithUsage(), s.openAIStreamIdleFailover(ctx, c, account, false, upstreamRequestID, mappedModel, resp.Header)
 			}
@@ -1016,7 +1143,35 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			sendErrorEvent("stream_timeout", "Upstream response stream timed out")
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 
+		case <-clientDone:
+			clientDisconnected = true
+			clientDone = nil
+			if !firstOutputProgressObserved {
+				stopAdaptiveStream()
+				return resultWithUsage(), ErrAdaptiveOpenAIResponsesClientDisconnected
+			}
+			continue
+
 		case <-firstOutputCh:
+			if adaptiveFirstOutput {
+				scanHandoff.Lock()
+				select {
+				case ev, ok = <-events:
+				default:
+				}
+				scanHandoff.Unlock()
+				if !ok {
+					return timeoutAdaptiveStream()
+				}
+				// Timer and scanner can both be ready. Process a published
+				// pre-deadline event through the normal path first.
+				if deadlineReady == nil {
+					deadlineReady = make(chan time.Time)
+					close(deadlineReady)
+					firstOutputCh = deadlineReady
+				}
+				break
+			}
 			if firstOutputProgressObserved {
 				stopFirstOutputTimer()
 				continue
@@ -1027,6 +1182,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			_ = resp.Body.Close()
 			for ev := range events {
+				releaseScanEvent(ev)
 				markEventProcessed(ev)
 			}
 			return resultWithUsage(), s.newOpenAIFirstOutputTimeoutError(
@@ -1070,6 +1226,57 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			} else {
 				lastDownstreamWriteAt = time.Now()
 			}
+			continue
+		}
+
+		if adaptiveFirstOutput {
+			if ctx.Err() != nil {
+				clientDisconnected = true
+			}
+			if !firstOutputProgressObserved {
+				if clientDisconnected || (ok && ev.scannedAt.After(firstOutputDeadline)) {
+					if ok {
+						releaseScanEvent(ev)
+						if !ev.eof {
+							inspectAdaptiveLine(ev.line, true)
+						}
+					}
+					return timeoutAdaptiveStream()
+				}
+				if ev.eof && ev.err == nil && (replayEventOpen || eventInProgress || eventStartsClientOutput) {
+					releaseScanEvent(ev)
+					stopEarlyFailure = true
+					return resultWithUsage(), s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, nil,
+						"OpenAI stream ended before the first complete SSE event")
+				}
+				if ok && !ev.eof {
+					inspectAdaptiveLine(ev.line, false)
+					if ev.line == "" && eventStartsClientOutput && !suppressCurrentEvent && !failureDelivered {
+						// Publish the accepted boundary before the scanner can
+						// read the next line or the downstream flush can block.
+						firstOutputScanGuard.Store(false)
+					}
+				}
+			}
+		}
+		if ok {
+			releaseScanEvent(ev)
+		}
+		if result, err, done := handleScanErr(ev.err); done {
+			markEventProcessed(ev)
+			return result, err
+		}
+		if !ok || ev.eof {
+			return finalizeStream()
+		}
+		processSSELine(ev.line, len(events) == 0)
+		markEventProcessed(ev)
+		if streamEarlyErr != nil {
+			return resultWithUsage(), streamEarlyErr
+		}
+		if sawTerminalEvent && !eventInProgress && (!codexFailureTerminal || !sawBareError) {
+			_ = resp.Body.Close()
+			return finalizeStream()
 		}
 	}
 

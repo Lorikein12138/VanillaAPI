@@ -552,6 +552,7 @@ type adaptiveScore struct {
 	reliability int
 	latency     int
 	known       bool
+	recent      bool
 	health      adaptiveHealth
 	median      time.Duration
 	comparable  int
@@ -592,12 +593,24 @@ func (s adaptiveWeightedSamples) score() adaptiveScore {
 }
 
 func (t *adaptiveTelemetry) score(key adaptiveSampleKey, now time.Time) adaptiveScore {
-	series := t.series[key]
+	return scoreAdaptiveSeries(t.series[key], key.route, now)
+}
+
+func scoreAdaptiveSeries(series *adaptiveSeries, route adaptiveRoute, now time.Time) adaptiveScore {
 	if series == nil {
 		return adaptiveScore{}
 	}
+	score := scoreAdaptiveSamples(series.samples[:], route, now)
+	if adaptiveTextStream(route) {
+		_, score.probe, score.regressed, score.median, score.comparable = series.latencyHealth(now)
+	}
+	score.health = adaptiveHealthAt(series.health, now)
+	return score
+}
+
+func scoreAdaptiveSamples(samples []adaptiveSample, route adaptiveRoute, now time.Time) adaptiveScore {
 	var history, recent adaptiveWeightedSamples
-	for _, sample := range series.samples {
+	for _, sample := range samples {
 		age := now.Sub(sample.at)
 		if age < 0 || age >= adaptiveWindow {
 			continue
@@ -609,25 +622,30 @@ func (t *adaptiveTelemetry) score(key adaptiveSampleKey, now time.Time) adaptive
 		}
 	}
 	score := history.score()
-	if adaptiveTextStream(key.route) {
+	if adaptiveTextStream(route) {
 		score.known = history.count >= adaptiveMinimum
 		score.latency = math.MaxInt
 		if history.success > 0 {
 			score.latency = 100 - int(math.Round(history.weightedPoints/history.success))
 			score.reliability = int(math.Round(history.success / history.weight * 10000))
 		}
-		_, score.probe, score.regressed, score.median, score.comparable = series.latencyHealth(now)
 	} else if current := recent.score(); current.known {
 		score = current
-	}
-	if now.Sub(series.health.Last) < adaptiveHealthRetention {
-		score.health = series.health
-		if now.Sub(series.health.Last) >= adaptiveWindow {
-			score.health.Fault = adaptiveHealthy
-			score.health.Verify = true
-		}
+		score.recent = true
 	}
 	return score
+}
+
+func adaptiveHealthAt(health adaptiveHealth, now time.Time) adaptiveHealth {
+	age := now.Sub(health.Last)
+	if age >= adaptiveHealthRetention {
+		return adaptiveHealth{}
+	}
+	if age >= adaptiveWindow {
+		health.Fault = adaptiveHealthy
+		health.Verify = true
+	}
+	return health
 }
 
 type adaptivePeerMatch func(*Account, *Account) bool

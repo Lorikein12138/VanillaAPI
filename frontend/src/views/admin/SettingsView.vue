@@ -11917,6 +11917,9 @@ async function saveSettings() {
     const updated = await settingsStepUp.run(() =>
       adminAPI.settings.updateSettings(payload),
     );
+    if (typeof updated.gateway_adaptive_scheduling_enabled === "boolean") {
+      adminSettingsStore.setGatewayAdaptiveSchedulingEnabled(updated.gateway_adaptive_scheduling_enabled);
+    }
     for (const [key, value] of Object.entries(updated)) {
       if (key === "openai_fast_policy_settings" || key === "payment_quick_amounts") continue;
       if (value !== null && value !== undefined) {

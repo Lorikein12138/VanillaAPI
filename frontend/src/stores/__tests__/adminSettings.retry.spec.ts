@@ -48,4 +48,29 @@ describe('admin settings fetch retry', () => {
     expect(mocks.getSettings).toHaveBeenCalledTimes(1)
     expect(mocks.getConfig).toHaveBeenCalledTimes(1)
   })
+
+  it('confirms the adaptive switch independently when the payment request fails', async () => {
+    mocks.getSettings.mockResolvedValueOnce({ gateway_adaptive_scheduling_enabled: true })
+    mocks.getConfig.mockRejectedValueOnce(new Error('Payment unavailable'))
+    const store = useAdminSettingsStore()
+    expect(store.gatewayAdaptiveSchedulingEnabled).toBeNull()
+    await store.fetch()
+    expect(store.gatewayAdaptiveSchedulingEnabled).toBe(true)
+    expect(store.loaded).toBe(false)
+  })
+
+  it('keeps a saved adaptive value when an earlier GET resolves later', async () => {
+    let resolveSettings!: (value: { gateway_adaptive_scheduling_enabled: boolean }) => void
+    mocks.getSettings.mockImplementationOnce(() => new Promise((resolve) => { resolveSettings = resolve }))
+    const store = useAdminSettingsStore()
+    const request = store.fetch()
+    const duplicate = store.fetch(true)
+    store.setGatewayAdaptiveSchedulingEnabled(true)
+    resolveSettings({ gateway_adaptive_scheduling_enabled: false })
+    await Promise.all([request, duplicate])
+    expect(mocks.getSettings).toHaveBeenCalledTimes(1)
+    expect(store.gatewayAdaptiveSchedulingEnabled).toBe(true)
+    store.setGatewayAdaptiveSchedulingEnabled(false)
+    expect(store.gatewayAdaptiveSchedulingEnabled).toBe(false)
+  })
 })

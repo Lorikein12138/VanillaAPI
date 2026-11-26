@@ -49,18 +49,40 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const opsRealtimeMonitoringEnabled = ref(readCachedBool('ops_realtime_monitoring_enabled_cached', true))
   const opsQueryModeDefault = ref(readCachedString('ops_query_mode_default_cached', 'auto'))
   const paymentEnabled = ref(readCachedBool('payment_enabled_cached', false))
+  const gatewayAdaptiveSchedulingEnabled = ref<boolean | null>(null)
   const customMenuItems = ref<CustomMenuItem[]>([])
 
-  async function fetch(force = false): Promise<void> {
-    if (loaded.value && !force) return
-    if (loading.value) return
+  let inFlight: Promise<void> | null = null
+  let adaptiveRevision = 0
+
+  function fetch(force = false): Promise<void> {
+    if (inFlight) return inFlight
+    if (loaded.value && gatewayAdaptiveSchedulingEnabled.value !== null && !force) return Promise.resolve()
 
     loading.value = true
+    const revision = adaptiveRevision
+    inFlight = load(revision).finally(() => {
+      loading.value = false
+      inFlight = null
+    })
+    return inFlight
+  }
+
+  async function load(revision: number): Promise<void> {
     try {
-      const [settings, paymentConfigResp] = await Promise.all([
-        adminAPI.settings.getSettings(),
+      const [settingsResult, paymentResult] = await Promise.allSettled([
+        adminAPI.settings.getSettings().then((settings) => {
+          if (revision === adaptiveRevision) {
+            gatewayAdaptiveSchedulingEnabled.value = settings.gateway_adaptive_scheduling_enabled === true
+          }
+          return settings
+        }),
         adminAPI.payment.getConfig()
       ])
+      if (settingsResult.status === 'rejected') throw settingsResult.reason
+      if (paymentResult.status === 'rejected') throw paymentResult.reason
+      const settings = settingsResult.value
+      const paymentConfigResp = paymentResult.value
       opsMonitoringEnabled.value = settings.ops_monitoring_enabled ?? true
       writeCachedBool('ops_monitoring_enabled_cached', opsMonitoringEnabled.value)
 
@@ -79,8 +101,23 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     } catch (err) {
       // Keep cached/default value: do not "flip" the UI based on a transient fetch failure.
       console.error('[adminSettings] Failed to fetch settings:', err)
-    } finally {
-      loading.value = false
+    }
+  }
+
+  function setGatewayAdaptiveSchedulingEnabled(value: boolean) {
+    adaptiveRevision++
+    gatewayAdaptiveSchedulingEnabled.value = value
+  }
+
+  async function refreshGatewayAdaptiveScheduling(): Promise<void> {
+    const revision = ++adaptiveRevision
+    try {
+      const settings = await adminAPI.settings.getSettings()
+      if (revision === adaptiveRevision) {
+        setGatewayAdaptiveSchedulingEnabled(settings.gateway_adaptive_scheduling_enabled === true)
+      }
+    } catch (err) {
+      console.error('[adminSettings] Failed to confirm adaptive scheduling:', err)
     }
   }
 
@@ -139,11 +176,14 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     opsRealtimeMonitoringEnabled,
     opsQueryModeDefault,
     paymentEnabled,
+    gatewayAdaptiveSchedulingEnabled,
     customMenuItems,
     fetch,
     setOpsMonitoringEnabledLocal,
     setOpsRealtimeMonitoringEnabledLocal,
     setPaymentEnabledLocal,
+    setGatewayAdaptiveSchedulingEnabled,
+    refreshGatewayAdaptiveScheduling,
     setOpsQueryModeDefaultLocal
   }
 })

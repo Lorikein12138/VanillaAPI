@@ -44,6 +44,7 @@ const {
   fetchPublicSettings,
   listAffiliateUsers,
   adminSettingsFetch,
+  setGatewayAdaptiveSchedulingEnabled,
   showError,
   showSuccess,
 } = vi.hoisted(() => ({
@@ -86,6 +87,7 @@ const {
   listAffiliateUsers: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 }),
   fetchPublicSettings: vi.fn(),
   adminSettingsFetch: vi.fn(),
+  setGatewayAdaptiveSchedulingEnabled: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn(),
 }));
@@ -153,6 +155,7 @@ vi.mock("@/stores", () => ({
 vi.mock("@/stores/adminSettings", () => ({
   useAdminSettingsStore: () => ({
     fetch: adminSettingsFetch,
+    setGatewayAdaptiveSchedulingEnabled,
   }),
 }));
 
@@ -718,6 +721,7 @@ describe("admin SettingsView payment visible method controls", () => {
     deleteProvider.mockReset();
     fetchPublicSettings.mockReset();
     adminSettingsFetch.mockReset();
+    setGatewayAdaptiveSchedulingEnabled.mockReset();
     showError.mockReset();
     showSuccess.mockReset();
     localeRef.value = "zh-CN";
@@ -890,6 +894,26 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({ compact_home_enabled: true }),
     );
+  });
+
+  it("updates the adaptive scores gate only from a successful settings save", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await openGatewayTab(wrapper);
+    const toggle = wrapper.get<HTMLInputElement>('[aria-labelledby="gateway-adaptive-scheduling-label"]');
+    await toggle.setValue(true);
+
+    updateSettings.mockRejectedValueOnce(new Error("Settings unavailable"));
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(setGatewayAdaptiveSchedulingEnabled).not.toHaveBeenCalled();
+
+    await wrapper.get("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ gateway_adaptive_scheduling_enabled: true }));
+    expect(setGatewayAdaptiveSchedulingEnabled).toHaveBeenLastCalledWith(true);
+    expect(adminSettingsFetch).toHaveBeenCalledWith(true);
+    wrapper.unmount();
   });
 
   it("renders panel rate limit card and saves settings", async () => {

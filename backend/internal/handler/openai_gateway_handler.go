@@ -571,6 +571,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// Codex 在所有请求中被动声明 image_gen namespace，宽泛检测会导致禁了生图的
 	// 分组中所有 Codex 请求被 403（#4447），并误占生图并发槽位。
 	imageIntent := service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, body)
+	if c.Request.Method == http.MethodPost && reqStream && !imageIntent && !nativeV2 && !legacyCompact && isBareOpenAIResponsesPath(c) {
+		c.Request = c.Request.WithContext(service.WithAdaptiveOpenAIResponsesFirstOutput(c.Request.Context(), sessionHashBody, c.Request.Header))
+	}
 	if imageIntent && !service.GroupAllowsImageGeneration(apiKey.Group) {
 		h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
@@ -665,6 +668,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var replayTimeout *service.UpstreamFailoverError
+	writeReplayTimeout := func() {
+		if !failoverClientGone(c) {
+			h.handleFailoverExhausted(c, replayTimeout, streamStarted || c.Writer.Written())
+		}
+	}
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
 
@@ -721,6 +730,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if replayTimeout != nil {
+				writeReplayTimeout()
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -748,6 +761,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
 			}
 			return
+		}
+		if replayTimeout != nil {
+			if !openAIRequestAllowsFailoverReplay(c) || selection == nil ||
+				!h.gatewayService.CanReplayAdaptiveOpenAIResponses(c.Request.Context(), selection.Account, forwardBody) {
+				if selection != nil && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				writeReplayTimeout()
+				return
+			}
 		}
 		if selection == nil || selection.Account == nil {
 			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
@@ -797,8 +820,19 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
-		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
+		slotErrorWriter := func(status int, errType, code, message string) {
+			if replayTimeout != nil {
+				writeReplayTimeout()
+			} else if !failoverClientGone(c) {
+				h.handleStreamingAwareErrorWithCode(c, status, errType, code, message, streamStarted, false)
+			}
+		}
+		accountReleaseFunc, slotResult := h.acquireOpenAIAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog, slotErrorWriter)
 		if slotResult == openAISlotAcquireProfitVetoed {
+			if replayTimeout != nil {
+				writeReplayTimeout()
+				return
+			}
 			// 利润终检否决：排除该账号重新选号，全池耗尽由下一轮选号报错；
 			// 否决次数达上限则直接终止，避免排队抢槽后才终检的延迟放大。
 			if !recordOpenAIProfitVeto(failedAccountIDs, account.ID, &profitVetoCount) {
@@ -809,6 +843,23 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		if slotResult != openAISlotAcquireOK {
 			return
+		}
+		if !openAIRequestAllowsFailoverReplay(c) {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+			}
+			return
+		}
+		if replayTimeout != nil {
+			// Profit admission can refresh the account configuration.
+			account = selection.Account
+			if !h.gatewayService.CanReplayAdaptiveOpenAIResponses(c.Request.Context(), account, forwardBody) {
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				writeReplayTimeout()
+				return
+			}
 		}
 
 		// Forward request
@@ -827,8 +878,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					accountReleaseFunc()
 				}
 			}()
-			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
+			ctx := c.Request.Context()
+			if replayTimeout != nil {
+				ctx = service.WithAdaptiveOpenAIResponsesReplay(ctx)
+			}
+			return h.gatewayService.Forward(ctx, c, account, attemptBody)
 		}()
+		if replayTimeout != nil && errors.Is(err, service.ErrAdaptiveOpenAIResponsesReplayUnavailable) {
+			writeReplayTimeout()
+			return
+		}
 		if h.handleForwardRequestBodyMemoryOverload(c, err, streamStarted) {
 			return
 		}
@@ -848,7 +907,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		// #5148 对齐：错误返回携带的部分 result（流中断前上游已计量的 usage）照常
-		// 入账；failover 错误恒定 result=nil，不会重复计费。
+		// 入账。允许重放的失败不携带可计费结果。
 		submitResponsesUsage := func(res *service.OpenAIForwardResult) {
 			if res == nil {
 				return
@@ -895,7 +954,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			})
 		}
 		if err != nil {
-			if result != nil && result.ClientDisconnect {
+			if errors.Is(err, service.ErrAdaptiveOpenAIResponsesClientDisconnected) || (result != nil && result.ClientDisconnect) {
+				failoverClientGone(c)
 				reqLog.Info("openai.client_disconnected",
 					zap.Int64("account_id", account.ID),
 					zap.Error(err),
@@ -910,6 +970,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				)
 				submitResponsesUsage(result)
 				return
+			}
+			var timeoutErr *service.UpstreamFailoverError
+			if errors.As(err, &timeoutErr) && timeoutErr.Reason == service.AdaptiveOpenAIResponsesFirstOutputTimeout {
+				if timeoutErr.Scope != service.GatewayFailureScopeRequest {
+					h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), false, nil, err)
+				}
+				if replayTimeout != nil || switchCount != 0 || maxAccountSwitches <= 0 || sameAccountRetryCount[account.ID] != 0 ||
+					!timeoutErr.ShouldRetryNextAccount() || result != nil || !openAIForwardMayFailover(c, writerSizeBeforeForward, timeoutErr) {
+					submitResponsesUsage(result)
+					h.handleFailoverExhausted(c, timeoutErr, streamStarted || c.Writer.Written())
+					return
+				}
+				failedAccountIDs[account.ID] = struct{}{}
+				h.gatewayService.RecordOpenAIAccountSwitch()
+				switchCount++
+				replayTimeout = timeoutErr
+				requiredCapability = service.OpenAIEndpointCapabilityResponses
+				continue
 			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.forward_partial_error_with_image_result",
@@ -929,6 +1007,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					}
 					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
+						submitResponsesUsage(result)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
@@ -940,7 +1019,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
-					if !failoverErr.ShouldRetryNextAccount() {
+					if replayTimeout != nil || result != nil || !failoverErr.ShouldRetryNextAccount() {
+						submitResponsesUsage(result)
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -2167,6 +2247,9 @@ func (h *OpenAIGatewayHandler) acquireResponsesUserSlot(
 	ctx := c.Request.Context()
 	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, userID, userConcurrency, reqStream, streamStarted)
 	if err != nil {
+		if service.IsAdaptiveOpenAIResponsesFirstOutput(ctx) && failoverClientGone(c) {
+			return nil, false
+		}
 		reqLog.Warn("openai.user_slot_acquire_failed", zap.Error(err))
 		h.handleConcurrencyError(c, err, "user", *streamStarted)
 		return nil, false
@@ -3704,6 +3787,9 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
+	if failoverErr.Reason == service.AdaptiveOpenAIResponsesFirstOutputTimeout && !streamStarted && !c.Writer.Written() {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+	}
 	if statusCode == http.StatusBadRequest && service.IsOpenAICompatibleModelNotFound400(responseBody) && !streamStarted {
 		upstreamMsg := service.SanitizeUpstreamErrorMessage(service.ExtractUpstreamErrorMessage(responseBody))
 		service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
@@ -3723,6 +3809,14 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
 	upstreamMsg := service.ExtractUpstreamErrorMessage(responseBody)
+	if failoverErr.Reason == service.AdaptiveOpenAIResponsesFirstOutputTimeout {
+		if failoverErr.Scope != service.GatewayFailureScopeRequest {
+			service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
+		}
+		h.handleStreamingAwareErrorWithCode(c, http.StatusGatewayTimeout, "upstream_error",
+			service.AdaptiveOpenAIResponsesFirstOutputTimeout, upstreamMsg, streamStarted, true)
+		return
+	}
 	service.SetOpsUpstreamError(c, statusCode, upstreamMsg, "")
 
 	// 使用默认的错误映射
