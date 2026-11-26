@@ -131,6 +131,18 @@ func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, erro
 	return group, nil
 }
 
+// GetGroupLite validates group access for callers that page members themselves.
+func (s *adminServiceImpl) GetGroupLite(ctx context.Context, id int64) (*Group, error) {
+	group, err := s.groupRepo.GetByIDLite(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSimpleModeGroupAccess(group); err != nil {
+		return nil, err
+	}
+	return group, nil
+}
+
 func (s *adminServiceImpl) validateSimpleModeGroupAccess(group *Group) error {
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && !IsGroupBindableInSimpleMode(group) {
 		return infraerrors.BadRequest("SIMPLE_MODE_GROUP_NOT_BINDABLE", "composite groups are not supported in simple mode")

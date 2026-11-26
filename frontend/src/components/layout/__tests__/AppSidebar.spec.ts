@@ -90,3 +90,11 @@ describe('AppSidebar MCP entry', () => {
     expect(componentSource).not.toMatch(/path: '\/settings\/mcp'[^\n]*PluginIcon/)
   })
 })
+
+describe('AppSidebar adaptive scores entry', () => {
+  it('requires a confirmed enabled setting and follows the accounts entry', () => {
+    expect(componentSource).toContain('adminSettingsStore.gatewayAdaptiveSchedulingEnabled === true')
+    expect(componentSource).toContain("sorted.findIndex((item) => item.path === '/admin/accounts')")
+    expect(componentSource).toMatch(/if \(flagAdaptiveAccountScores\(\)\) \{[\s\S]+?sorted\.splice\(accountsIndex \+ 1, 0, \{ path: '\/admin\/account-scores'/)
+  })
+})

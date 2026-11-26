@@ -46,6 +46,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, err
 	}
 	startTime := time.Now()
+	firstOutputPolicy := adaptiveResponsesFirstOutputPolicy(ctx)
+	if firstOutputPolicy.replaying && !s.CanReplayAdaptiveOpenAIResponses(ctx, account, body) {
+		return nil, ErrAdaptiveOpenAIResponsesReplayUnavailable
+	}
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
 
@@ -192,7 +196,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(routingModel) {
 		return nil, writeOpenCodeUnsupportedModelError(c, false, routingModel)
 	}
-	switch s.resolveUpstreamProtocolFor(ctx, account, APIProtocolResponses, routingModel) {
+	upstreamProtocol := s.resolveUpstreamProtocolFor(ctx, account, APIProtocolResponses, routingModel)
+	if firstOutputPolicy.replaying && upstreamProtocol != APIProtocolResponses {
+		return nil, ErrAdaptiveOpenAIResponsesReplayUnavailable
+	}
+	switch upstreamProtocol {
 	case APIProtocolAnthropic:
 		// Responses 客户端 × Anthropic 上游：转成 Anthropic 请求走原生端点。不能落到
 		// raw-CC 分支——其 URL 构造会把 anthropic base 当 CC base 用。
@@ -1054,6 +1062,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if reqStream && account.Platform == PlatformOpenAI {
 		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffortValue)
 	}
+	adaptiveFirstOutput := firstOutputPolicy.enabled && reqStream && account.IsOpenAI() &&
+		wsDecision.Transport == OpenAIUpstreamTransportHTTPSSE && upstreamProtocol == APIProtocolResponses &&
+		!compactPath && !isOpenAINativeCompactionV2(c) && !compatMessagesBridge && !imageIntent && adaptiveResponsesText(body)
+	if adaptiveFirstOutput {
+		firstOutputTimeout = s.openAIFirstOutputTimeoutWithDefault(reasoningEffortValue, adaptiveOpenAIResponsesDefaultSeconds)
+	}
+	firstOutputDeadline := startTime.Add(firstOutputTimeout)
+	outboundAttempts := 0
 
 	httpInvalidEncryptedContentRetryTried := false
 	compactModelFallbackRetried := false
@@ -1065,7 +1081,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		var headerGuard *openAIFirstOutputHeaderGuard
 		if firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
-				upstreamCtx, releaseUpstreamCtx, startTime.Add(firstOutputTimeout),
+				upstreamCtx, releaseUpstreamCtx, firstOutputDeadline,
 			)
 		}
 		syncOpenAIResponsesInstructionsEcho(c, body)
@@ -1087,14 +1103,57 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		// Send request
+		replayable := adaptiveFirstOutput && firstOutputPolicy.replayable && !firstOutputPolicy.replaying &&
+			outboundAttempts == 0 && account.IsOpenAIApiKey() && adaptiveResponsesReplayBody(body) &&
+			adaptiveResponsesReplayHeaders(upstreamReq.Header)
+		if firstOutputPolicy.replaying && (!adaptiveFirstOutput || !adaptiveResponsesReplayBody(body) ||
+			!adaptiveResponsesReplayHeaders(upstreamReq.Header)) {
+			if headerGuard != nil {
+				headerGuard.close()
+			}
+			return nil, ErrAdaptiveOpenAIResponsesReplayUnavailable
+		}
+		stopClientHeaderWatch := func() bool { return false }
+		if adaptiveFirstOutput {
+			if ctx.Err() != nil {
+				headerGuard.close()
+				return nil, ErrAdaptiveOpenAIResponsesClientDisconnected
+			}
+			if !time.Now().Before(firstOutputDeadline) {
+				headerGuard.close()
+				return nil, &UpstreamFailoverError{
+					StatusCode: http.StatusGatewayTimeout, ResponseBody: []byte(openAIFirstOutputTimeoutBody),
+					Reason: AdaptiveOpenAIResponsesFirstOutputTimeout, NextAccountAction: NextAccountStop,
+					Scope: GatewayFailureScopeRequest,
+				}
+			}
+			stopClientHeaderWatch = context.AfterFunc(ctx, headerGuard.cancel)
+		}
 		upstreamStart := time.Now()
+		outboundAttempts++
 		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		stopClientHeaderWatch()
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
-		if headerGuard != nil && headerGuard.stopHeaderWait() {
+		if adaptiveFirstOutput && ctx.Err() != nil && (err != nil || resp == nil || resp.StatusCode >= 400) {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
 			headerGuard.close()
+			return nil, ErrAdaptiveOpenAIResponsesClientDisconnected
+		}
+		if headerGuard != nil && headerGuard.stopHeaderWait() {
+			var headers http.Header
+			if resp != nil {
+				headers = resp.Header
+			}
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			headerGuard.close()
+			if adaptiveFirstOutput {
+				return nil, s.adaptiveResponsesTimeoutError(ctx, c, account, startTime, originalModel,
+					reasoningEffortValue, firstOutputTimeout, "response_headers", headers, replayable && resp == nil)
+			}
 			return nil, s.newOpenAIFirstOutputTimeoutError(
 				ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
 				startTime, originalModel, reasoningEffortValue,
@@ -1127,7 +1186,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
-			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
+			if !firstOutputPolicy.replaying && !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 				agentTaskRecoveryTried = true
 				expectedTaskID := account.GetCredential("task_id")
 				if err := s.recoverAgentIdentityTask(ctx, account, expectedTaskID); err != nil {
@@ -1142,7 +1201,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					strings.Contains(upstreamMsg, "The encrypted content") &&
 					strings.Contains(upstreamMsg, "could not be verified") &&
 					strings.Contains(upstreamMsg, "could not be decrypted or parsed"))
-			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && invalidEncryptedContentError {
+			if !firstOutputPolicy.replaying && !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && invalidEncryptedContentError {
 				decoded, decodeErr := ensureReqBody()
 				if decodeErr != nil {
 					return nil, decodeErr
@@ -1168,7 +1227,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, respBody); retryErr != nil {
 				return nil, fmt.Errorf("normalize rejected Responses field retry body: %w", retryErr)
-			} else if changed && rejectedFieldRetryState.Allow(retryBody) {
+			} else if changed && !firstOutputPolicy.replaying && rejectedFieldRetryState.Allow(retryBody) {
 				body = retryBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil
@@ -1177,7 +1236,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, respBody, compactModelFallbackRetried,
-			); retry {
+			); retry && !firstOutputPolicy.replaying {
 				s.appendOpenAICompactFallbackRetryOps(c, account, resp, respBody, upstreamMsg, false)
 				fromModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 				body = retryBody
@@ -1249,13 +1308,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		imageCount := 0
 		searchCount := 0
 		var imageOutputSizes []string
+		var streamErr error
 		if reqStream {
-			streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, startTime, originalModel, upstreamModel, reasoningEffortValue)
+			streamResult, err := s.handleStreamingResponseWithFirstOutput(ctx, resp, c, account, startTime, originalModel, upstreamModel,
+				reasoningEffortValue, firstOutputTimeout, adaptiveFirstOutput, replayable && isEventStreamResponse(resp.Header) &&
+					adaptiveResponsesReplayResponseHeaders(resp.Header))
 			if err != nil {
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
-					); retry {
+					); retry && !firstOutputPolicy.replaying {
 						s.appendOpenAICompactFallbackRetryOps(c, account, resp, signal.payload, signal.message, false)
 						body = retryBody
 						requestView = newOpenAIRequestView(body)
@@ -1288,11 +1350,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					}
 					return s.handleErrorResponse(ctx, compactResp, c, account, body, resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel))
 				}
-				return nil, err
+				if !adaptiveFirstOutput || streamResult == nil ||
+					(!openAIUsageHasTokens(streamResult.usage) && streamResult.imageCount == 0 && streamResult.searchCount == 0) {
+					return nil, err
+				}
+				streamErr = err
 			}
 			usage = streamResult.usage
 			firstTokenMs = streamResult.firstTokenMs
-			responseID = strings.TrimSpace(streamResult.responseID)
+			if streamErr == nil {
+				responseID = strings.TrimSpace(streamResult.responseID)
+			}
 			imageCount = streamResult.imageCount
 			imageOutputSizes = streamResult.imageOutputSizes
 			searchCount = streamResult.searchCount
@@ -1320,15 +1388,17 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			imageOutputSizes = nonStreamResult.imageOutputSizes
 			searchCount = nonStreamResult.searchCount
 		}
-		s.bindHTTPResponseAccount(ctx, c, account, responseID)
+		if streamErr == nil {
+			s.bindHTTPResponseAccount(ctx, c, account, responseID)
+		}
 
 		// Extract and save Codex usage snapshot from response headers (for OAuth accounts).
 		// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
-		if account.UsesOpenAICodexProtocol() && !account.IsShadow() {
+		if streamErr == nil && account.UsesOpenAICodexProtocol() && !account.IsShadow() {
 			if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
 				s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
 			}
-		} else if account.IsShadow() && account.ParentAccountID != nil {
+		} else if streamErr == nil && account.IsShadow() && account.ParentAccountID != nil {
 			notifyOpenAIAutoReset(*account.ParentAccountID)
 		}
 
@@ -1353,6 +1423,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			OpenAIWSMode:                  false,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  firstTokenMs,
+			ClientDisconnect:              errors.Is(streamErr, ErrAdaptiveOpenAIResponsesClientDisconnected),
 		}
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount
@@ -1368,7 +1439,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			forwardResult.SearchCount = searchCount
 		}
 		stampOpenAIResponsesUpstreamEndpoint(c, forwardResult)
-		return forwardResult, nil
+		return forwardResult, streamErr
 	}
 }
 

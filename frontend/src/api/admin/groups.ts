@@ -21,6 +21,91 @@ export interface LiveCapability {
   reason?: string
 }
 
+export interface AdaptiveScoreDimensions {
+  model: string
+  operation: string
+  transport: string
+  tier: string
+  effort: string
+  input_size: number
+  duration?: string
+  thinking_level?: string
+  thinking_enabled: boolean
+}
+
+export interface AdaptiveScoreV1 extends AdaptiveScoreDimensions {
+  workload: string
+  score_kind: 'general' | 'text_stream'
+  score_window_minutes: number
+  known: boolean
+  sample_count: number
+  latest_sample_at: string | null
+  reliability: number | null
+  latency: number | null
+  health: {
+    state: string
+    updated_at: string
+    next_retest_at: string | null
+    recovered_at: string | null
+  } | null
+}
+
+export interface AdaptiveScoreV2 extends AdaptiveScoreDimensions {
+  wire: string
+  workloads: string[]
+  state: 'insufficient' | 'slow' | 'normal'
+  sample_count: number
+  state_count: number
+  latest_sample_at: string | null
+  latest_first_output_ms: number | null
+}
+
+export interface AdaptiveScoreMember {
+  id: number
+  name: string
+  platform: string
+  type: string
+  status: string
+  schedulable: boolean
+  schedulable_now: boolean
+  rate_limit_reset_at: string | null
+  overload_until: string | null
+  temp_unschedulable_until: string | null
+  expires_at: string | null
+  auto_pause_on_expired: boolean
+  overall_score: number | null
+  overall_sample_count: number
+  v1: AdaptiveScoreV1[]
+  v2: AdaptiveScoreV2[]
+  v1_truncated: boolean
+  v2_truncated: boolean
+}
+
+export interface AdaptiveAccountScoresPage {
+  group_id: number
+  items: AdaptiveScoreMember[]
+  total: number
+  max_queryable_total: number
+  page: number
+  page_size: number
+  observed_at: string
+  scope: 'current_instance'
+  v2_ready: boolean
+}
+
+export async function getAdaptiveAccountScores(
+  groupId: number,
+  page: number,
+  pageSize: number,
+  signal?: AbortSignal,
+): Promise<AdaptiveAccountScoresPage> {
+  const { data } = await apiClient.get<AdaptiveAccountScoresPage>(`/admin/groups/${groupId}/adaptive-account-scores`, {
+    params: { page, page_size: pageSize },
+    signal,
+  })
+  return data
+}
+
 /**
  * List all groups with pagination
  * @param page - Page number (default: 1)
@@ -472,6 +557,7 @@ export async function getCapacitySummary(): Promise<
 
 export const groupsAPI = {
   list,
+  getAdaptiveAccountScores,
   getAll,
   getByPlatform,
   getAllIncludingInactive,

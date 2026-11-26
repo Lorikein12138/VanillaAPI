@@ -25,6 +25,7 @@ const (
 	openAIFirstOutputScannerFramingAllowance = 64
 	openAIFirstOutputGuardQueueSize          = 1
 	openAIDefaultStreamQueueSize             = 16
+	openAIFirstOutputTimeoutBody             = `{"error":{"type":"first_output_timeout","message":"Upstream produced no output before the deadline"}}`
 )
 
 var (
@@ -233,10 +234,20 @@ func (s *openAIFirstOutputStage) Close() error {
 }
 
 func (s *OpenAIGatewayService) openAIFirstOutputTimeout(reasoningEffort string) time.Duration {
-	if s == nil || s.cfg == nil || s.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds <= 0 {
-		return 0
+	return s.openAIFirstOutputTimeoutWithDefault(reasoningEffort, 0)
+}
+
+func (s *OpenAIGatewayService) openAIFirstOutputTimeoutWithDefault(reasoningEffort string, defaultSeconds int) time.Duration {
+	if s == nil || s.cfg == nil {
+		return time.Duration(defaultSeconds) * time.Second
 	}
 	seconds := s.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds
+	if seconds <= 0 {
+		if defaultSeconds == 0 {
+			return 0
+		}
+		seconds = defaultSeconds
+	}
 	switch strings.ToLower(strings.TrimSpace(reasoningEffort)) {
 	case "high", "xhigh", "max":
 		if override := s.cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds; override > 0 {
@@ -283,7 +294,7 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	}
 	return &UpstreamFailoverError{
 		StatusCode:      http.StatusGatewayTimeout,
-		ResponseBody:    []byte(`{"error":{"type":"first_output_timeout","message":"Upstream produced no output before the deadline"}}`),
+		ResponseBody:    []byte(openAIFirstOutputTimeoutBody),
 		ResponseHeaders: responseHeaders.Clone(), SafeToFailoverAfterWrite: true,
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -88,6 +89,218 @@ func TestOpenAIForwardFirstOutputTimeoutIncludesResponseHeaderWait(t *testing.T)
 	default:
 		t.Fatal("response-header timeout did not cancel the upstream request context")
 	}
+}
+
+func TestAdaptiveResponsesFirstOutputPolicy(t *testing.T) {
+	cfg := &config.Config{}
+	svc := &OpenAIGatewayService{cfg: cfg}
+	require.Zero(t, svc.openAIFirstOutputTimeout("high"))
+	require.Equal(t, 30*time.Second, svc.openAIFirstOutputTimeoutWithDefault("low", adaptiveOpenAIResponsesDefaultSeconds))
+	cfg.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds = 120
+	require.Zero(t, svc.openAIFirstOutputTimeout("high"))
+	for _, effort := range []string{"high", "xhigh", "max"} {
+		require.Equal(t, 120*time.Second, svc.openAIFirstOutputTimeoutWithDefault(effort, adaptiveOpenAIResponsesDefaultSeconds))
+	}
+	cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 60
+	require.Equal(t, 60*time.Second, svc.openAIFirstOutputTimeoutWithDefault("low", adaptiveOpenAIResponsesDefaultSeconds))
+	require.Equal(t, 120*time.Second, svc.openAIFirstOutputTimeoutWithDefault("high", adaptiveOpenAIResponsesDefaultSeconds))
+
+	base := context.Background()
+	settings := NewSettingService(&firstOutputTimeoutTestSettingRepo{values: map[string]string{
+		SettingKeyGatewayAdaptiveSchedulingEnabled: "true",
+	}}, cfg)
+	adaptive := WithGatewayAdaptiveIngress(base, settings, "POST /v1/responses", "sse")
+	var cases = []struct {
+		name, body          string
+		enabled, replayable bool
+	}{
+		{"text", `{"model":"m","input":"hello","stream":true,"store":false}`, true, true},
+		{"messages", `{"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true,"store":false}`, true, true},
+		{"unary", `{"input":"hello","stream":false,"store":false}`, false, false},
+		{"file", `{"input":[{"role":"user","content":[{"type":"input_file","file_id":"file_1"}]}],"stream":true,"store":false}`, false, false},
+		{"audio", `{"input":"hello","modalities":["text","audio"],"stream":true,"store":false}`, false, false},
+		{"image", `{"input":[{"type":"input_image","image_url":"url"}],"stream":true,"store":false}`, false, false},
+		{"previous", `{"input":"hello","stream":true,"store":false,"previous_response_id":"resp_old"}`, true, false},
+		{"conversation", `{"input":"hello","stream":true,"store":false,"conversation":"conv_old"}`, true, false},
+		{"cache binding", `{"input":"hello","stream":true,"store":false,"prompt_cache_key":"bound"}`, true, false},
+		{"tools", `{"input":"hello","stream":true,"store":false,"tools":[{"type":"mcp"}]}`, true, false},
+		{"history", `{"input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}],"stream":true,"store":false}`, true, false},
+		{"reference", `{"input":[{"type":"item_reference","id":"msg_1"}],"stream":true,"store":false}`, true, false},
+		{"encrypted", `{"input":[{"type":"reasoning","encrypted_content":"opaque"}],"stream":true,"store":false}`, true, false},
+		{"stored", `{"input":"hello","stream":true,"store":true}`, true, false},
+		{"default store", `{"input":"hello","stream":true}`, true, false},
+		{"duplicate store", `{"input":"hello","stream":true,"store":false,"store":true}`, true, false},
+		{"background", `{"input":"hello","stream":true,"store":false,"background":true}`, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := adaptiveResponsesFirstOutputPolicy(WithAdaptiveOpenAIResponsesFirstOutput(adaptive, []byte(tc.body), nil))
+			require.Equal(t, tc.enabled, policy.enabled)
+			require.Equal(t, tc.replayable, policy.replayable)
+			require.False(t, adaptiveResponsesFirstOutputPolicy(WithAdaptiveOpenAIResponsesFirstOutput(base, []byte(tc.body), nil)).enabled)
+		})
+	}
+	for header := range openaiAllowedHeaders {
+		allowed := header == "accept-language" || header == "content-type" || header == "user-agent"
+		require.Equal(t, allowed, adaptiveResponsesReplayIngressHeaders(http.Header{header: {"test"}}), header)
+	}
+	for _, header := range []string{"CF-Ray", "CF-Connecting-IP", "CF-Visitor", "Via", "X-ESA-Request-ID", "X-Forwarded-For", "X-Stainless-Retry-Count"} {
+		require.True(t, adaptiveResponsesReplayIngressHeaders(http.Header{header: {"test"}}), header)
+	}
+	require.False(t, adaptiveResponsesReplayHeaders(http.Header{"CF-Ray": {"test"}}))
+	require.False(t, adaptiveResponsesReplayIngressHeaders(http.Header{"Cookie": {"session=state"}}))
+}
+
+func TestAdaptiveResponsesFirstOutputStreamCutoff(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire  string
+		replayable  bool
+		inputTokens int
+	}{
+		{"preamble", "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_private\",\"store\":false}}\n\n", true, 0},
+		{"preamble event header without line ending", "event: response.created", false, 0},
+		{"preamble data without frame separator", "data: {\"type\":\"response.created\",\"response\":{\"store\":false}}\n", false, 0},
+		{"partial semantic", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"private\"}\n", false, 0},
+		{"partial line", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"private\"}", false, 0},
+		{"tool", "event: response.output_item.added\n", false, 0},
+		{"state", "data: {\"type\":\"response.in_progress\",\"response\":{\"conversation\":\"conv_private\"}}\n\n", false, 0},
+		{"usage buffered at cutoff", "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":2}}}}", false, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, _, _, counter := newFirstOutputTimeoutTestGateway(&config.Config{}, nil)
+				c, rec := newAdaptiveResponsesStreamTestContext(context.Background())
+				pr, pw := io.Pipe()
+				writerDone := make(chan struct{})
+				go func() {
+					defer close(writerDone)
+					_, _ = io.WriteString(pw, tc.wire)
+				}()
+				t.Cleanup(func() { _ = pw.Close() })
+				body := &firstOutputCloseTrackingBody{ReadCloser: pr, closed: make(chan struct{})}
+				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Request-Id": {"req-private"}}, Body: body}
+				result, err := svc.handleStreamingResponseWithFirstOutput(c.Request.Context(), resp, c,
+					&Account{ID: 81, Platform: PlatformOpenAI}, time.Now(), "original", "mapped", "", 80*time.Millisecond, true, true)
+				var failover *UpstreamFailoverError
+				require.ErrorAs(t, err, &failover)
+				require.Equal(t, GatewayFailureReason(AdaptiveOpenAIResponsesFirstOutputTimeout), failover.Reason)
+				require.Equal(t, tc.replayable, failover.ShouldRetryNextAccount())
+				require.Empty(t, failover.ResponseHeaders)
+				require.Empty(t, rec.Body.String())
+				require.Empty(t, rec.Header().Get("X-Request-Id"))
+				require.Equal(t, tc.inputTokens, result.usage.InputTokens)
+				if tc.inputTokens > 0 {
+					require.Equal(t, 2, result.usage.CacheReadInputTokens)
+				}
+				require.Equal(t, []int64{1}, firstOutputTimeoutTestIncrementCounts(counter))
+				select {
+				case <-body.closed:
+				default:
+					t.Fatal("upstream body still open")
+				}
+				select {
+				case <-writerDone:
+				case <-time.After(time.Second):
+					t.Fatal("upstream reader still blocked")
+				}
+			})
+		})
+	}
+}
+
+func TestAdaptiveResponsesFirstOutputCompleteEventDisarmsDeadline(t *testing.T) {
+	svc := &OpenAIGatewayService{cfg: &config.Config{}}
+	c, rec := newAdaptiveResponsesStreamTestContext(context.Background())
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	go func() {
+		_, _ = io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n")
+		time.Sleep(160 * time.Millisecond)
+		_, _ = io.WriteString(pw, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n")
+	}()
+	result, err := svc.handleStreamingResponseWithFirstOutput(c.Request.Context(), &http.Response{Body: pr}, c,
+		&Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "original", "mapped", "", 80*time.Millisecond, true, true)
+	require.NoError(t, err)
+	require.NotNil(t, result.firstTokenMs)
+	require.Equal(t, 3, result.usage.InputTokens)
+	require.Contains(t, rec.Body.String(), "response.completed")
+}
+
+func TestAdaptiveResponsesFirstOutputCancellationDrainsBufferedUsage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc, _, _, counter := newFirstOutputTimeoutTestGateway(&config.Config{}, nil)
+	c, rec := newAdaptiveResponsesStreamTestContext(ctx)
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+	go func() {
+		_, _ = io.WriteString(pw, "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":11}}}")
+		cancel()
+	}()
+	result, err := svc.handleStreamingResponseWithFirstOutput(ctx, &http.Response{Body: pr}, c,
+		&Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "original", "mapped", "", 2*time.Second, true, true)
+	require.ErrorIs(t, err, ErrAdaptiveOpenAIResponsesClientDisconnected)
+	require.Equal(t, 11, result.usage.InputTokens)
+	require.Empty(t, firstOutputTimeoutTestIncrementCounts(counter))
+	require.Empty(t, rec.Body.String())
+	_, exists := c.Get(OpsUpstreamErrorsKey)
+	require.False(t, exists)
+}
+
+func newAdaptiveResponsesStreamTestContext(ctx context.Context) (*gin.Context, *httptest.ResponseRecorder) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+	return c, rec
+}
+
+type firstOutputTestWriter struct {
+	gin.ResponseWriter
+	beforeFirstWrite func()
+}
+
+func (w *firstOutputTestWriter) Write(data []byte) (int, error) {
+	if before := w.beforeFirstWrite; before != nil {
+		w.beforeFirstWrite = nil
+		before()
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func TestAdaptiveResponsesFirstOutputScannerPublishesBoundaryBeforeFlush(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+		c, rec := newAdaptiveResponsesStreamTestContext(context.Background())
+		pr, pw := io.Pipe()
+		defer func() { _ = pw.Close() }()
+		largeRead := make(chan struct{})
+		largeDelta := strings.Repeat("i", openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance+1024)
+		go func() {
+			defer func() { _ = pw.Close() }()
+			_, _ = io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n")
+			if _, err := io.WriteString(pw, "data: {\"type\":\"response.output_text.delta\",\"delta\":\""+largeDelta+"\"}\n\n"); err != nil {
+				return
+			}
+			close(largeRead)
+			_, _ = io.WriteString(pw, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":3}}}\n\n")
+		}()
+		scannedDuringWrite := false
+		c.Writer = &firstOutputTestWriter{ResponseWriter: c.Writer, beforeFirstWrite: func() {
+			synctest.Wait()
+			select {
+			case <-largeRead:
+				scannedDuringWrite = true
+			default:
+			}
+		}}
+		result, err := svc.handleStreamingResponseWithFirstOutput(c.Request.Context(), &http.Response{Body: pr}, c,
+			&Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "model", "model", "", time.Second, true, true)
+		require.NoError(t, err)
+		require.True(t, scannedDuringWrite, "scanner should read the large delta while the first downstream write is blocked")
+		require.Equal(t, 4, result.usage.InputTokens)
+		require.Equal(t, 3, result.usage.OutputTokens)
+		require.Contains(t, rec.Body.String(), strings.Repeat("i", 1024))
+	})
 }
 
 func TestOpenAINativeFirstOutputTimeoutDisabledPreservesSynchronousStream(t *testing.T) {

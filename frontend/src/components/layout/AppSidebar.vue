@@ -736,6 +736,7 @@ const flagPluginManagement = makeSidebarFlag(FeatureFlags.pluginManagement)
 const flagMCP = makeSidebarFlag(FeatureFlags.mcp)
 const flagOpsMonitoring = () => adminSettingsStore.opsMonitoringEnabled
 const flagAdminPayment = () => adminSettingsStore.paymentEnabled
+const flagAdaptiveAccountScores = () => adminSettingsStore.gatewayAdaptiveSchedulingEnabled === true
 const flagBatchImageAccess = () => canUseBatchImage.value
 
 // buildSelfNavItems 构造用户自己的导航项（用户端主菜单和管理员的"我的账户"子菜单共享这组声明）。
@@ -883,6 +884,10 @@ const adminNavItems = computed((): NavItem[] => {
   shown.push({ path: '/admin/settings', label: t('nav.settings'), icon: CogIcon, weight: 76 })
 
   const sorted = sortNavByLabel(shown)
+  if (flagAdaptiveAccountScores()) {
+    const accountsIndex = sorted.findIndex((item) => item.path === '/admin/accounts')
+    sorted.splice(accountsIndex + 1, 0, { path: '/admin/account-scores', label: t('nav.accountScores'), icon: SignalIcon })
+  }
   for (const cm of customMenuItemsForAdmin.value) {
     sorted.push({ path: `/custom/${cm.id}`, label: cm.label, icon: null, iconSvg: cm.icon_svg })
   }

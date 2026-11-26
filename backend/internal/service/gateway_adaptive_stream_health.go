@@ -16,6 +16,7 @@ import (
 )
 
 const adaptiveStreamWindow = 15 * time.Minute
+const adaptiveStreamSamples = 10
 
 type adaptiveStreamEffortKey struct{}
 
@@ -485,8 +486,8 @@ func (h *adaptiveStreamHealth) insert(key adaptiveStreamKey, sample adaptiveSamp
 		}
 		return strings.Compare(a.id, b.id)
 	})
-	if len(samples) > 10 {
-		samples = slices.Delete(samples, 0, len(samples)-10)
+	if len(samples) > adaptiveStreamSamples {
+		samples = slices.Delete(samples, 0, len(samples)-adaptiveStreamSamples)
 	}
 	h.series[key] = samples
 }
