@@ -800,24 +800,17 @@ func buildOpsAlertEmailBody(rule *OpsAlertRule, event *OpsAlertEvent) string {
 	if event.ThresholdValue != nil {
 		threshold = fmt.Sprintf("%.2f", *event.ThresholdValue)
 	}
-	return fmt.Sprintf(`
-<h2>Ops Alert</h2>
-<p><b>Rule</b>: %s</p>
-<p><b>Severity</b>: %s</p>
-<p><b>Status</b>: %s</p>
-<p><b>Metric</b>: %s %s %s</p>
-<p><b>Fired at</b>: %s</p>
-<p><b>Description</b>: %s</p>
-`,
-		htmlEscape(rule.Name),
-		htmlEscape(rule.Severity),
-		htmlEscape(event.Status),
-		htmlEscape(metric),
-		htmlEscape(rule.Operator),
-		htmlEscape(fmt.Sprintf("%s (threshold %s)", value, threshold)),
-		event.FiredAt.Format(time.RFC3339),
-		htmlEscape(event.Description),
-	)
+	return emailLayout("en", "", "Ops Alert",
+		emailWarning("Rule", htmlEscape(rule.Name))+
+			emailDetails(
+				emailField{"Severity", htmlEscape(rule.Severity)},
+				emailField{"Status", htmlEscape(event.Status)},
+				emailField{"Metric", htmlEscape(metric)},
+				emailField{"Measured value", value},
+				emailField{"Threshold", htmlEscape(rule.Operator) + " " + threshold},
+				emailField{"Fired at", event.FiredAt.Format(time.RFC3339)},
+				emailField{"Description", htmlEscape(event.Description)},
+			), emailFooterEN)
 }
 
 func shouldSendOpsAlertEmailByMinSeverity(minSeverity string, ruleSeverity string) bool {
