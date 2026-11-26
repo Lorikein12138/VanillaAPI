@@ -729,7 +729,7 @@ func TestNotificationEmailSiteDisplayCurrencyPreviews(t *testing.T) {
 			recharge, err := svc.PreviewTemplate(ctx, NotificationEmailPreviewInput{Event: NotificationEmailEventBalanceRechargeSuccess, Locale: locale})
 			require.NoError(t, err)
 			require.Contains(t, recharge.HTML, "<strong>"+tc.symbol+"50.00</strong>")
-			require.Contains(t, recharge.HTML, "<strong>"+tc.symbol+"12.34</strong>")
+			require.Contains(t, recharge.HTML, ">"+tc.symbol+"12.34</td>")
 		}
 	}
 }
@@ -772,7 +772,7 @@ func TestNotificationEmailSiteDisplayCurrencySendsAndPreservesCustom(t *testing.
 	require.Equal(t, int64(3), smtpServer.messageCount())
 	body = smtpServer.lastMessageBody(t)
 	require.Contains(t, body, "<strong>¥50.00</strong>")
-	require.Contains(t, body, "<strong>¥73.45</strong>")
+	require.Contains(t, body, ">¥73.45</td>")
 	require.NotContains(t, body, "6.25")
 
 	_, err := notificationSvc.UpdateTemplate(ctx, NotificationEmailEventBalanceRechargeSuccess, "en",
@@ -821,12 +821,12 @@ func TestNotificationEmailAccountQuotaUsesSiteDisplayCurrency(t *testing.T) {
 			body := smtpServer.lastMessageBody(t)
 			if tc.fallback {
 				for _, amount := range []string{"¥95.00", "¥100.00", "¥5.00", tc.thresholdDisplay} {
-					require.Contains(t, body, "<span class=\"metric-value\">"+amount+"</span>")
+					require.Contains(t, body, ">"+amount+"</td>")
 				}
 			} else {
-				require.Contains(t, body, "<td>95.00 / 100.00</td>")
-				require.Contains(t, body, "<td>5.00</td>")
-				require.Contains(t, body, "<td>"+tc.thresholdDisplay+"</td>")
+				require.Contains(t, body, ">95.00 / 100.00</td>")
+				require.Contains(t, body, ">5.00</td>")
+				require.Contains(t, body, ">"+tc.thresholdDisplay+"</td>")
 			}
 			require.NotContains(t, body, "$")
 		})

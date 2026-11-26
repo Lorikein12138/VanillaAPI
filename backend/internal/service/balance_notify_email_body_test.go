@@ -3,7 +3,6 @@
 package service
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -125,24 +124,4 @@ func TestBuildQuotaAlertEmailBody_RemainingClampedAtZero(t *testing.T) {
 		"$100.00", "Site", "$",
 	)
 	require.Contains(t, body, "$0.00")
-}
-
-// ---------- sanity checks on the CSS `%%` escape ----------
-
-func TestBuildBalanceLowEmailBody_NoCSSFormatError(t *testing.T) {
-	s := &BalanceNotifyService{}
-	body := s.buildBalanceLowEmailBody("u", 1.0, 5.0, "Site", "", SiteDisplayCurrencyUSD)
-	// CSS `linear-gradient(135deg, #f59e0b 0%, #d97706 100%)` should appear with
-	// literal percent signs (from the %% escape in the template).
-	require.True(t,
-		strings.Contains(body, "0%") && strings.Contains(body, "100%"),
-		"CSS gradient percentages not rendered; got: %s", body)
-}
-
-func TestBuildQuotaAlertEmailBody_NoCSSFormatError(t *testing.T) {
-	s := &BalanceNotifyService{}
-	body := s.buildQuotaAlertEmailBody(1, "n", "p", "d", 0, 0, 0, "$0.00", "Site", "$")
-	require.True(t,
-		strings.Contains(body, "0%") && strings.Contains(body, "100%"),
-		"CSS gradient percentages not rendered; got: %s", body)
 }
