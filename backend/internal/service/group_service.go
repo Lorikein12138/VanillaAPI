@@ -47,12 +47,22 @@ type GroupDuplicateRepository interface {
 	CreateFromSource(ctx context.Context, group *Group, sourceGroupID int64) error
 }
 
-// AdminGroupRepository makes the group-duplication write capability an explicit
-// admin-service dependency without widening gateway-only group test doubles.
+// AdminGroupRepository adds operations specific to the admin service.
 type AdminGroupRepository interface {
 	GroupRepository
 	GroupDuplicateRepository
 	EmptyGroupDeleteRepository
+	AdaptiveScoreOptionRepository
+}
+
+type AdaptiveScoreOption struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type AdaptiveScoreOptionRepository interface {
+	ListAdaptiveScoreOptions(ctx context.Context, afterID int64, limit int) ([]AdaptiveScoreOption, error)
 }
 
 // EmptyGroupDeleteRepository provides the guarded cascade used by simple mode.

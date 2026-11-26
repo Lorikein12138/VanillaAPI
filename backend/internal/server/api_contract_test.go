@@ -1870,6 +1870,10 @@ func (stubGroupRepo) ListWithFilters(ctx context.Context, params pagination.Pagi
 	return nil, nil, errors.New("not implemented")
 }
 
+func (stubGroupRepo) ListAdaptiveScoreOptions(context.Context, int64, int) ([]service.AdaptiveScoreOption, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (r *stubGroupRepo) ListActive(ctx context.Context) ([]service.Group, error) {
 	return append([]service.Group(nil), r.active...), nil
 }

@@ -2,10 +2,11 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { createI18n } from 'vue-i18n'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AdaptiveAccountScoresPage, AdaptiveScoreMember, AdaptiveScoreV1 } from '@/api/admin/groups'
+import type { AdaptiveAccountScoresPage, AdaptiveScoreMember, AdaptiveScoreOption, AdaptiveScoreV1 } from '@/api/admin/groups'
 import accountScores from '@/i18n/locales/en/admin/accountScores'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
 import AccountScoresView from '../AccountScoresView.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 
 const api = vi.hoisted(() => ({
   groups: vi.fn(), scores: vi.fn(), settings: vi.fn(), payment: vi.fn(),
@@ -13,7 +14,7 @@ const api = vi.hoisted(() => ({
 
 vi.mock('@/api', () => ({
   adminAPI: {
-    groups: { list: api.groups, getAdaptiveAccountScores: api.scores },
+    groups: { listAdaptiveScoreOptions: api.groups, getAdaptiveAccountScores: api.scores },
     settings: { getSettings: api.settings },
     payment: { getConfig: api.payment },
   },
@@ -56,6 +57,10 @@ function page(groupId: number, items: AdaptiveScoreMember[], pageNumber = 1): Ad
   }
 }
 
+function groupPage(items: { id: number; name: string; description?: string }[], nextAfterId: number | null = null) {
+  return { items: items.map(({ description = '', ...item }): AdaptiveScoreOption => ({ ...item, description })), next_after_id: nextAfterId }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((done) => { resolve = done })
@@ -69,30 +74,30 @@ function setup(pinia = createPinia()) {
     legacy: false, locale: 'en', messages: {
       en: {
         admin: { ...accountScores, groups: { searchGroups: 'Search groups' } },
-        common: { loading: 'Loading', refresh: 'Refresh' },
+        common: { loading: 'Loading', refresh: 'Refresh', noData: 'No data', noOptionsFound: 'No options' },
         pagination: { next: 'Next', previous: 'Previous', pageOf: '{page} of {total}' },
       },
     },
   })
   wrapper = mount(AccountScoresView, {
+    attachTo: document.body,
     global: {
       plugins: [pinia, i18n],
       stubs: {
+        teleport: true,
         AppLayout: { template: '<main><slot /></main>' },
-        TablePageLayout: { template: '<div data-test="table-page"><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>' },
-        BaseDialog: {
-          props: ['show'],
-          emits: ['close'],
-          template: '<div v-if="show" role="dialog"><button @click="$emit(\'close\')">Close dialog</button><slot /></div>',
-        },
-        Select: {
-          props: { options: Array, remote: Boolean, modelValue: [String, Number] },
-          emits: ['change', 'search'],
-          template: '<div><button v-for="item in options" :key="item.value" :aria-pressed="modelValue === item.value" @click="$emit(\'change\', item.value, item)">{{ item.label }}</button><button v-if="remote" data-test="search" @click="$emit(\'search\', \'query\')">Search</button></div>',
-        },
         DataTable: {
           props: ['data', 'columns'],
-          template: '<div><div v-for="row in data" :key="row.id" :data-test="\'row-\' + row.id"><div v-for="column in columns" :key="column.key" :data-test="column.key"><slot :name="\'cell-\' + column.key" :row="row" /></div></div></div>',
+          template: `
+            <div>
+              <slot v-if="data.length === 0" name="empty" />
+              <div v-for="row in data" :key="row.id" :data-test="'row-' + row.id">
+                <div v-for="column in columns" :key="column.key" :data-test="column.key">
+                  <slot :name="'cell-' + column.key" :row="row" />
+                </div>
+              </div>
+            </div>
+          `,
         },
         Pagination: {
           props: ['page', 'pageSize', 'total'],
@@ -103,6 +108,17 @@ function setup(pinia = createPinia()) {
     },
   })
   return { wrapper, store: useAdminSettingsStore(pinia) }
+}
+
+function groupOptions(view: VueWrapper) {
+  return view.findAll('[role="listbox"] [role="option"]')
+}
+
+async function selectGroup(view: VueWrapper, name: string) {
+  await view.get('#account-scores-group').trigger('click')
+  const option = groupOptions(view).find((item) => item.text() === name)
+  if (!option) throw new Error(`Group missing: ${name}`)
+  await option.trigger('click')
 }
 
 function button(view: VueWrapper, text: string) {
@@ -116,9 +132,7 @@ beforeEach(() => {
   localStorage.clear()
   api.settings.mockResolvedValue({ gateway_adaptive_scheduling_enabled: true })
   api.payment.mockResolvedValue({ data: {} })
-  api.groups.mockResolvedValue({
-    page: 1, pages: 2, total: 22, page_size: 20, items: [{ id: 1, name: 'Group A' }, { id: 2, name: 'Group B' }],
-  })
+  api.groups.mockResolvedValue(groupPage([{ id: 1, name: 'Group A' }, { id: 2, name: 'Group B' }]))
   api.scores.mockResolvedValue(page(1, [member(1, 'A first')]))
 })
 
@@ -143,7 +157,102 @@ describe('Account Scores', () => {
     expect(api.scores).not.toHaveBeenCalled()
   })
 
-  it('paginates group search and aborts stale member requests on page and group changes', async () => {
+
+  it('shows a compact prompt and searches both pages of groups locally in order', async () => {
+    const groups = Array.from({ length: 31 }, (_, i) => ({ id: i + 1, name: `Group ${i + 1}` }))
+    api.groups.mockResolvedValueOnce(groupPage(groups, 31))
+      .mockResolvedValueOnce(groupPage([
+        { id: 32, name: 'Disabled group' },
+        { id: 33, name: 'Composite group' },
+        { id: 34, name: 'Unsampled group', description: 'Only match by description' },
+      ]))
+    api.scores.mockResolvedValueOnce({ ...page(34, []), total: 0, max_queryable_total: 0 })
+    const { wrapper } = setup()
+    await flushPromises()
+
+    const empty = wrapper.getComponent(EmptyState)
+    const trigger = wrapper.get('#account-scores-group')
+    expect(empty.text()).toContain('Select a group')
+    expect(empty.element.parentElement?.classList.contains('card')).toBe(true)
+    expect(empty.element.parentElement?.contains(trigger.element)).toBe(true)
+    expect(wrapper.find('.table-page-layout').exists()).toBe(false)
+    expect(wrapper.findAll('button')).toHaveLength(1)
+    expect(wrapper.find('[data-test="member-next"]').exists()).toBe(false)
+    expect(api.scores).not.toHaveBeenCalled()
+    expect(api.groups).toHaveBeenCalledTimes(2)
+    const signal = api.groups.mock.calls[0][1] as AbortSignal
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(api.groups.mock.calls).toEqual([[0, signal], [31, signal]])
+
+    await trigger.trigger('click')
+    expect(groupOptions(wrapper)).toHaveLength(34)
+    expect(groupOptions(wrapper)[30].text()).toBe('Group 31')
+    expect(groupOptions(wrapper).slice(-3).map((option) => option.text())).toEqual([
+      'Disabled group', 'Composite group', 'Unsampled group',
+    ])
+    const search = wrapper.get('[aria-label="Search groups"]')
+    await search.setValue('match by description')
+    expect(groupOptions(wrapper).map((option) => option.text())).toEqual(['Unsampled group'])
+    await groupOptions(wrapper)[0].trigger('click')
+    await flushPromises()
+    expect(api.groups).toHaveBeenCalledTimes(2)
+    expect(api.scores).toHaveBeenCalledTimes(1)
+    expect(api.scores).toHaveBeenCalledWith(34, 1, 20, expect.any(AbortSignal))
+    expect(wrapper.get('#account-scores-group').element).toBe(trigger.element)
+    expect(document.activeElement).toBe(trigger.element)
+    expect(wrapper.findComponent(EmptyState).exists()).toBe(false)
+    expect(wrapper.text()).toContain('This group has no accounts.')
+    await wrapper.get('[aria-label="Clear selection"]').trigger('click')
+    expect(wrapper.findComponent(EmptyState).exists()).toBe(true)
+    expect(api.scores).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops on a non-advancing cursor and allows retry from the beginning', async () => {
+    api.groups.mockResolvedValueOnce(groupPage([{ id: 3, name: 'Incomplete listing' }], 3))
+      .mockResolvedValueOnce(groupPage([{ id: 4, name: 'Malformed continuation' }], 3))
+    const { wrapper } = setup()
+    await flushPromises()
+    expect(api.groups.mock.calls.map(([afterId]) => afterId)).toEqual([0, 3])
+    expect(wrapper.text()).toContain('Could not load groups.')
+    await button(wrapper, 'Refresh').trigger('click')
+    await flushPromises()
+    expect(api.groups.mock.calls.map(([afterId]) => afterId)).toEqual([0, 3, 0])
+    await selectGroup(wrapper, 'Group A')
+    expect(api.scores).toHaveBeenCalledWith(1, 1, 20, expect.any(AbortSignal))
+  })
+
+  it('removes a deleted group on a score 404 and retries a failed directory refresh', async () => {
+    const { wrapper, store } = setup()
+    await flushPromises()
+    await selectGroup(wrapper, 'Group A')
+    await flushPromises()
+    expect(wrapper.text()).toContain('A first')
+
+    api.scores.mockRejectedValueOnce({ status: 404, reason: 'GROUP_NOT_FOUND' })
+    api.groups.mockRejectedValueOnce({ status: 503 })
+      .mockResolvedValueOnce(groupPage([{ id: 2, name: 'Group B' }, { id: 3, name: 'New group' }]))
+    await button(wrapper, 'Refresh').trigger('click')
+    await flushPromises()
+    expect(store.gatewayAdaptiveSchedulingEnabled).toBe(true)
+    expect(wrapper.text()).toContain('This group is no longer available.')
+    expect(wrapper.text()).toContain('Could not load groups.')
+    expect(wrapper.text()).not.toContain('A first')
+    const trigger = wrapper.get('#account-scores-group')
+    await trigger.trigger('click')
+    expect(groupOptions(wrapper).map((option) => option.text())).toEqual(['Group B'])
+    await trigger.trigger('click')
+
+    await button(wrapper, 'Refresh').trigger('click')
+    await flushPromises()
+    expect(api.groups.mock.calls.map(([afterId]) => afterId)).toEqual([0, 0, 0])
+    expect(wrapper.text()).toContain('This group is no longer available.')
+    expect(wrapper.text()).not.toContain('Could not load groups.')
+    await selectGroup(wrapper, 'New group')
+    expect(api.scores).toHaveBeenLastCalledWith(3, 1, 20, expect.any(AbortSignal))
+    expect(wrapper.text()).not.toContain('This group is no longer available.')
+  })
+
+  it('aborts stale member requests on page and group changes', async () => {
     const stale = deferred<AdaptiveAccountScoresPage>()
     api.scores.mockResolvedValueOnce(page(1, [member(1, 'A first')]))
       .mockReturnValueOnce(stale.promise)
@@ -151,18 +260,12 @@ describe('Account Scores', () => {
     const { wrapper } = setup()
     await flushPromises()
     expect(api.scores).not.toHaveBeenCalled()
-    await button(wrapper, 'Next').trigger('click')
-    await flushPromises()
-    expect(api.groups).toHaveBeenLastCalledWith(2, 20, { search: undefined }, { signal: expect.any(AbortSignal) })
-    await wrapper.get('[data-test="search"]').trigger('click')
-    await flushPromises()
-    expect(api.groups).toHaveBeenLastCalledWith(1, 20, { search: 'query' }, { signal: expect.any(AbortSignal) })
-    await button(wrapper, 'Group A').trigger('click')
+    await selectGroup(wrapper, 'Group A')
     await flushPromises()
     await wrapper.get('[data-test="member-next"]').trigger('click')
     expect(api.scores).toHaveBeenLastCalledWith(1, 2, 20, expect.any(AbortSignal))
     const signal = api.scores.mock.calls[1][3] as AbortSignal
-    await button(wrapper, 'Group B').trigger('click')
+    await selectGroup(wrapper, 'Group B')
     await flushPromises()
     expect(signal.aborted).toBe(true)
     expect(api.scores).toHaveBeenLastCalledWith(2, 1, 20, expect.any(AbortSignal))
@@ -172,80 +275,54 @@ describe('Account Scores', () => {
     expect(wrapper.text()).not.toContain('Stale A page')
   })
 
-  it('compares a single complete dimension and switches to the actual v2 states', async () => {
-    const scored = member(1, 'Account with evidence')
-    scored.overall_score = 72
-    scored.overall_sample_count = 12
-    scored.v1 = [{ ...bucket, model: 'older-model', latest_sample_at: '2026-11-26T07:00:00Z' }, bucket]
-    scored.v2 = [{
-      ...bucket, model: 'chat-model', wire: 'chat_completions', workloads: ['text'],
-      state: 'slow', state_count: 2, latest_first_output_ms: 31000, latest_sample_at: '2026-11-26T08:04:00Z',
-    }]
-    const insufficient = { ...member(2, 'Insufficient account'), overall_sample_count: 1, v1: [
-      { ...bucket, known: false, reliability: null, latency: null, sample_count: 1 },
-    ] }
-    const mismatch = { ...member(3, 'Different request bucket'), v1: [
-      { ...bucket, input_size: 2, latency: 100, latest_sample_at: '2026-11-26T08:02:00Z' },
-    ] }
-    const match = { ...member(4, 'Same request bucket'), overall_score: 0, overall_sample_count: 4,
-      v1: [{ ...bucket, latency: 40, reliability: 50 }] }
-    api.scores.mockResolvedValue(page(1, [scored, insufficient, mismatch, match, member(5, 'No samples')]))
+
+  it('shows only the overall score, sample count and scheduling status beside the account', async () => {
+    const scored: AdaptiveScoreMember = {
+      ...member(1, 'Account with evidence'),
+      overall_score: 72,
+      overall_sample_count: 12,
+      v1: [bucket],
+      v2: [{
+        ...bucket, model: 'chat-model', wire: 'chat_completions', workloads: ['text'],
+        state: 'slow', state_count: 2, latest_first_output_ms: 31000,
+      }],
+    }
+    const insufficient = { ...member(2, 'Insufficient account'), overall_sample_count: 1 }
+    const zero = { ...member(3, 'Zero score'), overall_score: 0, overall_sample_count: 4, schedulable_now: false }
+    api.scores.mockResolvedValueOnce(page(1, [scored, insufficient, zero, member(4, 'No samples')]))
     const { wrapper } = setup()
     await flushPromises()
-    await button(wrapper, 'Group A').trigger('click')
+    await selectGroup(wrapper, 'Group A')
     await flushPromises()
-    expect(wrapper.get('#account-scores-dimension button[aria-pressed="true"]').text()).toContain('recent-sol')
-    const value = (id: number, column = 'metric') => wrapper.get(`[data-test="row-${id}"] [data-test="${column}"]`).text()
-    expect(value(1)).toBe('80')
-    expect(value(1, 'secondary')).toBe('75%')
-    expect(value(2)).toBe('Insufficient samples')
-    expect(value(2, 'samples')).toBe('1')
-    expect(value(3)).toBe('—')
-    expect(value(4)).toBe('40')
-    expect(value(5)).toBe('—')
-    expect(value(1, 'overall')).toMatch(/^72\s*Samples 12$/)
-    expect(value(2, 'overall')).toMatch(/^—\s*Insufficient samples \(1\)$/)
-    expect(value(4, 'overall')).toMatch(/^0\s*Samples 4$/)
-    const v2 = wrapper.findAll('button').find((item) => item.text().startsWith('v2 / chat-model'))
-    await v2?.trigger('click')
-    expect(value(1)).toBe('Slow')
-    expect(value(4)).toBe('—')
-    expect(value(1, 'overall')).toMatch(/^72\s*Samples 12$/)
-    expect(value(4, 'overall')).toMatch(/^0\s*Samples 4$/)
-    expect(wrapper.find('[data-test="row-1"] [data-test="secondary"]').exists()).toBe(false)
-    await button(wrapper, 'Show samples').trigger('click')
-    expect(wrapper.get('[role="dialog"]').exists()).toBe(true)
-    expect(wrapper.get('[data-test="table-page"]').find('#account-score-details').exists()).toBe(false)
-    expect(wrapper.get('#account-score-details').text()).toContain('older-model')
-    expect(wrapper.get('#account-score-details').text()).toContain('v2 history is still loading.')
-    await button(wrapper, 'Close dialog').trigger('click')
-    expect(wrapper.find('#account-score-details').exists()).toBe(false)
+    const cells = (id: number) => wrapper.get(`[data-test="row-${id}"]`)
+    const overall = (id: number) => cells(id).get('[data-test="overall"]').text()
+    expect(cells(1).findAll('[data-test]').map((cell) => cell.attributes('data-test'))).toEqual(['name', 'overall', 'status'])
+    expect(cells(1).get('[data-test="name"]').text()).toContain('Account with evidence')
+    expect(cells(1).get('[data-test="status"]').text()).toBe('Schedulable')
+    expect(cells(3).get('[data-test="status"]').text()).toBe('Unavailable')
+    expect(overall(1)).toMatch(/^72\s*Samples 12$/)
+    expect(overall(2)).toMatch(/^—\s*Insufficient samples \(1\)$/)
+    expect(overall(3)).toMatch(/^0\s*Samples 4$/)
+    expect(overall(4)).toMatch(/^—\s*Samples 0$/)
+    expect(wrapper.find('#account-scores-dimension').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toMatch(/Show samples|recent-sol|chat-model/)
+
+    api.scores.mockResolvedValueOnce(page(1, [{ ...scored, overall_score: 81 }]))
+    await button(wrapper, 'Refresh').trigger('click')
+    await flushPromises()
+    expect(api.scores).toHaveBeenLastCalledWith(1, 1, 20, expect.any(AbortSignal))
+    expect(overall(1)).toMatch(/^81\s*Samples 12$/)
   })
 
-  it('keeps the member list when the group has no samples', async () => {
+  it('keeps the member list when the entire group has no samples', async () => {
     api.scores.mockResolvedValueOnce(page(1, [member(1, 'No evidence yet')]))
     const { wrapper } = setup()
     await flushPromises()
-    await button(wrapper, 'Group A').trigger('click')
+    await selectGroup(wrapper, 'Group A')
     await flushPromises()
-    expect(wrapper.text()).toContain('No samples in the current window.')
     expect(wrapper.text()).toContain('No evidence yet')
-    expect(wrapper.get('[data-test="row-1"] [data-test="metric"]').text()).toBe('—')
     expect(wrapper.get('[data-test="row-1"] [data-test="overall"]').text()).toMatch(/^—\s*Samples 0$/)
-    expect(wrapper.get('[data-test="row-1"] [data-test="samples"]').text()).toBe('—')
-  })
-
-  it('shows an actual zero reliability band and leaves missing latency blank', async () => {
-    const scored = { ...member(1, 'General bucket'), v1: [
-      { ...bucket, score_kind: 'general' as const, reliability: 0, latency: null, transport: 'http' },
-    ] }
-    api.scores.mockResolvedValueOnce(page(1, [scored]))
-    const { wrapper } = setup()
-    await flushPromises()
-    await button(wrapper, 'Group A').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[data-test="row-1"] [data-test="metric"]').text()).toBe('0/5')
-    expect(wrapper.get('[data-test="row-1"] [data-test="secondary"]').text()).toBe('—')
   })
 
   it('pauses hidden polling, retains data on transient failure, then stops when the gate closes', async () => {
@@ -256,7 +333,7 @@ describe('Account Scores', () => {
       .mockRejectedValueOnce({ status: 404, reason: 'ADAPTIVE_ACCOUNT_SCORES_DISABLED' })
     const { wrapper, store } = setup()
     await flushPromises()
-    await button(wrapper, 'Group A').trigger('click')
+    await selectGroup(wrapper, 'Group A')
     await flushPromises()
     visible.mockReturnValue(true)
     await vi.advanceTimersByTimeAsync(30_000)
@@ -286,13 +363,13 @@ describe('Account Scores', () => {
     await flushPromises()
     const older = deferred<{ gateway_adaptive_scheduling_enabled: boolean }>()
     api.settings.mockReturnValueOnce(older.promise)
-    await button(first, 'Refresh').trigger('click')
+    const olderConfirmation = store.refreshGatewayAdaptiveScheduling()
     api.scores.mockRejectedValueOnce({ status: 404, reason: 'ADAPTIVE_ACCOUNT_SCORES_DISABLED' })
-    await button(first, 'Group A').trigger('click')
+    await selectGroup(first, 'Group A')
     await flushPromises()
     expect(store.gatewayAdaptiveSchedulingEnabled).toBe(false)
     older.resolve({ gateway_adaptive_scheduling_enabled: true })
-    await flushPromises()
+    await olderConfirmation
     expect(store.gatewayAdaptiveSchedulingEnabled).toBe(false)
     expect(first.text()).toContain('Adaptive scheduling is off.')
     first.unmount()
@@ -301,22 +378,60 @@ describe('Account Scores', () => {
     await flushPromises()
     expect(api.settings).toHaveBeenCalledTimes(4)
     expect(store.gatewayAdaptiveSchedulingEnabled).toBe(true)
-    expect(second.text()).toContain('Group A')
+    expect(second.get('#account-scores-group').exists()).toBe(true)
     expect(api.scores).toHaveBeenCalledTimes(1)
   })
 
-  it('can recheck with no selected group and recover from the disabled view', async () => {
-    const { wrapper } = setup()
+
+  it('discards an aborted group list across disable and re-enable and cancels pending scores on unmount', async () => {
+    const oldGroups = deferred<ReturnType<typeof groupPage>>()
+    const pendingScores = deferred<AdaptiveAccountScoresPage>()
+    api.groups.mockResolvedValueOnce(groupPage([{ id: 3, name: 'Partial listing' }], 3))
+      .mockReturnValueOnce(oldGroups.promise)
+    api.scores.mockReturnValueOnce(pendingScores.promise)
+    const { wrapper, store } = setup()
     await flushPromises()
-    api.settings.mockResolvedValueOnce({ gateway_adaptive_scheduling_enabled: false })
-    await button(wrapper, 'Refresh').trigger('click')
+    const groupSignal = api.groups.mock.calls[1][1] as AbortSignal
+
+    store.setGatewayAdaptiveSchedulingEnabled(false)
     await flushPromises()
+    expect(groupSignal.aborted).toBe(true)
     expect(wrapper.text()).toContain('Adaptive scheduling is off.')
     await button(wrapper, 'Refresh').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('Group A')
-    expect(wrapper.text()).not.toContain('Adaptive scheduling is off.')
-    expect(api.scores).not.toHaveBeenCalled()
+    expect(api.groups).toHaveBeenCalledTimes(3)
+
+    oldGroups.resolve(groupPage([{ id: 4, name: 'Stale group' }], 4))
+    await flushPromises()
+    expect(api.groups.mock.calls.map(([afterId]) => afterId)).toEqual([0, 3, 0])
+    await selectGroup(wrapper, 'Group A')
+    expect(api.scores).toHaveBeenCalledTimes(1)
+    expect(api.scores).toHaveBeenCalledWith(1, 1, 20, expect.any(AbortSignal))
+    const scoreSignal = api.scores.mock.calls[0][3] as AbortSignal
+    wrapper.unmount()
+    expect(scoreSignal.aborted).toBe(true)
+    pendingScores.resolve(page(1, [member(1, 'Stale result')]))
+    await flushPromises()
+  })
+
+  it('aborts scores on disable and requires a new selection after enabling', async () => {
+    const oldScores = deferred<AdaptiveAccountScoresPage>()
+    api.scores.mockReturnValueOnce(oldScores.promise)
+    const { wrapper, store } = setup()
+    await flushPromises()
+    await selectGroup(wrapper, 'Group A')
+    const signal = api.scores.mock.calls[0][3] as AbortSignal
+
+    store.setGatewayAdaptiveSchedulingEnabled(false)
+    await flushPromises()
+    expect(signal.aborted).toBe(true)
+    await button(wrapper, 'Refresh').trigger('click')
+    await flushPromises()
+    oldScores.resolve(page(1, [member(1, 'Stale result')]))
+    await flushPromises()
+    expect(wrapper.getComponent(EmptyState).exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('Stale result')
+    expect(api.scores).toHaveBeenCalledTimes(1)
   })
 
   it('uses the returned member range and never requests page 502', async () => {
@@ -325,7 +440,7 @@ describe('Account Scores', () => {
       .mockResolvedValueOnce({ ...firstPage, page: 501, items: [member(10020, 'Last accessible')] })
     const { wrapper } = setup()
     await flushPromises()
-    await button(wrapper, 'Group A').trigger('click')
+    await selectGroup(wrapper, 'Group A')
     await flushPromises()
     expect(wrapper.text()).toContain('Showing up to 10020 of 10021 members.')
     await wrapper.get('[data-test="member-last"]').trigger('click')

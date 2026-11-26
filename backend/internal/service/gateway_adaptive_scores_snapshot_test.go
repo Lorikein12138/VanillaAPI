@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -11,26 +10,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
-
-type adaptiveScoresGroupRepo struct {
-	GroupRepository
-	reads int
-}
-
-func (r *adaptiveScoresGroupRepo) GetByIDLite(_ context.Context, id int64) (*Group, error) {
-	r.reads++
-	return &Group{ID: id, ModelAllowlist: GroupModelAllowlist{Enabled: true}}, nil
-}
-
-func TestAdaptiveAccountScoresGroupLookupLeavesMemberPagingToCaller(t *testing.T) {
-	repo := &adaptiveScoresGroupRepo{}
-	admin := &adminServiceImpl{groupRepo: repo}
-	group, err := admin.GetGroupLite(context.Background(), 23)
-	require.NoError(t, err)
-	require.EqualValues(t, 23, group.ID)
-	require.True(t, group.ModelAllowlist.Enabled)
-	require.Equal(t, 1, repo.reads)
-}
 
 func TestAdaptiveAccountScoresSnapshotMatchesScoringAndGroups(t *testing.T) {
 	now := time.Now()

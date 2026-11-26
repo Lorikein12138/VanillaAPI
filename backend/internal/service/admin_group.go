@@ -131,16 +131,32 @@ func (s *adminServiceImpl) GetGroup(ctx context.Context, id int64) (*Group, erro
 	return group, nil
 }
 
-// GetGroupLite validates group access for callers that page members themselves.
-func (s *adminServiceImpl) GetGroupLite(ctx context.Context, id int64) (*Group, error) {
-	group, err := s.groupRepo.GetByIDLite(ctx, id)
+// ListAdaptiveScoreOptions includes every group that can be inspected for adaptive scores.
+func (s *adminServiceImpl) ListAdaptiveScoreOptions(ctx context.Context, afterID int64, limit int) ([]AdaptiveScoreOption, *int64, error) {
+	options, err := s.adaptiveScoreOptionRepo.ListAdaptiveScoreOptions(ctx, afterID, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := s.validateSimpleModeGroupAccess(group); err != nil {
-		return nil, err
+	var nextAfterID *int64
+	if len(options) > limit {
+		options = options[:limit]
+		id := options[limit-1].ID
+		nextAfterID = &id
 	}
-	return group, nil
+	return options, nextAfterID, nil
+}
+
+// ListAdaptiveScoreMembers reads existing bindings, including those of composite
+// groups in simple mode, where changing those bindings is restricted.
+func (s *adminServiceImpl) ListAdaptiveScoreMembers(ctx context.Context, groupID int64, page, pageSize int) ([]Account, int64, error) {
+	group, err := s.groupRepo.GetByIDLite(ctx, groupID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if group == nil {
+		return nil, 0, ErrGroupNotFound
+	}
+	return s.listAccounts(ctx, page, pageSize, "", "", "", "", group.ID, "", "id", "asc")
 }
 
 func (s *adminServiceImpl) validateSimpleModeGroupAccess(group *Group) error {
