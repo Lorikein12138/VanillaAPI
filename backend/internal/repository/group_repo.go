@@ -478,6 +478,23 @@ func (r *groupRepository) ListWithFilters(ctx context.Context, params pagination
 	return r.listWithFiltersQuery(ctx, q, params, platform, status, search, isExclusive)
 }
 
+func (r *groupRepository) ListAdaptiveScoreOptions(ctx context.Context, afterID int64, limit int) ([]service.AdaptiveScoreOption, error) {
+	rows, err := r.client.Group.Query().
+		Where(group.IDGT(afterID)).
+		Order(dbent.Asc(group.FieldID)).
+		Limit(limit).
+		Select(group.FieldID, group.FieldName, group.FieldDescription).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	options := make([]service.AdaptiveScoreOption, 0, len(rows))
+	for _, row := range rows {
+		options = append(options, service.AdaptiveScoreOption{ID: row.ID, Name: row.Name, Description: derefString(row.Description)})
+	}
+	return options, nil
+}
+
 func (r *groupRepository) ListBindableWithFilters(ctx context.Context, params pagination.PaginationParams, platform, status, search string, isExclusive *bool) ([]service.Group, *pagination.PaginationResult, error) {
 	q := r.client.Group.Query().Where(group.PlatformNEQ(service.PlatformComposite))
 	return r.listWithFiltersQuery(ctx, q, params, platform, status, search, isExclusive)

@@ -334,6 +334,7 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers, settingSer
 	{
 		groups.GET("", h.Admin.Group.List)
 		groups.GET("/all", h.Admin.Group.GetAll)
+		groups.GET("/adaptive-score-options", h.Admin.Group.AdaptiveScoreOptions(settingService))
 		groups.GET("/usage-summary", h.Admin.Group.GetUsageSummary)
 		groups.GET("/capacity-summary", h.Admin.Group.GetCapacitySummary)
 		groups.GET("/live-capability", h.Admin.Group.GetLiveCapability)

@@ -93,6 +93,25 @@ export interface AdaptiveAccountScoresPage {
   v2_ready: boolean
 }
 
+export interface AdaptiveScoreOption {
+  id: number
+  name: string
+  description: string
+}
+
+interface AdaptiveScoreOptionsPage {
+  items: AdaptiveScoreOption[]
+  next_after_id: number | null
+}
+
+export async function listAdaptiveScoreOptions(afterId: number, signal?: AbortSignal): Promise<AdaptiveScoreOptionsPage> {
+  const { data } = await apiClient.get<AdaptiveScoreOptionsPage>('/admin/groups/adaptive-score-options', {
+    params: { after_id: afterId, limit: 200 },
+    signal,
+  })
+  return data
+}
+
 export async function getAdaptiveAccountScores(
   groupId: number,
   page: number,
@@ -561,6 +580,7 @@ export const groupsAPI = {
   getAll,
   getByPlatform,
   getAllIncludingInactive,
+  listAdaptiveScoreOptions,
   getLiveCapability,
   getById,
   getModelAllowlistCandidates,

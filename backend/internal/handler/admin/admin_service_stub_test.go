@@ -303,8 +303,22 @@ func (s *stubAdminService) GetGroup(ctx context.Context, id int64) (*service.Gro
 	return &group, nil
 }
 
-func (s *stubAdminService) GetGroupLite(ctx context.Context, id int64) (*service.Group, error) {
-	return s.GetGroup(ctx, id)
+func (s *stubAdminService) ListAdaptiveScoreOptions(_ context.Context, afterID int64, limit int) ([]service.AdaptiveScoreOption, *int64, error) {
+	options := make([]service.AdaptiveScoreOption, 0)
+	for _, group := range s.groups {
+		if group.ID <= afterID {
+			continue
+		}
+		if len(options) == limit {
+			return options, &options[limit-1].ID, nil
+		}
+		options = append(options, service.AdaptiveScoreOption{ID: group.ID, Name: group.Name, Description: group.Description})
+	}
+	return options, nil, nil
+}
+
+func (s *stubAdminService) ListAdaptiveScoreMembers(ctx context.Context, id int64, page, pageSize int) ([]service.Account, int64, error) {
+	return s.ListAccounts(ctx, page, pageSize, "", "", "", "", id, "", "id", "asc")
 }
 
 func (s *stubAdminService) GetGroupModelsListCandidates(ctx context.Context, id int64, platform string) ([]string, error) {

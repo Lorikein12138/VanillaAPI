@@ -22,12 +22,12 @@ type adaptiveScoresAdminStub struct {
 	deepTotal  int64
 }
 
-func (s *adaptiveScoresAdminStub) GetGroupLite(_ context.Context, id int64) (*service.Group, error) {
+func (s *adaptiveScoresAdminStub) ListAdaptiveScoreMembers(ctx context.Context, id int64, page, size int) ([]service.Account, int64, error) {
 	s.groupReads++
 	if id > 2 {
-		return nil, service.ErrGroupNotFound
+		return nil, 0, service.ErrGroupNotFound
 	}
-	return &service.Group{ID: id}, nil
+	return s.ListAccounts(ctx, page, size, "", "", "", "", id, "", "id", "asc")
 }
 
 func (s *adaptiveScoresAdminStub) ListAccounts(ctx context.Context, page, size int, platform, kind, status, search string, groupID int64, privacy, sortBy, order string) ([]service.Account, int64, error) {
