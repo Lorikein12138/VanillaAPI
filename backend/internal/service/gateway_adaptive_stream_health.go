@@ -247,7 +247,8 @@ func observeAdaptiveStreamResult(ctx context.Context, o *adaptiveObservation, ac
 	if !enabled || o == nil || !adaptiveStreamOperation(route.operation) || !o.streamOwner {
 		return
 	}
-	health := &adaptiveTelemetryForContext(ctx).streamHealth
+	telemetry := adaptiveTelemetryForContext(ctx)
+	health := &telemetry.streamHealth
 	o.mu.Lock()
 	if o.streamObserved {
 		o.mu.Unlock()
@@ -296,7 +297,15 @@ func observeAdaptiveStreamResult(ctx context.Context, o *adaptiveObservation, ac
 			work |= adaptiveWorkUnexpectedTools
 		}
 		key := adaptiveStreamKey{adaptiveContextKey(ctx, route, account, facts.model), APIProtocolChatCompletions, work}
-		health.observe(key, health.now(), latency)
+		now := health.now()
+		health.observe(key, now, latency)
+		// The ordinary observer rejects all protected requests. Use this
+		// strict V2 success only to fill that gap in the administrator score.
+		if route.protected && key.sample.groupID > 0 && key.sample.accountID > 0 {
+			scoreKey := key.sample
+			scoreKey.scoreOnly = true
+			telemetry.observe(scoreKey, now, latency, true)
+		}
 		if ingress, _ := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress); ingress != nil {
 			if lease := ingress.recovery.Load(); lease != nil && lease.streamKey == key && lease.acquired.Load() {
 				health.count(streamProbeSuccess)
