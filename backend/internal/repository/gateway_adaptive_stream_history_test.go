@@ -79,3 +79,36 @@ func TestAdaptiveHistoryStoreStreamHealthCapsNewestMembers(t *testing.T) {
 	require.Equal(t, "newest", records[0].Payload)
 	require.Equal(t, "1", records[len(records)-1].Payload)
 }
+
+func TestAdaptiveHistoryStoreScoreHistoryHasIndependentRetention(t *testing.T) {
+	server := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	ctx := context.Background()
+	store := ProvideAdaptiveHistoryStore(rdb)
+	score, ok := store.(service.AdaptiveScoreHistoryStore)
+	require.True(t, ok)
+	now := time.Unix(1_800_000_000, 0)
+	cutoff := now.Add(-service.AdaptiveHistoryRetention)
+	require.NoError(t, store.Merge(ctx, cutoff, []service.AdaptiveHistoryRecord{{At: now, Payload: "routing"}}))
+	batch := []service.AdaptiveHistoryRecord{
+		{At: cutoff, Payload: "expired-score"},
+		{At: now.Add(-time.Hour), Payload: "older-than-v2"},
+		{At: now, Payload: "score"},
+		{At: now, Payload: "should-not-be-health", StateKey: "health"},
+	}
+	for range 2 {
+		require.NoError(t, score.MergeScoreHistory(ctx, cutoff, batch))
+	}
+	rows, err := score.ReadScoreHistory(ctx, cutoff, now)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, "older-than-v2", rows[1].Payload)
+	require.Equal(t, service.AdaptiveHistoryRetention, server.TTL(adaptiveScoreHistoryKey))
+	require.False(t, server.Exists(adaptiveStreamHistoryKey))
+	require.False(t, server.Exists(adaptiveHealthIndex))
+	routing, err := store.Read(ctx, cutoff, now)
+	require.NoError(t, err)
+	require.Len(t, routing, 1)
+	require.Equal(t, "routing", routing[0].Payload)
+}

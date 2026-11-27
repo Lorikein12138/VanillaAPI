@@ -38,6 +38,23 @@ type AdaptiveHistoryStore interface {
 	Merge(ctx context.Context, cutoff time.Time, records []AdaptiveHistoryRecord) error
 }
 
+// AdaptiveScoreHistoryStore keeps scoring-only successes separate from the
+// routing history's write queue, retention capacity, and health records.
+type AdaptiveScoreHistoryStore interface {
+	ReadScoreHistory(ctx context.Context, after, through time.Time) ([]AdaptiveHistoryRecord, error)
+	MergeScoreHistory(ctx context.Context, cutoff time.Time, records []AdaptiveHistoryRecord) error
+}
+
+type adaptiveScoreHistoryAdapter struct{ AdaptiveScoreHistoryStore }
+
+func (s adaptiveScoreHistoryAdapter) Read(ctx context.Context, after, through time.Time) ([]AdaptiveHistoryRecord, error) {
+	return s.ReadScoreHistory(ctx, after, through)
+}
+
+func (s adaptiveScoreHistoryAdapter) Merge(ctx context.Context, cutoff time.Time, records []AdaptiveHistoryRecord) error {
+	return s.MergeScoreHistory(ctx, cutoff, records)
+}
+
 // Only fields in the exact sample key and the outcome leave the process.
 // The sorted set score carries the observation time in Unix microseconds.
 type adaptiveStoredSample struct {
@@ -57,6 +74,7 @@ type adaptiveStoredSample struct {
 	Latency         time.Duration
 	Success         bool
 	NonText         bool            `json:",omitempty"`
+	ScoreOnly       bool            `json:",omitempty"`
 	GroupID         int64           `json:",omitempty"`
 	Config          string          `json:",omitempty"`
 	Health          *adaptiveHealth `json:",omitempty"`
@@ -68,15 +86,16 @@ type adaptiveHistoryEntry struct {
 }
 
 type adaptiveHistory struct {
-	store    AdaptiveHistoryStore
-	queue    chan adaptiveHistoryEntry
-	mu       sync.Mutex
-	stopped  bool
-	stop     context.CancelFunc
-	done     chan struct{}
-	stopErr  error // published by closing done
-	writerID string
-	sequence atomic.Uint64
+	store     AdaptiveHistoryStore
+	scoreOnly bool
+	queue     chan adaptiveHistoryEntry
+	mu        sync.Mutex
+	stopped   bool
+	stop      context.CancelFunc
+	done      chan struct{}
+	stopErr   error // published by closing done
+	writerID  string
+	sequence  atomic.Uint64
 
 	// Only the worker accesses the pending batch. Retry the exact same ZSET
 	// members when a write may have succeeded but its response was lost.
@@ -88,11 +107,11 @@ func newAdaptiveTelemetry(store AdaptiveHistoryStore) *adaptiveTelemetry {
 	t := &adaptiveTelemetry{}
 	if store != nil {
 		ctx := t.attachAdaptiveHistory(store)
-		go func() {
-			ticker := time.NewTicker(time.Minute)
-			defer ticker.Stop()
-			t.history.run(ctx, t, ticker.C)
-		}()
+		t.history.start(ctx, t)
+	}
+	if scoreStore, ok := store.(AdaptiveScoreHistoryStore); ok {
+		ctx := t.attachAdaptiveScoreHistory(scoreStore)
+		t.scoreHistory.start(ctx, t)
 	}
 	if streamStore, ok := store.(AdaptiveStreamHistoryStore); ok {
 		ctx := t.streamHealth.attach(streamStore)
@@ -106,12 +125,31 @@ func newAdaptiveTelemetry(store AdaptiveHistoryStore) *adaptiveTelemetry {
 }
 
 func (t *adaptiveTelemetry) attachAdaptiveHistory(store AdaptiveHistoryStore) context.Context {
-	ctx, stop := context.WithCancel(context.Background())
-	t.history = &adaptiveHistory{
-		store: store, queue: make(chan adaptiveHistoryEntry, adaptiveHistoryQueue),
-		stop: stop, done: make(chan struct{}), writerID: uuid.NewString() + "/",
-	}
+	ctx, history := makeAdaptiveHistory(store, false)
+	t.history = history
 	return ctx
+}
+
+func (t *adaptiveTelemetry) attachAdaptiveScoreHistory(store AdaptiveScoreHistoryStore) context.Context {
+	ctx, history := makeAdaptiveHistory(adaptiveScoreHistoryAdapter{store}, true)
+	t.scoreHistory = history
+	return ctx
+}
+
+func makeAdaptiveHistory(store AdaptiveHistoryStore, scoreOnly bool) (context.Context, *adaptiveHistory) {
+	ctx, stop := context.WithCancel(context.Background())
+	return ctx, &adaptiveHistory{
+		store: store, queue: make(chan adaptiveHistoryEntry, adaptiveHistoryQueue),
+		scoreOnly: scoreOnly, stop: stop, done: make(chan struct{}), writerID: uuid.NewString() + "/",
+	}
+}
+
+func (h *adaptiveHistory) start(ctx context.Context, t *adaptiveTelemetry) {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		h.run(ctx, t, ticker.C)
+	}()
 }
 
 func (h *adaptiveHistory) nextID() string {
@@ -150,6 +188,10 @@ func (h *adaptiveHistory) restore(ctx context.Context, t *adaptiveTelemetry, now
 			(data.Success && (data.Latency <= 0 || data.Latency > adaptiveMaxSuccessLatency)) {
 			continue
 		}
+		if data.ScoreOnly != h.scoreOnly || (data.ScoreOnly && (data.Health != nil || !data.Success || data.NonText ||
+			data.GroupID <= 0 || data.AccountID <= 0 || data.Model == "" || !adaptiveStreamOperation(data.Operation) || data.Transport != "sse")) {
+			continue
+		}
 		key := adaptiveSampleKey{
 			route: adaptiveRoute{
 				operation: data.Operation, transport: data.Transport, inputSize: data.InputSize,
@@ -157,7 +199,7 @@ func (h *adaptiveHistory) restore(ctx context.Context, t *adaptiveTelemetry, now
 				thinkingLevel: data.ThinkingLevel, thinkingEnabled: data.ThinkingEnabled, nonText: data.NonText,
 			},
 			accountID: data.AccountID, platform: data.Platform, accountType: data.AccountType, model: data.Model,
-			groupID: data.GroupID, config: data.Config,
+			groupID: data.GroupID, config: data.Config, scoreOnly: data.ScoreOnly,
 		}
 		if data.Health != nil {
 			state := *data.Health
@@ -213,7 +255,7 @@ func adaptiveStoredObservation(key adaptiveSampleKey, sample adaptiveSample) ada
 		Operation: key.route.operation, Transport: key.route.transport, InputSize: key.route.inputSize,
 		Effort: key.route.effort, Duration: key.route.duration, Tier: key.route.tier,
 		ThinkingLevel: key.route.thinkingLevel, ThinkingEnabled: key.route.thinkingEnabled,
-		Latency: sample.latency, Success: sample.success, GroupID: key.groupID, Config: key.config, NonText: key.route.nonText,
+		Latency: sample.latency, Success: sample.success, GroupID: key.groupID, Config: key.config, NonText: key.route.nonText, ScoreOnly: key.scoreOnly,
 	}
 }
 
@@ -290,17 +332,19 @@ func (h *adaptiveHistory) run(ctx context.Context, t *adaptiveTelemetry, ticks <
 	for initial := true; ctx.Err() == nil; initial = false {
 		if !initial {
 			writeCtx, cancel := context.WithTimeout(ctx, adaptiveHistoryTimeout)
-			if err := h.flush(writeCtx, t, restored); err != nil {
-				slog.Debug("gateway.adaptive_history_flush_failed", "error", err)
+			if err := h.flush(writeCtx, t, restored && !h.scoreOnly); err != nil {
+				slog.Debug("gateway.adaptive_history_flush_failed", "error", err, "score_only", h.scoreOnly)
 			}
 			cancel()
 		}
 		if !restored && ctx.Err() == nil {
 			readCtx, cancel := context.WithTimeout(ctx, adaptiveHistoryTimeout)
 			if err := h.restore(readCtx, t, time.Now()); err != nil {
-				slog.Debug("gateway.adaptive_history_restore_failed", "error", err)
+				slog.Debug("gateway.adaptive_history_restore_failed", "error", err, "score_only", h.scoreOnly)
 			} else {
-				h.reconcilePendingHealth(t, time.Now())
+				if !h.scoreOnly {
+					h.reconcilePendingHealth(t, time.Now())
+				}
 				restored = true
 			}
 			cancel()
@@ -313,7 +357,7 @@ func (h *adaptiveHistory) run(ctx context.Context, t *adaptiveTelemetry, ticks <
 	drainCtx, cancel := context.WithTimeout(context.Background(), adaptiveHistoryTimeout)
 	defer cancel()
 	for len(h.pending) > 0 || len(h.queue) > 0 || len(h.reconciled) > 0 {
-		if err := h.flush(drainCtx, t, restored); err != nil {
+		if err := h.flush(drainCtx, t, restored && !h.scoreOnly); err != nil {
 			h.stopErr = fmt.Errorf("flush gateway adaptive history: %w", err)
 			return
 		}
@@ -341,23 +385,40 @@ func (h *adaptiveHistory) flush(ctx context.Context, t *adaptiveTelemetry, allow
 
 // StopGatewayAdaptiveHistory drains the bounded queue before Redis is closed.
 func (s *SettingService) StopGatewayAdaptiveHistory(ctx context.Context) error {
-	if s == nil || s.adaptiveTelemetry == nil || s.adaptiveTelemetry.history == nil {
+	if s == nil || s.adaptiveTelemetry == nil {
 		return nil
 	}
 	h := s.adaptiveTelemetry.history
+	score := s.adaptiveTelemetry.scoreHistory
 	stream := s.adaptiveTelemetry.streamHealth.history
 	if stream != nil {
 		stream.stopAccepting()
+	}
+	h.stopAccepting()
+	score.stopAccepting()
+	err := errors.Join(h.wait(ctx), score.wait(ctx))
+	if stream != nil {
+		err = errors.Join(err, stream.wait(ctx))
+	}
+	return err
+}
+
+func (h *adaptiveHistory) stopAccepting() {
+	if h == nil {
+		return
 	}
 	h.mu.Lock()
 	h.stopped = true
 	h.stop()
 	h.mu.Unlock()
+}
+
+func (h *adaptiveHistory) wait(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
 	select {
 	case <-h.done:
-		if stream != nil {
-			return errors.Join(h.stopErr, stream.wait(ctx))
-		}
 		return h.stopErr
 	case <-ctx.Done():
 		return ctx.Err()

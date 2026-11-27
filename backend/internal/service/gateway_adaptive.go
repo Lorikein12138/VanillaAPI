@@ -401,6 +401,7 @@ type adaptiveSampleKey struct {
 	model       string
 	groupID     int64
 	config      string
+	scoreOnly   bool
 }
 
 func adaptiveKey(route adaptiveRoute, account *Account, model string) adaptiveSampleKey {
@@ -436,6 +437,8 @@ type adaptiveTelemetry struct {
 	mu           sync.Mutex
 	series       map[adaptiveSampleKey]*adaptiveSeries
 	history      *adaptiveHistory
+	scoreSeries  map[adaptiveSampleKey]*adaptiveSeries
+	scoreHistory *adaptiveHistory
 	exploration  adaptiveExploration
 	recovery     adaptiveRecovery
 	streamHealth adaptiveStreamHealth
@@ -459,12 +462,16 @@ func (t *adaptiveTelemetry) observeAttempt(key adaptiveSampleKey, now time.Time,
 		return
 	}
 	sample := adaptiveSample{at: now, latency: latency, success: success, probe: probe}
-	if t.history != nil {
-		sample.id = t.history.nextID()
+	history := t.history
+	if key.scoreOnly {
+		history = t.scoreHistory
+	}
+	if history != nil {
+		sample.id = history.nextID()
 	}
 	t.insertSample(key, sample, true, probe)
-	if t.history != nil {
-		t.history.enqueue(key, sample)
+	if history != nil {
+		history.enqueue(key, sample)
 	}
 }
 
@@ -473,15 +480,19 @@ func (t *adaptiveTelemetry) addSample(key adaptiveSampleKey, sample adaptiveSamp
 }
 
 func (t *adaptiveTelemetry) seriesForObservation(key adaptiveSampleKey, at time.Time) *adaptiveSeries {
-	series := t.series[key]
+	shard := &t.series
+	if key.scoreOnly {
+		shard = &t.scoreSeries
+	}
+	series := (*shard)[key]
 	if series == nil {
-		if t.series == nil {
-			t.series = make(map[adaptiveSampleKey]*adaptiveSeries)
+		if *shard == nil {
+			*shard = make(map[adaptiveSampleKey]*adaptiveSeries)
 		}
-		if len(t.series) >= adaptiveCapacity {
+		if len(*shard) >= adaptiveCapacity {
 			var oldestKey adaptiveSampleKey
 			var oldest time.Time
-			for key, item := range t.series {
+			for key, item := range *shard {
 				last := item.health.Last
 				if last.IsZero() {
 					last = item.samples[(item.next+adaptiveSamples-1)%adaptiveSamples].at
@@ -493,10 +504,10 @@ func (t *adaptiveTelemetry) seriesForObservation(key adaptiveSampleKey, at time.
 			if at.Before(oldest) {
 				return nil
 			}
-			delete(t.series, oldestKey)
+			delete(*shard, oldestKey)
 		}
 		series = &adaptiveSeries{}
-		t.series[key] = series
+		(*shard)[key] = series
 	}
 	return series
 }
@@ -515,7 +526,7 @@ func (t *adaptiveTelemetry) insertSample(key adaptiveSampleKey, sample adaptiveS
 			}
 		}
 	}
-	if !insertAdaptiveSample(series.samples[:], &series.next, sample) {
+	if !insertAdaptiveSample(series.samples[:], &series.next, sample) || key.scoreOnly {
 		return adaptiveHealth{}
 	}
 	if sample.success {

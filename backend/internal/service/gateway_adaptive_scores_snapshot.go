@@ -220,6 +220,11 @@ func (t *adaptiveTelemetry) accountScores(groupID int64, accounts []Account, now
 			*appendAdaptiveScoreInput(&v1Inputs) = adaptiveScoreV1Input{key, pos, series.samples, series.health}
 		}
 	}
+	for key, series := range t.scoreSeries {
+		if pos, ok := match(key); ok {
+			*appendAdaptiveScoreInput(&v1Inputs) = adaptiveScoreV1Input{key: key, position: pos, samples: series.samples}
+		}
+	}
 	t.mu.Unlock()
 
 	var v2Inputs [][]adaptiveScoreV2Input
@@ -249,9 +254,11 @@ func (t *adaptiveTelemetry) accountScores(groupID int64, accounts []Account, now
 				if !sample.at.Before(latest.at) {
 					latest = sample
 				}
-				// The overview covers every eligible v1 sample, including buckets
-				// below the detail limit. v2 can observe the same attempts.
+				// V2 details can overlap V1 and the score-only buckets.
 				overall[input.position].add(sample, age, textStream)
+			}
+			if input.key.scoreOnly {
+				continue
 			}
 			rankAt := latest.at
 			if input.health.Last.After(healthCutoff) && !input.health.Last.After(now) && input.health.Last.After(rankAt) {

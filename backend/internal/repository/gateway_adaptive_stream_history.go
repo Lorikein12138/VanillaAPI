@@ -7,15 +7,28 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const adaptiveStreamHistoryKey = "gateway:adaptive:stream-health:samples:v2"
+const (
+	adaptiveStreamHistoryKey = "gateway:adaptive:stream-health:samples:v2"
+	adaptiveScoreHistoryKey  = "gateway:adaptive:score-only:samples:v1"
+)
 
 var _ service.AdaptiveStreamHistoryStore = (*adaptiveHistoryStore)(nil)
+var _ service.AdaptiveScoreHistoryStore = (*adaptiveHistoryStore)(nil)
 
 func (s *adaptiveHistoryStore) ReadStreamHealth(ctx context.Context, after, through time.Time) ([]service.AdaptiveHistoryRecord, error) {
 	return s.readSamples(ctx, adaptiveStreamHistoryKey, after, through)
 }
 
-const adaptiveStreamHistoryMerge = `
+func (s *adaptiveHistoryStore) ReadScoreHistory(ctx context.Context, after, through time.Time) ([]service.AdaptiveHistoryRecord, error) {
+	return s.readSamples(ctx, adaptiveScoreHistoryKey, after, through)
+}
+
+func (s *adaptiveHistoryStore) MergeScoreHistory(ctx context.Context, cutoff time.Time, records []service.AdaptiveHistoryRecord) error {
+	_, err := s.mergeAdaptiveSamples(ctx, adaptiveScoreHistoryKey, cutoff, service.AdaptiveHistoryRetention, records)
+	return err
+}
+
+const adaptiveSampleHistoryMerge = `
 local key = KEYS[1]
 local cutoff = tonumber(ARGV[1])
 for i = 4, #ARGV, 2 do
@@ -32,8 +45,12 @@ redis.call('EXPIRE', key, ARGV[3])
 return math.max(excess, 0)`
 
 func (s *adaptiveHistoryStore) MergeStreamHealth(ctx context.Context, cutoff time.Time, records []service.AdaptiveHistoryRecord) (int64, error) {
+	return s.mergeAdaptiveSamples(ctx, adaptiveStreamHistoryKey, cutoff, 15*time.Minute, records)
+}
+
+func (s *adaptiveHistoryStore) mergeAdaptiveSamples(ctx context.Context, key string, cutoff time.Time, retention time.Duration, records []service.AdaptiveHistoryRecord) (int64, error) {
 	args := make([]any, 0, 3+2*len(records))
-	args = append(args, adaptiveHistoryTime(cutoff), adaptiveHistoryLimit, int((15*time.Minute)/time.Second))
+	args = append(args, adaptiveHistoryTime(cutoff), adaptiveHistoryLimit, int(retention/time.Second))
 	for _, record := range records {
 		if record.StateKey == "" && len(record.Payload) <= service.AdaptiveHistoryMaxMember {
 			args = append(args, adaptiveHistoryTime(record.At), record.Payload)
@@ -42,5 +59,5 @@ func (s *adaptiveHistoryStore) MergeStreamHealth(ctx context.Context, cutoff tim
 	if len(args) == 3 {
 		return 0, nil
 	}
-	return s.redis.Eval(ctx, adaptiveStreamHistoryMerge, []string{adaptiveStreamHistoryKey}, args...).Int64()
+	return s.redis.Eval(ctx, adaptiveSampleHistoryMerge, []string{key}, args...).Int64()
 }

@@ -239,6 +239,7 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 			}
 			ctx = protectAdaptiveSelection(ctx)
 			if name == "switch-disabled" {
+				require.Empty(t, telemetry.scoreSeries)
 				ctx = parent
 			}
 
@@ -399,6 +400,7 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 					require.Equal(t, 2, strings.Count(string(upstream.lastBody), `"tool_stream":`))
 				}
 				require.Empty(t, telemetry.streamHealth.series)
+				require.Empty(t, telemetry.scoreSeries)
 				return
 			}
 			require.NotNil(t, result.FirstTokenMs)
@@ -447,6 +449,13 @@ func TestGatewayAdaptiveStreamHealthRawChatObservation(t *testing.T) {
 			samples := telemetry.streamHealth.series[key]
 			require.Len(t, samples, 1)
 			require.Equal(t, 39800*time.Millisecond, samples[0].latency)
+			scoreKey := key.sample
+			scoreKey.scoreOnly = true
+			require.Contains(t, telemetry.scoreSeries, scoreKey)
+			series := telemetry.scoreSeries[scoreKey]
+			require.Equal(t, 1, series.next)
+			require.Equal(t, samples[0].latency, series.samples[0].latency)
+			require.Zero(t, series.health)
 		})
 	}
 }
