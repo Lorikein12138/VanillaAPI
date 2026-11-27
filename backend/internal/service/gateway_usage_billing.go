@@ -586,7 +586,7 @@ func detachStreamUpstreamContext(ctx context.Context, stream bool) (context.Cont
 	if ctx == nil {
 		return context.Background(), func() {}
 	}
-	if !stream || isChannelDetectionProbe(ctx) {
+	if !stream || IsChannelDetectionProbe(ctx) {
 		return ctx, func() {}
 	}
 	return pkghttputil.DetachUpstreamContext(ctx), func() {}
@@ -596,7 +596,7 @@ func detachUpstreamContext(ctx context.Context, drainTimeout ...time.Duration) (
 	if ctx == nil {
 		return context.Background(), func() {}
 	}
-	if isChannelDetectionProbe(ctx) {
+	if IsChannelDetectionProbe(ctx) {
 		return ctx, func() {}
 	}
 	return pkghttputil.DetachUpstreamContext(ctx, drainTimeout...), func() {}
@@ -1326,13 +1326,29 @@ func (s *GatewayService) calculateTokenCost(
 	multiplier float64,
 	pricingAt time.Time,
 ) *CostBreakdown {
+	cost, err := s.calculateTokenCostChecked(ctx, result, apiKey, billingModel, multiplier, pricingAt)
+	if err != nil {
+		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)
+		return &CostBreakdown{ActualCost: 0}
+	}
+	return cost
+}
+
+func (s *GatewayService) calculateTokenCostChecked(
+	ctx context.Context,
+	result *ForwardResult,
+	apiKey *APIKey,
+	billingModel string,
+	multiplier float64,
+	pricingAt time.Time,
+) (*CostBreakdown, error) {
 	var resolved *ResolvedPricing
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
 		resolved = s.resolver.resolveQuiet(ctx, PricingInput{Model: billingModel, PricingAt: pricingAt, GroupID: &gid, Group: apiKey.Group})
 	}
 
-	cost, err := s.billingService.CalculateTokenCostForRequest(TokenCostRequest{
+	return s.billingService.CalculateTokenCostForRequest(TokenCostRequest{
 		Ctx:               ctx,
 		Model:             billingModel,
 		Group:             apiKey.Group,
@@ -1345,11 +1361,6 @@ func (s *GatewayService) calculateTokenCost(
 		Resolved:          resolved,
 		deferFallbackWarn: true,
 	})
-	if err != nil {
-		logger.LegacyPrintf("service.gateway", "Calculate cost failed: %v", err)
-		return &CostBreakdown{ActualCost: 0}
-	}
-	return cost
 }
 
 func (s *GatewayService) buildRecordUsageLog(

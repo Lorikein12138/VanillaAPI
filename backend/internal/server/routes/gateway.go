@@ -27,7 +27,7 @@ func RegisterGatewayRoutes(
 	settingService *service.SettingService,
 	compositeResolver *service.CompositeRouteResolver,
 	cfg *config.Config,
-) {
+) http.Handler {
 	bodyMemoryBudget := pkghttputil.NewBodyMemoryBudget(cfg.Gateway.RequestBodyMemoryBudgetBytes)
 	bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize, bodyMemoryBudget)
 	textBodyLimit := middleware.RequestBodyLimit(cfg.Gateway.TextMaxBodySize, bodyMemoryBudget)
@@ -81,6 +81,18 @@ func RegisterGatewayRoutes(
 	isOpenAIResponsesCompatibleGatewayPlatform := func(c *gin.Context) bool {
 		// openai、grok 与多协议 API Key 供应商经 OpenAI 网关转发（平台清单）。
 		return domain.UsesOpenAIGateway(getGroupPlatform(c))
+	}
+	dispatchResponses := func(c *gin.Context) {
+		if service.IsChannelDetectionProbe(c.Request.Context()) && getGroupPlatform(c) == service.PlatformComposite {
+			// The Responses composite scope could not be resolved for this model.
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+		if isOpenAIResponsesCompatibleGatewayPlatform(c) {
+			h.OpenAIGateway.Responses(c)
+			return
+		}
+		h.Gateway.Responses(c)
 	}
 	countTokensHandler := func(c *gin.Context) {
 		switch platform := getGroupPlatform(c); {
@@ -216,7 +228,6 @@ func RegisterGatewayRoutes(
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
-	gateway.Use(verifyChannelDetectionBinding)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(rejectConflictingFields)
 	gateway.Use(compositeTarget)
@@ -245,20 +256,8 @@ func RegisterGatewayRoutes(
 		gateway.POST("/live", h.OpenAIGateway.Live)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		// OpenAI Responses API: auto-route based on group platform
-		gateway.POST("/responses", func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Responses(c)
-				return
-			}
-			h.Gateway.Responses(c)
-		})
-		gateway.POST("/responses/*subpath", guardResponsesSubpath(func(c *gin.Context) {
-			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
-				h.OpenAIGateway.Responses(c)
-				return
-			}
-			h.Gateway.Responses(c)
-		}))
+		gateway.POST("/responses", dispatchResponses)
+		gateway.POST("/responses/*subpath", guardResponsesSubpath(dispatchResponses))
 		gateway.POST("/alpha/search", h.OpenAIGateway.AlphaSearch)
 		gateway.GET("/responses", func(c *gin.Context) {
 			h.OpenAIGateway.ResponsesWebSocket(c)
@@ -559,6 +558,17 @@ func RegisterGatewayRoutes(
 		antigravityV1Beta.POST("/models/*modelAction", h.Gateway.GeminiV1BetaModels)
 	}
 
+	// The listener receives only r. The detection worker receives this separate
+	// handler, which has no auth middleware capable of creating the probe identity.
+	private := gin.New()
+	private.RedirectTrailingSlash = false
+	private.Use(gin.CustomRecoveryWithWriter(nil, func(c *gin.Context, _ any) {
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
+	private.POST("/v1/responses", authenticateChannelDetection, groupBodyLimit, clientRequestID,
+		endpointNorm, groupModelAllowlist, rejectConflictingFields, compositeTarget,
+		requireGroupAnthropic, dispatchResponses)
+	return private
 }
 
 func gatewayAdaptiveIngressRoute(c *gin.Context) (operation, transport string) {

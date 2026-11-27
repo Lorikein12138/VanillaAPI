@@ -143,7 +143,7 @@ func TestGatewayAdaptiveDetectionProbeSkipsAdaptiveIngress(t *testing.T) {
 	_, enabled := gatewayAdaptiveRoute(ctx)
 	require.True(t, enabled)
 
-	probe := context.WithValue(context.Background(), detectionBindingKey{}, detectionBinding{})
+	probe := context.WithValue(context.Background(), detectionBindingKey{}, &detectionBinding{})
 	ctx = streamHealthContext(probe, telemetry, 72, streamHealthBody)
 	_, enabled = gatewayAdaptiveRoute(ctx)
 	require.False(t, enabled)

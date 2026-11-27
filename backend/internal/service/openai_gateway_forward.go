@@ -27,6 +27,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			observeAdaptiveOpenAIResultWithObserver(originalAdaptiveContext, adaptiveObservation, account, adaptiveResult, adaptiveErr, upstreamResponseModelObserverFromContext(c))
 		}()
 	}
+	if IsChannelDetectionProbe(ctx) && (account.IsOpenAIOAuthLike() || account.IsGrokOAuth()) {
+		// Codex strips the output cap. Grok OAuth can refresh credentials and
+		// switch endpoints inside the credential/transport flow.
+		return nil, rejectChannelDetectionEgress(ctx)
+	}
+	ctx = withDetectionAccountScope(ctx, s.accountRepo, account)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
@@ -124,6 +130,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
 	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
+	if IsChannelDetectionProbe(ctx) && wsDecision.Transport != OpenAIUpstreamTransportHTTPSSE {
+		return nil, rejectChannelDetectionEgress(ctx)
+	}
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	if shouldFlattenOpenAIResponsesNamespaces(account, wsDecision.Transport, passthroughEnabled, compactPath) {
@@ -922,9 +931,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		retryStartedAt := time.Now()
 	wsRetryLoop:
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			if !ChannelDetectionDispatchAllowed(ctx) {
-				return nil, context.Canceled
-			}
 			wsAttempts = attempt
 			wsResult, wsErr = s.forwardOpenAIWSV2(
 				ctx,

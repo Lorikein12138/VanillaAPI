@@ -115,6 +115,10 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 	body []byte,
 	_ *ParsedRequest,
 ) (adaptiveResult *ForwardResult, adaptiveErr error) {
+	// OAuth refresh and project discovery have independent HTTP clients.
+	if IsChannelDetectionProbe(ctx) {
+		return nil, rejectChannelDetectionEgress(ctx)
+	}
 	originalAdaptiveContext := ctx
 	ctx, adaptiveObservation := beginAdaptiveObservation(ctx)
 	if adaptiveObservation != nil {

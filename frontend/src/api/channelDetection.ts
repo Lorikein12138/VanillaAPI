@@ -3,7 +3,15 @@ import { apiClient } from './client'
 export interface DetectionSelection {
   group_id: number
   model: string
-  api_key_id: number
+}
+
+export interface DetectionGroupOption {
+  id: number
+  name: string
+  active: boolean
+  has_models: boolean
+  mode_restricted: boolean
+  claude_code_only: boolean
 }
 
 export interface DetectionConfig {
@@ -45,7 +53,7 @@ export const channelDetectionAPI = {
     await apiClient.put(adminPath, config)
   },
   async groups() {
-    return (await apiClient.get<{ id: number; name: string }[]>(adminPath + '/groups')).data
+    return (await apiClient.get<DetectionGroupOption[]>(adminPath + '/groups')).data
   },
   async models(groupID: number) {
     return (await apiClient.get<string[]>(`${adminPath}/groups/${groupID}/models`)).data

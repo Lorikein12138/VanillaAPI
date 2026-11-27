@@ -150,40 +150,48 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 
-	userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted)
-	if err != nil {
-		reqLog.Warn("gateway.responses.user_slot_acquire_failed", zap.Error(err))
-		h.handleConcurrencyError(c, err, "user", streamStarted)
-		return
-	}
-	userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
-	}
-
-	// 2. Re-check billing
-	if err := h.billingCacheService.CheckBillingEligibility(requestCtx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(requestCtx, apiKey)); err != nil {
-		reqLog.Info("gateway.responses.billing_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	probe := service.IsChannelDetectionProbe(requestCtx)
+	if probe {
+		if !service.ChannelDetectionDispatchAllowed(requestCtx) {
+			h.responsesErrorResponse(c, http.StatusServiceUnavailable, "service_unavailable", "Detection is unavailable")
+			return
 		}
-		h.responsesErrorResponse(c, status, code, message)
-		return
-	}
-
-	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
-	if err != nil {
-		reqLog.Info("gateway.responses.inflight_reservation_rejected", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	} else {
+		userReleaseFunc, err := h.concurrencyHelper.AcquireUserSlotWithWait(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted)
+		if err != nil {
+			reqLog.Warn("gateway.responses.user_slot_acquire_failed", zap.Error(err))
+			h.handleConcurrencyError(c, err, "user", streamStarted)
+			return
 		}
-		h.responsesErrorResponse(c, status, code, message)
-		return
+		userReleaseFunc = wrapReleaseOnDone(c.Request.Context(), userReleaseFunc)
+		if userReleaseFunc != nil {
+			defer userReleaseFunc()
+		}
+
+		// 2. Re-check billing
+		if err := h.billingCacheService.CheckBillingEligibility(requestCtx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(requestCtx, apiKey)); err != nil {
+			reqLog.Info("gateway.responses.billing_check_failed", zap.Error(err))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.responsesErrorResponse(c, status, code, message)
+			return
+		}
+
+		// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
+		inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+		if err != nil {
+			reqLog.Info("gateway.responses.inflight_reservation_rejected", zap.Error(err))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.responsesErrorResponse(c, status, code, message)
+			return
+		}
+		defer inflightRelease()
 	}
-	defer inflightRelease()
 
 	// Parse request for session hash
 	// body 已在本函数开头用 gjson.ValidBytes 校验过，之后只经过 sjson 改写
@@ -331,6 +339,12 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		// 提交 usage 记录。成功路径与"流中断但 Forward 已观测到 usage 的部分结果"
 		// 错误路径共用；failover 错误恒定 result=nil，不会重复计费。
 		submitForwardUsage := func(result *service.ForwardResult) {
+			if probe {
+				if result != nil {
+					h.gatewayService.RecordDetectionAccountUsage(requestCtx, account, apiKey, result, clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel), pricingAt)
+				}
+				return
+			}
 			userAgent := c.GetHeader("User-Agent")
 			clientIP := ip.GetClientIP(c)
 			requestPayloadHash := service.HashUsageRequestPayload(body)

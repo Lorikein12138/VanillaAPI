@@ -121,6 +121,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	if err != nil {
 		return nil, err
 	}
+	if err := requireDetectionGroup(ctx, group); err != nil {
+		return nil, err
+	}
 	ctx = s.withGroupContext(ctx, group)
 	ctx = s.withGatewayProfitControlGate(ctx, groupID)
 
@@ -1032,6 +1035,10 @@ func (s *GatewayService) resolveGatewayGroup(ctx context.Context, groupID *int64
 
 		group, err := s.resolveGroupByID(ctx, currentID)
 		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := requireDetectionGroup(ctx, group); err != nil {
 			return nil, nil, err
 		}
 

@@ -1755,7 +1755,7 @@ func (s *OpenAIGatewayService) BindOpenAIHTTPResponseOwner(
 }
 
 func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *gin.Context, account *Account, responseID string) {
-	if s == nil || account == nil || account.ID <= 0 {
+	if s == nil || account == nil || account.ID <= 0 || IsChannelDetectionProbe(ctx) {
 		return
 	}
 	responseID = strings.TrimSpace(responseID)
