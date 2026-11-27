@@ -664,6 +664,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	}()
 
 	for {
+		// Admission writes and terminal CAS use the same Redis group key.
+		// Restart this list when switching to a fallback group.
+		sessionGroupID := currentAPIKey.GroupID
+		var claimedAccountIDs []int64
 		fs := NewFailoverState(h.maxAccountSwitches, hasBoundSession)
 		retryWithFallback := false
 
@@ -836,8 +840,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已
 			// 抢槽的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
 			if selection.ProfitGateActive() || !selection.Acquired {
-				if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, currentAPIKey.GroupID, sessionKey, account.ID); err != nil {
+				claimed, err := h.gatewayService.BindStickySessionAfterProfitAdmissionWithClaim(admissionCtx, sessionGroupID, sessionKey, account.ID)
+				if err != nil {
 					reqLog.Warn("gateway.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				}
+				if claimed {
+					claimedAccountIDs = append(claimedAccountIDs, account.ID)
 				}
 			}
 			// 账号槽位/等待计数需要在超时或断开时安全回收
@@ -1051,6 +1059,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						ctx := context.WithValue(c.Request.Context(), ctxkey.ForcePlatform, "")
 						c.Request = c.Request.WithContext(ctx)
 						currentAPIKey = fallbackAPIKey
+						if sessionKey != "" {
+							sessionBoundAccountID, _ = h.gatewayService.GetCachedSessionAccountID(ctx, fallbackAPIKey.GroupID, sessionKey)
+							hasBoundSession = sessionBoundAccountID > 0
+						}
 						currentSubscription = nil
 						fallbackUsed = true
 						retryWithFallback = true
@@ -1135,13 +1147,21 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// - 选中账号与粘性账号一致：刷新 TTL
 			// - 粘性账号因负载/RPM 被跳过、选中了其他账号：不覆盖原绑定，
 			//   下次请求粘性账号恢复后仍可命中
+			// 写入只覆盖缺失的键与本请求在利润门下 failover 掉的账号（准入时本请求自己写过它），
+			// 转发期间别的请求改绑的值不动。
+			failedOverAccountIDs := make([]int64, 0, len(claimedAccountIDs))
+			for _, claimedAccountID := range claimedAccountIDs {
+				if claimedAccountID != account.ID {
+					failedOverAccountIDs = append(failedOverAccountIDs, claimedAccountID)
+				}
+			}
 			if sessionKey != "" && (sessionBoundAccountID == 0 || sessionBoundAccountID == account.ID) {
 				// Forward has completed; finish the bounded write even if the client disconnects.
 				bindCtx, cancelBind := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
-				bindErr := h.gatewayService.BindStickySession(bindCtx, currentAPIKey.GroupID, sessionKey, account.ID)
+				bindErr := h.gatewayService.BindStickySessionUnlessRebound(bindCtx, sessionGroupID, sessionKey, account.ID, failedOverAccountIDs)
 				cancelBind()
 				if bindErr != nil {
-					reqLog.Warn("gateway.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Error(bindErr))
+					reqLog.Warn("gateway.bind_sticky_session_failed", zap.Int64("account_id", account.ID), zap.Int("failed_over_account_count", len(failedOverAccountIDs)), zap.Error(bindErr))
 				}
 			}
 

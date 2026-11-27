@@ -1,6 +1,6 @@
 <template>
   <!-- Row 1: Core Stats -->
-  <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+  <div class="grid grid-cols-1 gap-4 min-[380px]:grid-cols-2 lg:grid-cols-4">
     <!-- Balance -->
     <div v-if="!isSimple" class="card p-4">
       <div class="flex items-center gap-3">
@@ -53,7 +53,7 @@
         </div>
         <div>
           <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('dashboard.todayCost') }}</p>
-          <p class="font-serif text-2xl font-normal text-gray-950 dark:text-dark-50">
+          <p class="font-serif text-2xl font-normal text-gray-950 [overflow-wrap:anywhere] dark:text-dark-50">
             <span class="text-primary-600 dark:text-primary-300" :title="t('dashboard.actual')">{{ getSiteCurrencySymbol() }}{{ formatCost(stats?.today_actual_cost || 0) }}</span>
             <span class="text-sm font-normal text-gray-400 dark:text-gray-500" :title="t('dashboard.standard')"> / {{ getSiteCurrencySymbol() }}{{ formatCost(stats?.today_cost || 0) }}</span>
           </p>
@@ -68,7 +68,7 @@
   </div>
 
   <!-- Row 2: Token Stats -->
-  <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+  <div class="grid grid-cols-1 gap-4 min-[380px]:grid-cols-2 lg:grid-cols-4">
     <!-- Today Tokens -->
     <div class="card p-4">
       <div class="flex items-center gap-3">

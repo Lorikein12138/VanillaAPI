@@ -144,7 +144,10 @@ issues/
 /deploy/
 /assets/
 /docs/
-/.github/
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/ci.yml
 /skills/
 
 # 普通 Markdown 是本机文档；产品协议正文在前端源码中例外跟踪

@@ -284,7 +284,7 @@ func observeAdaptiveStreamResult(ctx context.Context, o *adaptiveObservation, ac
 		if account == nil || facts.model == "" || len(facts.model) > 128 || facts.effort == "unknown" || outboundTier == "unknown" || tierConflict ||
 			result.UpstreamResponseModelConflict || (result.UpstreamResponseModel != "" && !adaptiveStreamModelMatches(account, facts.model, result.UpstreamResponseModel)) ||
 			(observedTier != "" && adaptiveTierBucket(adaptiveTier(observedTier)) != outboundTier &&
-				!(account.IsOpenAIOAuthLike() && codexOAuthResponseTierIsNonAuthoritative(observedTier))) {
+				(!account.IsOpenAIOAuthLike() || !codexOAuthResponseTierIsNonAuthoritative(observedTier))) {
 			health.count(streamMismatch)
 			return
 		}

@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, mount } from '@vue/test-utils'
 import BaseDialog from '../BaseDialog.vue'
+
+vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 
 enableAutoUnmount(afterEach)
 const pressEscape = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
@@ -26,5 +28,16 @@ describe('stacked dialog Escape handling', () => {
     child.unmount()
     pressEscape()
     expect(parent.emitted('close')).toHaveLength(1)
+  })
+
+  it('dispatches Escape by visual z-index and then by teleported paint order', async () => {
+    const high = mount(BaseDialog, { props: { show: true, title: 'High', zIndex: 60 } })
+    const low = mount(BaseDialog, { props: { show: true, title: 'Low' } })
+    pressEscape()
+    expect(high.emitted('close')).toHaveLength(1)
+    expect(low.emitted('close')).toBeUndefined()
+    await high.setProps({ zIndex: 50 })
+    pressEscape()
+    expect(low.emitted('close')).toHaveLength(1)
   })
 })

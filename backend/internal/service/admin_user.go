@@ -312,10 +312,13 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 			input.ActorAdminID, user.ID, oldRole, user.Role)
 	}
 
-	// 同步用户专属分组倍率
-	if input.GroupRates != nil && s.userGroupRateRepo != nil {
-		if err := s.userGroupRateRepo.SyncUserGroupRates(ctx, user.ID, input.GroupRates); err != nil {
-			logger.LegacyPrintf("service.admin", "failed to sync user group rates: user_id=%d err=%v", user.ID, err)
+	// 基本资料已提交，倍率独立保存。即使倍率保存失败，仍完成基本资料的副作用。
+	var groupRatesErr error
+	if input.GroupRates != nil {
+		if s.userGroupRateRepo == nil {
+			groupRatesErr = errors.New("user group rate repository unavailable")
+		} else {
+			groupRatesErr = s.userGroupRateRepo.SyncUserGroupRates(ctx, user.ID, input.GroupRates)
 		}
 	}
 
@@ -332,22 +335,27 @@ func (s *adminServiceImpl) UpdateUser(ctx context.Context, id int64, input *Upda
 		code, err := GenerateRedeemCode()
 		if err != nil {
 			logger.LegacyPrintf("service.admin", "failed to generate adjustment redeem code: %v", err)
-			return user, nil
-		}
-		adjustmentRecord := &RedeemCode{
-			Code:   code,
-			Type:   AdjustmentTypeAdminConcurrency,
-			Value:  float64(concurrencyDiff),
-			Status: StatusUsed,
-			UsedBy: &user.ID,
-		}
-		now := time.Now()
-		adjustmentRecord.UsedAt = &now
-		if err := s.redeemCodeRepo.Create(ctx, adjustmentRecord); err != nil {
-			logger.LegacyPrintf("service.admin", "failed to create concurrency adjustment redeem code: %v", err)
+		} else {
+			now := time.Now()
+			adjustmentRecord := &RedeemCode{
+				Code:   code,
+				Type:   AdjustmentTypeAdminConcurrency,
+				Value:  float64(concurrencyDiff),
+				Status: StatusUsed,
+				UsedBy: &user.ID,
+				UsedAt: &now,
+			}
+			if err := s.redeemCodeRepo.Create(ctx, adjustmentRecord); err != nil {
+				logger.LegacyPrintf("service.admin", "failed to create concurrency adjustment redeem code: %v", err)
+			}
 		}
 	}
 
+	if groupRatesErr != nil {
+		logger.LegacyPrintf("service.admin", "failed to sync user group rates after profile update: user_id=%d err=%v", user.ID, groupRatesErr)
+		return nil, infraerrors.InternalServer("USER_GROUP_RATES_SAVE_FAILED", "User details were saved, but group rate changes failed").
+			WithMetadata(map[string]string{"user_details_saved": "true", "group_rates_saved": "false"}).WithCause(groupRatesErr)
+	}
 	return user, nil
 }
 

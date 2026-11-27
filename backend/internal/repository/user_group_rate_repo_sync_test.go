@@ -7,6 +7,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,6 +18,7 @@ func TestSyncGroupRateMultipliersCommitsInOneTransaction(t *testing.T) {
 	repo := NewUserGroupRateRepository(db)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery("account_group_live_group_lock").WithArgs(pq.Array([]int64{10})).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(10))
 	mock.ExpectExec("UPDATE user_group_rate_multipliers").
 		WithArgs(int64(10), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -42,6 +44,7 @@ func TestSyncGroupRateMultipliersRollsBackOnInsertFailure(t *testing.T) {
 	repo := NewUserGroupRateRepository(db)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery("account_group_live_group_lock").WithArgs(pq.Array([]int64{10})).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(10))
 	mock.ExpectExec("UPDATE user_group_rate_multipliers").
 		WithArgs(int64(10), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 2))
@@ -68,6 +71,7 @@ func TestSyncGroupRPMOverridesCommitsInOneTransaction(t *testing.T) {
 
 	override := 5
 	mock.ExpectBegin()
+	mock.ExpectQuery("account_group_live_group_lock").WithArgs(pq.Array([]int64{10})).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(10))
 	mock.ExpectExec("UPDATE user_group_rate_multipliers").
 		WithArgs(int64(10), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -94,6 +98,7 @@ func TestSyncGroupRPMOverridesRollsBackOnInsertFailure(t *testing.T) {
 
 	override := 5
 	mock.ExpectBegin()
+	mock.ExpectQuery("account_group_live_group_lock").WithArgs(pq.Array([]int64{10})).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(10))
 	mock.ExpectExec("UPDATE user_group_rate_multipliers").
 		WithArgs(int64(10), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 2))

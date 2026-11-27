@@ -99,7 +99,7 @@ func TestAPIKeyService_RejectsV24AuthSnapshotWithLegacyManualModelAllowlist(t *t
 	}
 }
 
-func TestAPIKeyService_RejectsStaleSnapshotsAndRoundTripsV27GroupFields(t *testing.T) {
+func TestAPIKeyService_RejectsStaleSnapshotsAndRoundTripsV28GroupFields(t *testing.T) {
 	groupID := int64(29)
 	accounts := []Account{
 		{Platform: PlatformGemini, Status: StatusError, Credentials: map[string]any{"model_mapping": map[string]any{"client-gemini": "upstream-gemini"}}},
@@ -114,8 +114,8 @@ func TestAPIKeyService_RejectsStaleSnapshotsAndRoundTripsV27GroupFields(t *testi
 
 	svc := &APIKeyService{}
 	snapshot := svc.snapshotFromAPIKey(t.Context(), key)
-	if snapshot == nil || snapshot.Version != 27 {
-		t.Fatalf("expected v27 snapshot, got %#v", snapshot)
+	if snapshot == nil || snapshot.Version != 28 {
+		t.Fatalf("expected v28 snapshot, got %#v", snapshot)
 	}
 	got := svc.snapshotToAPIKey("round-trip", snapshot)
 	if got.Group == nil || !got.Group.ImageCountBilling || !got.Group.RequirePrivacySet {
@@ -125,14 +125,14 @@ func TestAPIKeyService_RejectsStaleSnapshotsAndRoundTripsV27GroupFields(t *testi
 		t.Fatalf("automatic allowlist did not survive the auth snapshot: %#v", got.Group.ModelAllowlist)
 	}
 
-	for _, version := range []int{25, 26} {
+	for _, version := range []int{25, 26, 27} {
 		apiKey, ok, err := svc.applyAuthCacheEntry("stale", &APIKeyAuthCacheEntry{Snapshot: &APIKeyAuthSnapshot{Version: version}})
 		if err != nil || ok || apiKey != nil {
 			t.Fatalf("expected v%d snapshot rejection, got key=%#v ok=%v err=%v", version, apiKey, ok, err)
 		}
 	}
-	apiKey, ok, err := svc.applyAuthCacheEntry("current-v27", &APIKeyAuthCacheEntry{Snapshot: snapshot})
+	apiKey, ok, err := svc.applyAuthCacheEntry("current-v28", &APIKeyAuthCacheEntry{Snapshot: snapshot})
 	if err != nil || !ok || apiKey == nil || apiKey.Group == nil || !apiKey.Group.ImageCountBilling || !apiKey.Group.RequirePrivacySet {
-		t.Fatalf("expected v27 snapshot acceptance, got key=%#v ok=%v err=%v", apiKey, ok, err)
+		t.Fatalf("expected v28 snapshot acceptance, got key=%#v ok=%v err=%v", apiKey, ok, err)
 	}
 }

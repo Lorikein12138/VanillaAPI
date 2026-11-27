@@ -312,6 +312,8 @@ export default {
     fee: 'Fee',
     actualPay: 'Actual Payment',
     createOrder: 'Confirm Payment',
+    helpImagePreview: 'Preview payment help image',
+    helpImageAlt: 'Payment help instructions',
     methods: {
       easypay: 'EasyPay',
       alipay: 'Alipay',

@@ -472,6 +472,8 @@ const onDropdownKeyDown = (e: KeyboardEvent) => {
       break
     case 'Tab':
       isOpen.value = false
+      // Resume tab navigation at the trigger instead of at the body portal.
+      triggerRef.value?.focus()
       break
   }
 }

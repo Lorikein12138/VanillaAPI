@@ -186,6 +186,8 @@ func TestChannelDetectionPostgresWorkersShareSlotsAndMergeResults(t *testing.T) 
 	defer cancel()
 	_, err := first.ExecContext(ctx, `
 		CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+		CREATE TABLE groups (id BIGINT PRIMARY KEY, deleted_at TIMESTAMPTZ);
+		INSERT INTO groups (id) SELECT generate_series(1, 5);
 		INSERT INTO settings (key,value) VALUES ('channel_detection_enabled','on');
 	`)
 	require.NoError(t, err)

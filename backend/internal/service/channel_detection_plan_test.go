@@ -122,6 +122,45 @@ func TestChannelDetectionPlanRetriesAfterWorkerPublish(t *testing.T) {
 	require.Equal(t, now, latest.Samples[1].CheckedAt)
 }
 
+func TestChannelDetectionPlanRemovalKeepsOtherActiveRun(t *testing.T) {
+	ctx := context.Background()
+	s := newDetectionFixture(t)
+	require.NoError(t, s.Save(ctx, s.cfg))
+	_, config, latest, err := s.state(ctx, true)
+	require.NoError(t, err)
+	old := latest.guard(config)
+	remaining := channelDetectionRun{GroupID: 2, Owner: "other-worker", SampleID: "in-flight"}
+	for _, run := range []channelDetectionRun{
+		{GroupID: 1, Owner: "leaving-worker", SampleID: "removed"},
+		remaining,
+	} {
+		ok, err := s.storage.TryAcquire(ctx, run.GroupID, run.Owner, time.Minute)
+		require.NoError(t, err)
+		require.True(t, ok)
+		applied, err := s.updateRunSnapshot(ctx, run, old, false, func(_ channelDetectionConfigRecord, current *channelDetectionSnapshot) bool {
+			current.RunningByGroup[run.GroupID] = run
+			return true
+		})
+		require.NoError(t, err)
+		require.True(t, applied)
+	}
+
+	next := s.cfg
+	next.Groups = next.Groups[1:]
+	require.NoError(t, s.Save(ctx, next))
+	_, _, latest, err = s.state(ctx, true)
+	require.NoError(t, err)
+	require.NotContains(t, latest.RunningByGroup, int64(1))
+	require.True(t, latest.matchesRun(remaining))
+	applied, err := s.updateRunSnapshot(ctx, remaining, old, false, func(_ channelDetectionConfigRecord, current *channelDetectionSnapshot) bool {
+		delete(current.RunningByGroup, remaining.GroupID)
+		current.Samples[remaining.GroupID] = &ChannelDetectionSample{Pelican: "passed"}
+		return true
+	})
+	require.NoError(t, err)
+	require.True(t, applied, "retained worker can advance with a refreshed whole-snapshot CAS")
+}
+
 func TestChannelDetectionFeatureChangeCancelsUnfinishedAttempt(t *testing.T) {
 	ctx := context.Background()
 	s := newDetectionFixture(t)

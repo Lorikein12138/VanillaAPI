@@ -1,3 +1,4 @@
+import { createPinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, mount, RouterLinkStub } from '@vue/test-utils'
 
@@ -18,6 +19,10 @@ const { appStore, authStore } = vi.hoisted(() => ({
     user: null as { email?: string } | null,
     checkAuth: vi.fn(),
   },
+}))
+
+vi.mock('@/api/channelDetection', () => ({
+  channelDetectionAPI: { publicEnabled: vi.fn().mockResolvedValue(false) },
 }))
 
 vi.mock('@/stores', () => ({
@@ -46,6 +51,7 @@ function mountHome(settings: Record<string, unknown> = {}) {
 
   return mount(HomeView, {
     global: {
+      plugins: [createPinia()],
       stubs: {
         RouterLink: RouterLinkStub,
         LocaleSwitcher: { template: '<div data-testid="locale-switcher" />' },

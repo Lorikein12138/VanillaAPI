@@ -54,6 +54,7 @@ func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T)
 	worker := &channelDetectionCoordinator{db: workerDB}
 	guard := service.ChannelDetectionSnapshotGuard{Feature: "on"}
 	const initialPlan = `{"revision":"initial plan"}`
+	const nextPlan = `{"revision":"next plan"}`
 	ok, err := editor.SavePlan(ctx, guard, initialPlan, "initial snapshot")
 	require.NoError(t, err)
 	require.True(t, ok, "first save does not require a worker lease")
@@ -66,7 +67,7 @@ func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T)
 	ok, err = worker.CompareAndSetSnapshot(ctx, 1, "worker", guard, "worker finished")
 	require.NoError(t, err)
 	require.True(t, ok)
-	ok, err = editor.SavePlan(ctx, attempted, "next plan", "stale retained snapshot")
+	ok, err = editor.SavePlan(ctx, attempted, nextPlan, "stale retained snapshot")
 	require.NoError(t, err)
 	require.False(t, ok)
 	state := func() (string, string) {
@@ -84,18 +85,18 @@ func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T)
 
 	_, err = editorDB.ExecContext(ctx, `ALTER TABLE settings ADD CHECK (value <> 'bad snapshot')`)
 	require.NoError(t, err)
-	ok, err = editor.SavePlan(ctx, guard, "next plan", "bad snapshot")
+	ok, err = editor.SavePlan(ctx, guard, nextPlan, "bad snapshot")
 	require.Error(t, err)
 	require.False(t, ok)
 	config, snapshot = state()
 	require.Equal(t, initialPlan, config)
 	require.Equal(t, "worker finished", snapshot)
 
-	ok, err = editor.SavePlan(ctx, guard, "next plan", "worker finished retained")
+	ok, err = editor.SavePlan(ctx, guard, nextPlan, "worker finished retained")
 	require.NoError(t, err)
 	require.True(t, ok)
 	config, snapshot = state()
-	require.Equal(t, "next plan", config)
+	require.Equal(t, nextPlan, config)
 	require.Equal(t, "worker finished retained", snapshot)
 	ok, err = worker.CompareAndSetSnapshot(ctx, 1, "worker", guard, "old worker must not win")
 	require.NoError(t, err)

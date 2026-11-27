@@ -1224,9 +1224,9 @@ func decodeCachedAccountPayload(payload string) (*service.Account, error) {
 	}
 	if projection.Protection != nil {
 		if projection.Protection.Until != 0 {
-			projection.Account.TempUnschedulableProtectedUntil = ptrTime(time.UnixMicro(projection.Protection.Until).UTC())
+			projection.TempUnschedulableProtectedUntil = ptrTime(time.UnixMicro(projection.Protection.Until).UTC())
 		}
-		projection.Account.TempUnschedulableRevision = projection.Protection.Revision
+		projection.TempUnschedulableRevision = projection.Protection.Revision
 	}
 	return &projection.Account, nil
 }

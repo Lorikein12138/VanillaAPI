@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -219,18 +220,38 @@ func (r *userGroupRateRepository) GetRPMOverrideByUserAndGroup(ctx context.Conte
 //   - 值为 nil：清空对应行的 rate_multiplier（保留 rpm_override）。
 //   - 值非 nil：upsert rate_multiplier（保留已有 rpm_override）。
 func (r *userGroupRateRepository) SyncUserGroupRates(ctx context.Context, userID int64, rates map[int64]*float64) error {
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Serialize all per-user edits before acquiring any group or rate row lock.
+	// NO KEY UPDATE stays compatible with foreign-key checks by group-scoped edits.
+	var lockedID int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL FOR NO KEY UPDATE
+	`, userID).Scan(&lockedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return service.ErrUserNotFound
+	}
+	if err != nil {
+		return err
+	}
 	if len(rates) == 0 {
-		if _, err := r.sql.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE user_group_rate_multipliers
 			SET rate_multiplier = NULL, updated_at = NOW()
 			WHERE user_id = $1
 		`, userID); err != nil {
 			return err
 		}
-		_, err := r.sql.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM user_group_rate_multipliers WHERE user_id = $1 AND rate_multiplier IS NULL AND rpm_override IS NULL`,
-			userID)
-		return err
+			userID); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 
 	var clearGroupIDs []int64
@@ -245,15 +266,18 @@ func (r *userGroupRateRepository) SyncUserGroupRates(ctx context.Context, userID
 		}
 	}
 
+	if err := lockLiveGroups(ctx, tx, upsertGroupIDs); err != nil {
+		return err
+	}
 	if len(clearGroupIDs) > 0 {
-		if _, err := r.sql.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE user_group_rate_multipliers
 			SET rate_multiplier = NULL, updated_at = NOW()
 			WHERE user_id = $1 AND group_id = ANY($2)
 		`, userID, pq.Array(clearGroupIDs)); err != nil {
 			return err
 		}
-		if _, err := r.sql.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM user_group_rate_multipliers WHERE user_id = $1 AND group_id = ANY($2) AND rate_multiplier IS NULL AND rpm_override IS NULL`,
 			userID, pq.Array(clearGroupIDs)); err != nil {
 			return err
@@ -262,7 +286,7 @@ func (r *userGroupRateRepository) SyncUserGroupRates(ctx context.Context, userID
 
 	if len(upsertGroupIDs) > 0 {
 		now := time.Now()
-		_, err := r.sql.ExecContext(ctx, `
+		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user_group_rate_multipliers (user_id, group_id, rate_multiplier, created_at, updated_at)
 			SELECT
 				$1::bigint,
@@ -281,7 +305,7 @@ func (r *userGroupRateRepository) SyncUserGroupRates(ctx context.Context, userID
 		}
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 // SyncGroupRateMultipliers 同步分组的 rate_multiplier 部分（不触动 rpm_override）。
@@ -303,6 +327,9 @@ func (r *userGroupRateRepository) SyncGroupRateMultipliers(ctx context.Context, 
 	defer func() { _ = tx.Rollback() }()
 
 	// 未在 entries 列表中的行：清空 rate_multiplier。
+	if err := lockLiveGroups(ctx, tx, []int64{groupID}); err != nil {
+		return err
+	}
 	if len(keepUserIDs) == 0 {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE user_group_rate_multipliers
@@ -378,6 +405,9 @@ func (r *userGroupRateRepository) SyncGroupRPMOverrides(ctx context.Context, gro
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := lockLiveGroups(ctx, tx, []int64{groupID}); err != nil {
+		return err
+	}
 	// 未在 entries 列表中的行：清空 rpm_override。
 	if len(keepUserIDs) == 0 {
 		if _, err := tx.ExecContext(ctx, `

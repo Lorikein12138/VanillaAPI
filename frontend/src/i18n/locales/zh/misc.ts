@@ -336,6 +336,8 @@ export default {
     fee: '手续费',
     actualPay: '实付金额',
     createOrder: '确认支付',
+    helpImagePreview: '预览支付帮助图片',
+    helpImageAlt: '支付帮助说明',
     methods: {
       easypay: '易支付',
       alipay: '支付宝',

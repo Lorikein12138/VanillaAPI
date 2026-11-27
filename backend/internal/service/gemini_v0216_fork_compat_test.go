@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGeminiToolResultImagesPreserveUserTurnAndPartOrder(t *testing.T) {
+func TestGeminiToolResultImagesPreserveTurnAndPartOrder(t *testing.T) {
 	request := []byte(`{"messages":[
 		{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"inspect","input":{}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":[
@@ -27,13 +27,19 @@ func TestGeminiToolResultImagesPreserveUserTurnAndPartOrder(t *testing.T) {
 		} `json:"contents"`
 	}
 	require.NoError(t, json.Unmarshal(converted, &got))
-	require.Len(t, got.Contents, 2)
+	require.Len(t, got.Contents, 3)
+	require.Equal(t, "model", got.Contents[0].Role)
+	require.Len(t, got.Contents[0].Parts, 1)
+	require.Contains(t, got.Contents[0].Parts[0], "functionCall")
 	require.Equal(t, "user", got.Contents[1].Role)
-	require.Len(t, got.Contents[1].Parts, 3)
-	require.Contains(t, got.Contents[1].Parts[0], "functionResponse")
-	require.Equal(t, "found", got.Contents[1].Parts[0]["functionResponse"].(map[string]any)["response"].(map[string]any)["content"])
-	require.Equal(t, "image/png", got.Contents[1].Parts[1]["inlineData"].(map[string]any)["mimeType"])
-	require.Equal(t, "image/jpeg", got.Contents[1].Parts[2]["inlineData"].(map[string]any)["mimeType"])
+	require.Equal(t, []map[string]any{{"functionResponse": map[string]any{
+		"name": "inspect", "response": map[string]any{"content": "found"},
+	}}}, got.Contents[1].Parts)
+	require.Equal(t, "user", got.Contents[2].Role)
+	require.Equal(t, []map[string]any{
+		{"inlineData": map[string]any{"mimeType": "image/png", "data": "aGVsbG8="}},
+		{"inlineData": map[string]any{"mimeType": "image/jpeg", "data": "d29ybGQ="}},
+	}, got.Contents[2].Parts)
 }
 
 func TestVertexChatThoughtSeparation(t *testing.T) {

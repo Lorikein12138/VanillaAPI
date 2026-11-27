@@ -374,13 +374,10 @@
               </span>
             </span>
           </template>
-          <template #header-upstream_billing_rate="{ column }">
-            <div class="flex items-center gap-1">
-              <span>{{ column.label }}</span>
-              <span @click.stop>
-                <HelpTooltip :content="t('admin.accounts.upstreamBilling.trustWarning')" width-class="w-80" />
-              </span>
-            </div>
+          <template #header-upstream_billing_rate-suffix>
+            <span @click.stop>
+              <HelpTooltip :content="t('admin.accounts.upstreamBilling.trustWarning')" width-class="w-80" />
+            </span>
           </template>
           <template #cell-upstream_billing_rate="{ row }">
             <UpstreamBillingRateCell

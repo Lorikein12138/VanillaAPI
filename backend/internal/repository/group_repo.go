@@ -459,14 +459,8 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 }
 
 func (r *groupRepository) Delete(ctx context.Context, id int64) error {
-	_, err := r.client.Group.Delete().Where(group.IDEQ(id)).Exec(ctx)
-	if err != nil {
-		return translatePersistenceError(err, service.ErrGroupNotFound, nil)
-	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventGroupChanged, nil, &id, nil); err != nil {
-		logger.LegacyPrintf("repository.group", "[SchedulerOutbox] enqueue group delete failed: group=%d err=%v", id, err)
-	}
-	return nil
+	_, err := r.DeleteCascade(ctx, id)
+	return err
 }
 
 func (r *groupRepository) List(ctx context.Context, params pagination.PaginationParams) ([]service.Group, *pagination.PaginationResult, error) {
@@ -905,6 +899,11 @@ func (r *groupRepository) deleteCascade(ctx context.Context, id int64, requireEm
 	}
 	// err 为 dbent.ErrTxStarted 时，复用当前 client 参与同一事务。
 
+	// Confirmation takes the detection lease before it locks membership groups.
+	// Take the same lock first, including when the detection feature is disabled.
+	if err := lockDetectionGroupDeletion(ctx, exec); err != nil {
+		return nil, err
+	}
 	// Lock the group row to avoid concurrent writes while we cascade.
 	// 这里使用 exec.QueryContext 手动扫描，确保同一事务内加锁并能区分"未找到"与其他错误。
 	rows, err := exec.QueryContext(ctx, "SELECT id, subscription_type FROM groups WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", id)
@@ -978,6 +977,15 @@ func (r *groupRepository) deleteCascade(ctx context.Context, id int64, requireEm
 
 	// 3. Delete account_groups join rows.
 	if _, err := exec.ExecContext(ctx, "DELETE FROM account_groups WHERE group_id = $1", id); err != nil {
+		return nil, err
+	}
+	if _, err := exec.ExecContext(ctx, "DELETE FROM channel_groups WHERE group_id = $1", id); err != nil {
+		return nil, err
+	}
+	if _, err := exec.ExecContext(ctx, "DELETE FROM user_group_rate_multipliers WHERE group_id = $1", id); err != nil {
+		return nil, err
+	}
+	if err := removeGroupFromDetection(ctx, exec, id); err != nil {
 		return nil, err
 	}
 

@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-3">
     <!-- 一级:平台 -->
-    <div class="flex items-start gap-2">
-      <span class="w-10 shrink-0 pt-2 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-dark-500">
+    <div class="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+      <span class="shrink-0 font-mono text-xs font-medium uppercase tracking-[0.08em] text-gray-600 sm:w-20 sm:pt-2 dark:text-dark-300">
         {{ t('modelPlaza.filters.platformLabel') }}
       </span>
       <div class="flex flex-wrap items-center gap-2">
@@ -13,6 +13,7 @@
           class="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
           :class="p === 'all' ? chipClass(platform === 'all') : platform === p ? 'chip-tinted-active' : 'chip-tinted'"
           :style="p === 'all' ? undefined : { '--chip-accent': platformAccentColor(p) }"
+          :aria-pressed="platform === p"
           :disabled="p !== 'all' && !platformEnabled(p)"
           @click="$emit('update:platform', p)"
         >
@@ -23,8 +24,8 @@
     </div>
 
     <!-- 二级:分组(四类分区、类内按倍率升序,圆点标所属平台;当前组合下无结果的置灰) -->
-    <div class="flex min-w-0 items-start gap-2">
-      <span class="w-10 shrink-0 pt-2 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-dark-500">
+    <div class="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+      <span class="shrink-0 font-mono text-xs font-medium uppercase tracking-[0.08em] text-gray-600 sm:w-20 sm:pt-2 dark:text-dark-300">
         {{ t('modelPlaza.filters.groupLabel') }}
       </span>
       <div class="min-w-0 flex-1">
@@ -32,6 +33,7 @@
           type="button"
           class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
           :class="chipClass(groupId === 'all')"
+          :aria-pressed="groupId === 'all'"
           @click="$emit('update:groupId', 'all')"
         >
           {{ t('modelPlaza.filters.all') }}
@@ -60,6 +62,7 @@
                 class="inline-flex min-w-0 max-w-full items-center gap-1.5 whitespace-normal break-words rounded-lg px-3 py-1.5 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
                 :class="groupId === g.id ? 'chip-group-active' : 'chip-group'"
                 :style="{ '--chip-accent': platformAccentColor(g.platform) }"
+                :aria-pressed="groupId === g.id"
                 :disabled="!groupEnabled(g)"
                 @click="$emit('update:groupId', g.id)"
               >
@@ -73,8 +76,8 @@
     </div>
 
     <!-- 三级:倍率(当前组合下不存在的置灰) -->
-    <div class="flex items-start gap-2">
-      <span class="w-10 shrink-0 pt-2 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-dark-500">
+    <div class="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+      <span class="shrink-0 font-mono text-xs font-medium uppercase tracking-[0.08em] text-gray-600 sm:w-20 sm:pt-2 dark:text-dark-300">
         {{ t('modelPlaza.filters.rateLabel') }}
       </span>
       <div class="flex flex-wrap items-center gap-2">
@@ -82,6 +85,7 @@
           type="button"
           class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
           :class="chipClass(rate === 'all')"
+          :aria-pressed="rate === 'all'"
           @click="$emit('update:rate', 'all')"
         >
           {{ t('modelPlaza.filters.all') }}
@@ -92,6 +96,7 @@
           type="button"
           class="rounded-lg px-3 py-1.5 font-mono text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale"
           :class="chipClass(rate === r)"
+          :aria-pressed="rate === r"
           :disabled="!rateEnabled(r)"
           @click="$emit('update:rate', r)"
         >
@@ -101,8 +106,8 @@
     </div>
 
     <!-- 四级:模型名搜索(纯前端过滤) -->
-    <div class="flex flex-wrap items-start gap-2">
-      <span class="w-10 shrink-0 pt-2 text-xs font-medium font-mono uppercase tracking-[0.08em] text-gray-400 dark:text-dark-500">
+    <div class="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+      <span class="shrink-0 font-mono text-xs font-medium uppercase tracking-[0.08em] text-gray-600 sm:w-20 sm:pt-2 dark:text-dark-300">
         {{ t('modelPlaza.filters.modelLabel') }}
       </span>
       <div class="relative w-full sm:w-72">
@@ -113,6 +118,7 @@
         />
         <input
           :value="search"
+          :aria-label="t('modelPlaza.filters.modelLabel')"
           type="text"
           :placeholder="t('modelPlaza.filters.searchPlaceholder')"
           class="input rounded-lg py-1.5 pl-9 pr-9"
@@ -122,6 +128,7 @@
           v-if="search"
           type="button"
           class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 transition-colors hover:text-gray-600 dark:text-dark-500 dark:hover:text-gray-300"
+          :aria-label="t('common.clear')"
           @click="$emit('update:search', '')"
         >
           <Icon name="x" size="xs" class="h-3.5 w-3.5" />
@@ -301,12 +308,11 @@ function chipClass(active: boolean): string {
 }
 
 .chip-group-active {
-  @apply bg-primary-500 text-white shadow-sm;
-  @apply dark:bg-primary-600;
+  @apply bg-primary-600 text-white shadow-sm;
 }
 
 .chip-group-active:not(:disabled):hover {
-  @apply bg-primary-600 dark:bg-primary-500;
+  @apply bg-primary-700;
 }
 
 .chip-dot {

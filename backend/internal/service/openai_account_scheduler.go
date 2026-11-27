@@ -604,7 +604,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if accountID <= 0 {
 		var err error
 		var state adaptiveBindingState
-		accountID, err, state = s.service.readStickySessionAccountID(ctx, req.GroupID, sessionHash)
+		accountID, state, err = s.service.readStickySessionAccountID(ctx, req.GroupID, sessionHash)
 		if len(binding) > 0 && *binding[0] != adaptiveBindingHit {
 			*binding[0] = state
 		}
@@ -2744,7 +2744,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 
 	var stickyAccountID int64
-	accountID, stickyErr, binding := s.readStickySessionAccountID(ctx, groupID, sessionHash)
+	accountID, binding, stickyErr := s.readStickySessionAccountID(ctx, groupID, sessionHash)
 	if stickyErr == nil && accountID > 0 {
 		stickyAccountID = accountID
 	}

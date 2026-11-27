@@ -59,7 +59,7 @@ func TestBaselineV0222MigrationIdentity(t *testing.T) {
 	actual, err := fs.Glob(FS, "*.sql")
 	require.NoError(t, err)
 	actual = slices.DeleteFunc(actual, func(name string) bool {
-		return name == baselineV0223UltrafastMultiplierMigration || isAccountTempUnschedulableMigration(name)
+		return name == baselineV0223UltrafastMultiplierMigration || (isAccountTempUnschedulableMigration(name) || name == groupLifecycleMigration)
 	})
 	require.Equal(t, expected, actual)
 	require.Equal(t, []string{
