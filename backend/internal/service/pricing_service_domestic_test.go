@@ -43,7 +43,7 @@ func newDomesticPricingFixture(t *testing.T) *domesticPricingFixture {
 		t.Fatalf("new fixture root failed its cleanup guard: %v", err)
 	}
 	f := &domesticPricingFixture{root: root, tempRoot: tempRoot, repoRoot: repoRoot, home: home, files: make(map[string]struct{})}
-	t.Logf("fixture root (Windows absolute): %s", root)
+	t.Logf("fixture root: %s", root)
 	t.Cleanup(func() { f.cleanup(t) })
 	return f
 }
@@ -68,8 +68,8 @@ func validateDomesticFixtureRoot(root, tempRoot, repoRoot, home string) error {
 	if strings.TrimSpace(root) == "" {
 		return errors.New("fixture root is empty")
 	}
-	if !filepath.IsAbs(root) || filepath.VolumeName(root) == "" {
-		return fmt.Errorf("fixture root is not a Windows absolute path: %q", root)
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("fixture root is not an absolute path: %q", root)
 	}
 	clean := filepath.Clean(root)
 	if clean != root {
@@ -155,7 +155,7 @@ func (f *domesticPricingFixture) write(t *testing.T, name string, body []byte) s
 
 func (f *domesticPricingFixture) cleanup(t *testing.T) {
 	t.Helper()
-	t.Logf("fixture cleanup target (Windows absolute): %s", f.root)
+	t.Logf("fixture cleanup target: %s", f.root)
 	if err := validateDomesticFixtureRoot(f.root, f.tempRoot, f.repoRoot, f.home); err != nil {
 		t.Errorf("refusing fixture cleanup: %v", err)
 		return
