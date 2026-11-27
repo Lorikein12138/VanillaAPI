@@ -38,6 +38,10 @@ func withDetectionAccountScope(ctx context.Context, repo AccountRepository, acco
 // and activity counters can change independently of these inputs.
 func detectionAccountRouteFingerprint(account *Account) ([sha256.Size]byte, error) {
 	route := struct {
+		Platform             string
+		Type                 string
+		ParentAccountID      *int64
+		QuotaDimension       string
 		Credentials          map[string]any
 		CustomBaseURL        string
 		ProxyID              *int64
@@ -45,6 +49,10 @@ func detectionAccountRouteFingerprint(account *Account) ([sha256.Size]byte, erro
 		OpenAIPassthrough    bool
 		OpenAIModelFiltering bool
 	}{
+		Platform:             account.Platform,
+		Type:                 account.Type,
+		ParentAccountID:      account.ParentAccountID,
+		QuotaDimension:       account.QuotaDimensionOrDefault(),
 		Credentials:          account.Credentials,
 		ProxyID:              account.ProxyID,
 		OpenAIPassthrough:    account.IsOpenAIPassthroughEnabled(),

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
@@ -17,11 +18,13 @@ const channelDetectionLeaseSetting = "channel_detection_lease"
 // Acquiring/releasing a lease competes for the same row lock as publishing.
 // No database connection or transaction is held across a gateway request.
 type channelDetectionCoordinator struct {
-	db *sql.DB
+	db        *sql.DB
+	accounts  *accountRepository
+	tempCache service.TempUnschedCache
 }
 
-func NewChannelDetectionCoordinator(db *sql.DB) service.ChannelDetectionCoordinator {
-	return &channelDetectionCoordinator{db: db}
+func NewChannelDetectionCoordinator(db *sql.DB, client *dbent.Client, schedulerCache service.SchedulerCache, tempCache service.TempUnschedCache) service.ChannelDetectionCoordinator {
+	return &channelDetectionCoordinator{db: db, accounts: newAccountRepositoryWithSQL(client, db, schedulerCache), tempCache: tempCache}
 }
 
 func (r *channelDetectionCoordinator) TryAcquire(ctx context.Context, owner string, ttl time.Duration) (bool, error) {
@@ -58,15 +61,15 @@ func (r *channelDetectionCoordinator) Release(ctx context.Context, owner string)
 }
 
 // lockChannelDetectionState serializes operations with lease transfer and settings writes.
-func lockChannelDetectionState(ctx context.Context, tx *sql.Tx, owner string, expected service.ChannelDetectionSnapshotGuard) (bool, error) {
+func lockChannelDetectionState(ctx context.Context, tx sqlExecutor, owner string, expected service.ChannelDetectionSnapshotGuard) (bool, error) {
 	// Hold the lease row first. A successor cannot reserve until this
 	// transaction either commits its snapshot or rolls back.
 	var leaseOwner string
-	err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR UPDATE`, channelDetectionLeaseSetting).Scan(&leaseOwner)
+	err := scanDetectionRow(ctx, tx, `SELECT value FROM settings WHERE key = $1 FOR UPDATE`, []any{&leaseOwner}, channelDetectionLeaseSetting)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	if err != nil || leaseOwner != owner {
+	if err != nil || (owner != "" && leaseOwner != owner) {
 		return false, err
 	}
 	// Enabling/disabling or editing the schedule locks these same settings
@@ -76,15 +79,66 @@ func lockChannelDetectionState(ctx context.Context, tx *sql.Tx, owner string, ex
 		{service.SettingKeyChannelDetectionFeature, expected.Feature},
 	} {
 		var actual string
-		err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR SHARE`, setting.key).Scan(&actual)
+		err := scanDetectionRow(ctx, tx, `SELECT value FROM settings WHERE key = $1 FOR SHARE`, []any{&actual}, setting.key)
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
+			if setting.value != "" {
+				return false, nil
+			}
+			continue
 		}
 		if err != nil || actual != setting.value {
 			return false, err
 		}
 	}
 	return true, nil
+}
+
+func (r *channelDetectionCoordinator) SavePlan(ctx context.Context, expected service.ChannelDetectionSnapshotGuard, nextConfig, nextSnapshot string) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	// The first save may predate any worker. Create the released lease row so
+	// all writers can still serialize in lease → config → feature → snapshot order.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO settings (key,value,updated_at) VALUES ($1,'',clock_timestamp())
+		ON CONFLICT (key) DO NOTHING`, channelDetectionLeaseSetting); err != nil {
+		return false, err
+	}
+	if ok, err := lockChannelDetectionState(ctx, tx, "", expected); err != nil || !ok {
+		return false, err
+	}
+	var current string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR UPDATE`, service.SettingKeyChannelDetectionLatest).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if current != expected.Snapshot {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO settings (key,value,updated_at) VALUES ($1,$2,clock_timestamp()),($3,$4,clock_timestamp())
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
+		service.SettingKeyChannelDetectionConfig, nextConfig, service.SettingKeyChannelDetectionLatest, nextSnapshot); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func scanDetectionRow(ctx context.Context, exec sqlExecutor, query string, dest []any, args ...any) error {
+	rows, err := exec.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return sql.ErrNoRows
+	}
+	return rows.Scan(dest...)
 }
 
 func (r *channelDetectionCoordinator) ReserveSend(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, groupID int64, groupRPM, dailyLimit int) (bool, error) {
@@ -196,6 +250,14 @@ func (r *accountRepository) IncrementDetectionQuotaUsed(ctx context.Context, id 
 }
 
 func (r *channelDetectionCoordinator) CompareAndSetSnapshot(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string) (bool, error) {
+	return r.writeSnapshot(ctx, owner, expected, next, 0)
+}
+
+func (r *channelDetectionCoordinator) PublishSnapshot(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string, completedGroupID int64) (bool, error) {
+	return r.writeSnapshot(ctx, owner, expected, next, completedGroupID)
+}
+
+func (r *channelDetectionCoordinator) writeSnapshot(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string, completedGroupID int64) (bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -208,12 +270,14 @@ func (r *channelDetectionCoordinator) CompareAndSetSnapshot(ctx context.Context,
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO settings (key, value, updated_at)
-		SELECT $1::varchar, $2::text, clock_timestamp()
+		SELECT $1::varchar, CASE WHEN $5::text = '0' THEN $2::text ELSE
+			jsonb_set($2::jsonb, ARRAY['proofs', $5::text, 'completed_at'], to_jsonb(clock_timestamp()))::text
+			END, clock_timestamp()
 		WHERE EXISTS (SELECT 1 FROM settings WHERE key = $4::varchar AND updated_at > clock_timestamp())
 			AND ($3::text = '' OR EXISTS (SELECT 1 FROM settings WHERE key = $1::varchar))
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
 		WHERE settings.value = $3::text`,
-		service.SettingKeyChannelDetectionLatest, next, expected.Snapshot, channelDetectionLeaseSetting)
+		service.SettingKeyChannelDetectionLatest, next, expected.Snapshot, channelDetectionLeaseSetting, strconv.FormatInt(completedGroupID, 10))
 	if err != nil {
 		return false, err
 	}

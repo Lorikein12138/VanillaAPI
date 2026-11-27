@@ -5,72 +5,127 @@
       <p v-if="loading" role="status" class="card p-5 text-sm text-gray-600 dark:text-dark-300">{{ t('common.loading') }}</p>
       <div v-else-if="errorKey" class="card space-y-3 p-5">
         <p role="status">{{ t(errorKey) }}</p>
-        <button v-if="errorKey === 'channelDetection.loadError'" type="button" class="btn btn-secondary" @click="load">{{ t('channelDetection.retry') }}</button>
+        <button v-if="errorKey === 'channelDetection.loadError'" type="button" class="btn btn-secondary" @click="load()">{{ t('channelDetection.retry') }}</button>
       </div>
       <p v-else-if="!groups.length" class="card p-5 text-sm text-gray-600 dark:text-dark-300">{{ t('channelDetection.empty') }}</p>
       <div v-else class="grid grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-4">
-        <article v-for="group in groups" :key="group.name" class="card grid aspect-square min-w-0 grid-rows-[auto_minmax(0,1fr)_minmax(0,36%)] gap-2 p-3 sm:p-4">
-          <header class="min-w-0 border-b border-gray-200 pb-2 dark:border-dark-700">
-            <h2 :title="group.name" class="truncate font-serif text-xl font-normal leading-6 text-gray-950 dark:text-dark-50">{{ group.name }}</h2>
-            <div class="grid grid-rows-[1.25rem_1rem]">
-              <p :title="group.model" class="truncate text-sm leading-5 text-gray-600 dark:text-dark-300">{{ group.model }}</p>
-              <time v-if="group.sample" :datetime="group.sample.checked_at" class="text-xs leading-4 text-gray-500 dark:text-dark-400">
-                {{ formatTime(group.sample.checked_at) }}
-              </time>
+        <article v-for="group in groups" :key="group.group_id ?? group.name" class="card min-w-0 self-start overflow-hidden">
+          <div class="grid aspect-square min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5 p-3 sm:p-4">
+            <header class="min-w-0">
+              <h2 :title="group.name" class="truncate font-serif text-xl font-normal leading-6 text-gray-950 dark:text-dark-50">{{ group.name }}</h2>
+              <div class="flex min-w-0 items-baseline justify-between gap-2 text-xs leading-4 text-gray-600 dark:text-dark-300">
+                <p :title="group.model" class="min-w-0 truncate">{{ group.model }}</p>
+                <time v-if="group.sample" :datetime="group.sample.checked_at" class="shrink-0 text-gray-500 dark:text-dark-400">
+                  {{ formatTime(group.sample.checked_at) }}
+                </time>
+              </div>
+            </header>
+            <template v-if="group.sample">
+              <dl class="grid grid-cols-2 gap-3 border-t border-gray-200 pt-2 dark:border-dark-700">
+                <div v-for="metric in metrics(group.sample)" :key="metric.key" class="min-w-0 [overflow-wrap:anywhere]">
+                  <div class="flex flex-wrap items-baseline gap-x-2">
+                    <dt class="text-xs font-medium leading-4 text-gray-700 dark:text-dark-200">{{ t('channelDetection.' + metric.key) }}</dt>
+                    <dd class="font-serif text-base leading-5 tabular-nums text-gray-950 dark:text-dark-50">{{ t('channelDetection.' + metric.key + 'Count', { count: metric.counts.passed }) }}</dd>
+                  </div>
+                </div>
+              </dl>
+              <figure class="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1">
+                <figcaption class="text-xs font-medium leading-4 text-gray-700 dark:text-dark-200">{{ t('channelDetection.pelican') }}</figcaption>
+                <div class="detection-preview grid min-h-0 min-w-0 place-items-center">
+                  <img
+                    v-if="group.sample.pelican_status === 'generated' && group.sample.svg"
+                    :src="imageSource(group.sample.svg)"
+                    :alt="t('channelDetection.pelicanAlt')"
+                    class="detection-art rounded-lg border border-gray-200 bg-[#fbfaf7] object-contain dark:border-dark-600"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <p v-else class="detection-art grid content-center rounded-lg border border-gray-200 p-3 text-center text-xs text-gray-600 dark:border-dark-700 dark:text-dark-300">
+                    {{ t(group.sample.pelican_status === 'untested' ? 'channelDetection.imageUntested' : 'channelDetection.imageError') }}
+                  </p>
+                </div>
+              </figure>
+            </template>
+            <p v-else class="text-sm text-gray-600 dark:text-dark-300">{{ t('channelDetection.noSample') }}</p>
+          </div>
+          <footer v-if="administrator && group.group_id" class="space-y-2 border-t border-gray-200 bg-gray-50 px-3 py-2.5 dark:border-dark-700 dark:bg-dark-900/40 sm:px-4">
+            <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm gap-1.5"
+                :disabled="pendingTrigger !== undefined || group.trigger_state === 'running' || group.trigger_state === 'busy'"
+                @click="trigger(group.group_id)"
+              >
+                <Icon name="play" size="sm" aria-hidden="true" />
+                {{ t(pendingTrigger === group.group_id ? 'channelDetection.triggering' : group.trigger_state === 'running' ? 'channelDetection.running' : 'channelDetection.trigger') }}
+              </button>
+              <div v-if="group.confirmation && group.sample_id" class="ml-auto flex items-center gap-2 text-xs text-gray-700 dark:text-dark-200">
+                <span>{{ t('channelDetection.degradationQuestion') }}</span>
+                <button type="button" class="btn btn-secondary btn-sm" @click="openConfirmation(group)">{{ t('channelDetection.yes') }}</button>
+              </div>
             </div>
-          </header>
-          <template v-if="group.sample">
-            <dl class="grid min-h-0 grid-cols-2 content-start gap-3 overflow-auto">
-              <div v-for="metric in metrics(group.sample)" :key="metric.key" class="min-w-0 [overflow-wrap:anywhere]">
-                <dt class="text-sm font-medium leading-5 text-gray-700 dark:text-dark-200">{{ t('channelDetection.' + metric.key) }}</dt>
-                <dd class="font-serif text-lg leading-6 tabular-nums text-gray-950 dark:text-dark-50">{{ t('channelDetection.' + metric.key + 'Count', { count: metric.counts.passed }) }}</dd>
-                <dd v-for="counter in descriptions(metric.counts, metric.key)" :key="counter" class="text-xs leading-4 text-gray-600 dark:text-dark-300">{{ counter }}</dd>
-              </div>
-            </dl>
-            <figure class="grid min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1">
-              <figcaption class="text-sm font-medium text-gray-700 dark:text-dark-200">{{ t('channelDetection.pelican') }}</figcaption>
-              <div class="grid min-h-0 min-w-0 grid-cols-1 grid-rows-1 place-items-center overflow-auto rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900">
-                <img
-                  v-if="group.sample.pelican_status === 'generated' && group.sample.svg"
-                  :src="imageSource(group.sample.svg)"
-                  :alt="t('channelDetection.pelicanAlt')"
-                  class="h-full min-h-0 w-full min-w-0 object-contain"
-                  loading="lazy"
-                  decoding="async"
-                />
-                <p v-else class="p-2 text-center text-xs text-gray-600 dark:text-dark-300">{{ t(group.sample.pelican_status === 'untested' ? 'channelDetection.imageUntested' : 'channelDetection.imageError') }}</p>
-              </div>
-            </figure>
-          </template>
-          <p v-else class="text-sm text-gray-600 dark:text-dark-300">{{ t('channelDetection.noSample') }}</p>
+            <p v-if="group.trigger_state === 'busy' || group.trigger_state === 'no_send'" role="status" class="text-xs text-gray-600 dark:text-dark-300">
+              {{ t(group.trigger_state === 'busy' ? 'channelDetection.busy' : 'channelDetection.noSend') }}
+            </p>
+          </footer>
         </article>
       </div>
     </section>
+    <ConfirmDialog
+      :show="administrator && !!confirmation"
+      :title="t('channelDetection.confirmTitle')"
+      :message="t('channelDetection.confirmMessage', { account: confirmation?.scope.account_name ?? '' })"
+      :confirm-text="t(confirming ? 'channelDetection.confirming' : 'channelDetection.confirmAction')"
+      :cancel-text="t('common.cancel')"
+      danger
+      @confirm="confirm"
+      @cancel="closeConfirmation"
+    >
+      <ul v-if="confirmation" class="list-disc space-y-1 pl-5 text-sm text-gray-700 dark:text-dark-200">
+        <li v-for="group in confirmation.scope.groups" :key="group.id" class="[overflow-wrap:anywhere]">{{ group.name }}</li>
+      </ul>
+    </ConfirmDialog>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import Icon from '@/components/icons/Icon.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import { channelDetectionAPI, type DetectionCounts, type DetectionSample, type PublicDetectionGroup } from '@/api/channelDetection'
+import { channelDetectionAPI, type AdminDetectionGroup, type DetectionConfirmationScope, type DetectionSample, type PublicDetectionGroup } from '@/api/channelDetection'
+import { useAppStore, useAuthStore } from '@/stores'
 import { useChannelDetectionStore } from '@/stores/channelDetection'
 
 const { t, locale } = useI18n()
 const detectionStore = useChannelDetectionStore()
-const groups = ref<PublicDetectionGroup[]>([])
+const authStore = useAuthStore()
+const appStore = useAppStore()
+const administrator = computed(() => authStore.isAuthenticated && authStore.isAdmin)
+type DetectionCard = PublicDetectionGroup & Partial<AdminDetectionGroup>
+const groups = ref<DetectionCard[]>([])
 const loading = ref(true)
 const errorKey = ref('')
+const pendingTrigger = ref<number>()
+const confirming = ref(false)
+const confirmation = ref<{ groupID: number; sampleID: string; scope: DetectionConfirmationScope }>()
 let request: AbortController | undefined
 let refreshTimer: number | undefined
+let runningTimer: number | undefined
+let mounted = false
 
-async function load() {
-  if (request) return
+async function load(replace = false) {
+  if (!mounted || (request && !replace)) return
+  request?.abort()
   const controller = new AbortController()
   request = controller
   try {
-    groups.value = await channelDetectionAPI.results(controller.signal)
+    const results = administrator.value
+      ? await channelDetectionAPI.adminResults(controller.signal)
+      : await channelDetectionAPI.results(controller.signal)
     if (controller.signal.aborted) return
+    groups.value = results
     errorKey.value = ''
     detectionStore.setPublicEnabled(true)
   } catch (error) {
@@ -81,7 +136,53 @@ async function load() {
     if (status === 404) detectionStore.setPublicEnabled(false)
   } finally {
     if (!controller.signal.aborted) loading.value = false
-    request = undefined
+    if (request === controller) request = undefined
+  }
+}
+
+async function trigger(groupID: number) {
+  if (pendingTrigger.value !== undefined || !administrator.value) return
+  pendingTrigger.value = groupID
+  try {
+    await channelDetectionAPI.trigger(groupID)
+  } catch (error) {
+    const reason = (error as { reason?: string }).reason
+    appStore.showError(t(reason === 'CHANNEL_DETECTION_BUSY' ? 'channelDetection.busyRetry' : 'channelDetection.triggerError'))
+  } finally {
+    await load(true)
+    pendingTrigger.value = undefined
+  }
+}
+
+function openConfirmation(group: DetectionCard) {
+  if (administrator.value && !confirming.value && group.group_id && group.sample_id && group.confirmation) {
+    confirmation.value = { groupID: group.group_id, sampleID: group.sample_id, scope: group.confirmation }
+  }
+}
+
+function closeConfirmation() {
+  if (!confirming.value) confirmation.value = undefined
+}
+
+async function confirm() {
+  const target = confirmation.value
+  if (!target || confirming.value || !administrator.value) return
+  confirming.value = true
+  try {
+    const result = await channelDetectionAPI.confirm(target.groupID, target.sampleID, target.scope.scope_version)
+    appStore.showSuccess(t(result.sync_pending ? 'channelDetection.confirmationPending' : 'channelDetection.confirmed', {
+      until: formatTime(result.until),
+    }))
+  } catch (error) {
+    const { status, reason } = error as { status?: number; reason?: string }
+    const key = reason === 'CHANNEL_DETECTION_ALREADY_PROTECTED'
+      ? 'channelDetection.alreadyProtected'
+      : status === 409 || status === 404 ? 'channelDetection.confirmationChanged' : 'channelDetection.confirmationError'
+    appStore.showError(t(key))
+  } finally {
+    confirmation.value = undefined
+    await load(true)
+    confirming.value = false
   }
 }
 
@@ -100,28 +201,43 @@ function metrics(sample: DetectionSample) {
   ]
 }
 
-function descriptions(counts: DetectionCounts, metric: 'reasoning' | 'fingerprint') {
-  const details: string[] = []
-  if (counts.failed) details.push(t(metric === 'reasoning' ? 'channelDetection.incorrect' : 'channelDetection.mismatched', { count: counts.failed }))
-  if (counts.errors) details.push(t('channelDetection.errors', { count: counts.errors }))
-  if (counts.unattributed) details.push(t('channelDetection.unattributed', { count: counts.unattributed }))
-  if (counts.untested) details.push(t('channelDetection.untested', { count: counts.untested }))
-  return details
-}
-
 function loadIfVisible() {
   if (!document.hidden) void load()
 }
 
 onMounted(() => {
+  mounted = true
   void load()
   refreshTimer = window.setInterval(loadIfVisible, 60_000)
+  runningTimer = window.setInterval(() => {
+    if (administrator.value && groups.value.some(group => group.trigger_state === 'running' || group.trigger_state === 'busy')) {
+      loadIfVisible()
+    }
+  }, 4_000)
   document.addEventListener('visibilitychange', loadIfVisible)
 })
 
 onBeforeUnmount(() => {
+  mounted = false
   request?.abort()
   window.clearInterval(refreshTimer)
+  window.clearInterval(runningTimer)
   document.removeEventListener('visibilitychange', loadIfVisible)
 })
+
+watch(administrator, () => {
+  confirmation.value = undefined
+  void load(true)
+})
 </script>
+
+<style scoped>
+.detection-preview {
+  container-type: size;
+}
+
+.detection-art {
+  width: min(100%, 133.333cqh);
+  aspect-ratio: 4 / 3;
+}
+</style>

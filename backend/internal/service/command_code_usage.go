@@ -353,7 +353,9 @@ func clearCommandCodeWindowCooldown(ctx context.Context, repo AccountRepository,
 		return false
 	}
 	if err := repo.ClearTempUnschedulable(ctx, account.ID); err != nil {
-		slog.Warn("command_code_usage_limit_clear_failed", "account_id", account.ID, "error", err)
+		if !errors.Is(err, ErrTempUnschedulableProtected) {
+			slog.Warn("command_code_usage_limit_clear_failed", "account_id", account.ID, "error", err)
+		}
 		return false
 	}
 	slog.Info("command_code_usage_limit_cleared", "account_id", account.ID,

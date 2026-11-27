@@ -93,6 +93,28 @@ end
 return updated
 `)
 
+// Write both account projections together. During an active manual protection
+// window, a delayed projection may neither lose the protection nor shorten its
+// effective block. All other projections retain the normal replacement rules.
+var writeSchedulerAccountScript = redis.NewScript(`
+local previous = redis.call('GET', KEYS[2])
+if previous and string.find(previous, '"_temp_protection":', 1, true) then
+    local ok, meta = pcall(cjson.decode, previous)
+    local protection = ok and type(meta) == 'table' and meta._temp_protection
+    if type(protection) == 'table' and type(protection.until_us) == 'number' and
+        type(protection.effective_until_us) == 'number' then
+        local clock = redis.call('TIME')
+        local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])
+        if protection.until_us > now and
+            (tonumber(ARGV[3]) < protection.until_us or tonumber(ARGV[4]) < protection.effective_until_us) then
+            return false
+        end
+    end
+end
+redis.call('MSET', KEYS[1], ARGV[1], KEYS[2], ARGV[2])
+return previous
+`)
+
 var (
 	// epoch 标识 bucket writer 的代际，retired key 是持久退休标记。
 	// Capture、allocate、activate 都在 Lua 内同时校验两者：-1 表示已退休，-2 表示 epoch 无效或与 token 代际不匹配；
@@ -1189,17 +1211,30 @@ func schedulerCachePayload(val any) (string, error) {
 }
 
 func decodeCachedAccountPayload(payload string) (*service.Account, error) {
-	var account service.Account
-	if err := json.Unmarshal([]byte(payload), &account); err != nil {
+	var projection schedulerAccountJSON
+	if err := json.Unmarshal([]byte(payload), &projection); err != nil {
 		return nil, err
 	}
-	return &account, nil
+	if projection.Protection != nil {
+		projection.Account.TempUnschedulableProtectedUntil = ptrTime(time.UnixMicro(projection.Protection.Until).UTC())
+	}
+	return &projection.Account, nil
+}
+
+type schedulerAccountJSON struct {
+	service.Account
+	Protection *schedulerAccountProtection `json:"_temp_protection,omitempty"`
+}
+
+type schedulerAccountProtection struct {
+	Until          int64 `json:"until_us"`
+	EffectiveUntil int64 `json:"effective_until_us"`
 }
 
 // writeAccountIDs 分块写入整账号与精简记录，返回成功编码并写入的有序账号 ID。
 // 每块在追加下一个账号前才执行，最后一块总是非空；所涉平台的修订号追加在最后一块末尾，
 // 与最后一批精简记录同一次往返发出，且排在全部精简记录写入之后。
-// 精简记录用 SET ... GET 写入并取回旧值：旧值的平台与新平台不同时，旧平台 bucket 中可能仍缓存着该账号，
+// 投影通过 Lua 同时写入并取回旧精简记录：旧值的平台与新平台不同时，旧平台 bucket 中可能仍缓存着该账号，
 // 全部写入完成后另行写入全局修订号。该检测尽力而为（客户端在 pipeline 内部重试时取回的可能已是本次写入的值），
 // 漏检由进程内快照缓存的直接复用时长与宽限期兜底。
 // 任一块执行出错时，此前已执行的块与出错的块都可能已有精简记录生效，返回时启动后台写入全局修订号。
@@ -1210,7 +1245,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 
 	type metaWrite struct {
 		platform string
-		previous *redis.StatusCmd
+		previous *redis.Cmd
 	}
 	pipe := c.rdb.Pipeline()
 	accountIDs := make([]int64, 0, len(accounts))
@@ -1230,7 +1265,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 			execFailed = true
 			return err
 		}
-		// SET ... GET 在键原本不存在时返回 redis.Nil，不算失败；其余命令的错误逐条检查。
+		// 旧精简记录不存在或写入被拒绝时返回 redis.Nil；其余错误逐条检查。
 		for _, cmd := range cmds {
 			if cmdErr := cmd.Err(); cmdErr != nil && !errors.Is(cmdErr, redis.Nil) {
 				execFailed = true
@@ -1264,10 +1299,11 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 		}
 
 		id := strconv.FormatInt(account.ID, 10)
-		pipe.Set(ctx, schedulerAccountKey(id), fullPayload, 0)
 		writes = append(writes, metaWrite{
-			platform: account.Platform,
-			previous: pipe.SetArgs(ctx, schedulerAccountMetaKey(id), metaPayload, redis.SetArgs{Get: true}),
+			platform: account.Platform, previous: writeSchedulerAccountScript.Eval(ctx, pipe,
+				[]string{schedulerAccountKey(id), schedulerAccountMetaKey(id)},
+				fullPayload, metaPayload, schedulerDeadlineMicros(account.TempUnschedulableProtectedUntil),
+				schedulerDeadlineMicros(account.TempUnschedulableUntil)),
 		})
 		// Keep the hot LastUsedAt side key untouched: a lagging snapshot rebuild
 		// must not overwrite a newer scheduler update.
@@ -1293,10 +1329,10 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 	return accountIDs, nil
 }
 
-// schedulerMetaPlatformChanged 判断 SET ... GET 取回的旧精简记录是否属于另一个平台；
+// schedulerMetaPlatformChanged 判断取回的旧精简记录是否属于另一个平台；
 // 旧值不是合法 JSON 或缺少字符串类型的顶层 Platform 时按已变化处理。
-func schedulerMetaPlatformChanged(previous *redis.StatusCmd, platform string) bool {
-	raw, err := previous.Result()
+func schedulerMetaPlatformChanged(previous *redis.Cmd, platform string) bool {
+	raw, err := previous.Text()
 	if err != nil {
 		return false
 	}
@@ -1349,15 +1385,26 @@ func marshalSchedulerCacheAccount(account service.Account) ([]byte, []byte, erro
 	// group objects (also repeated in AccountGroups). Keep the caller's graph intact.
 	account.Groups = nil
 	account.AccountGroups = filterSchedulerAccountGroups(account.AccountGroups)
-	fullPayload, err := json.Marshal(account)
+	var protection *schedulerAccountProtection
+	if until := schedulerDeadlineMicros(account.TempUnschedulableProtectedUntil); until != 0 {
+		protection = &schedulerAccountProtection{Until: until, EffectiveUntil: schedulerDeadlineMicros(account.TempUnschedulableUntil)}
+	}
+	fullPayload, err := json.Marshal(schedulerAccountJSON{Account: account, Protection: protection})
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal account: %w", err)
 	}
-	metaPayload, err := json.Marshal(buildSchedulerMetadataAccount(account))
+	metaPayload, err := json.Marshal(schedulerAccountJSON{Account: buildSchedulerMetadataAccount(account), Protection: protection})
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal account metadata: %w", err)
 	}
 	return fullPayload, metaPayload, nil
+}
+
+func schedulerDeadlineMicros(deadline *time.Time) int64 {
+	if deadline == nil {
+		return 0
+	}
+	return deadline.UnixMicro()
 }
 
 func (c *schedulerCache) mgetChunked(ctx context.Context, keys []string) ([]any, error) {

@@ -109,6 +109,33 @@ func TestRateLimitService_ClearRateLimit_AlsoClearsTempUnschedulable(t *testing.
 	require.Equal(t, []int64{42}, cache.deletedIDs)
 }
 
+func TestProtectedTempUnschedulableDoesNotReportOrInvalidateRecovery(t *testing.T) {
+	until := time.Now().Add(time.Hour)
+	account := &Account{ID: 42, Status: StatusActive, TempUnschedulableUntil: &until}
+	repo := &rateLimitClearRepoStub{getByIDAccount: account, clearTempUnschedulableErr: ErrTempUnschedulableProtected}
+	cache := &tempUnschedCacheRecorder{}
+	blocker := &runtimeBlockRecorder{}
+	svc := NewRateLimitService(repo, nil, &config.Config{}, nil, cache)
+	svc.SetAccountRuntimeBlocker(blocker)
+	ctx := context.Background()
+
+	require.ErrorIs(t, svc.ClearTempUnschedulable(ctx, 42), ErrTempUnschedulableProtected)
+	require.Zero(t, repo.clearModelRateLimitCalls)
+	require.Zero(t, repo.clearRateLimitCalls)
+	require.Empty(t, cache.deletedIDs)
+
+	result, err := svc.RecoverAccountAfterSuccessfulTest(ctx, 42)
+	require.NoError(t, err)
+	require.False(t, result.ClearedRateLimit, "the sole runtime block is still present")
+	require.Empty(t, cache.deletedIDs)
+
+	refresh := &TokenRefreshService{accountRepo: repo, tempUnschedCache: cache}
+	refresh.SetAccountRuntimeBlocker(blocker)
+	refresh.postRefreshActions(ctx, account)
+	require.Equal(t, 3, repo.clearTempUnschedCalls)
+	require.Empty(t, cache.deletedIDs)
+	require.Empty(t, blocker.clearedIDs)
+}
 func TestRateLimitService_ClearRateLimit_ClearTempUnschedulableFailed(t *testing.T) {
 	repo := &rateLimitClearRepoStub{
 		clearTempUnschedulableErr: errors.New("clear temp unsched failed"),

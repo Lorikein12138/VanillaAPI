@@ -55,6 +55,8 @@ type Account struct {
 
 	TempUnschedulableUntil  *time.Time
 	TempUnschedulableReason string
+	// Persisted scheduling projection metadata, omitted from account API JSON.
+	TempUnschedulableProtectedUntil *time.Time `json:"-"`
 
 	SessionWindowStart  *time.Time
 	SessionWindowEnd    *time.Time

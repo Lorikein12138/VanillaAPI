@@ -46,6 +46,11 @@ type detectionRoundBudget struct {
 	reserve          func(context.Context, *Group) (bool, error)
 	sends            int
 	accountingFailed bool
+	attempts         int
+	provenSends      int
+	accountID        int64
+	routeFingerprint string
+	ambiguous        bool
 }
 
 type detectionBinding struct {
@@ -130,62 +135,67 @@ func ChannelDetectionDispatchAllowed(ctx context.Context) bool {
 // reserves one daily send under the active lease. HTTP transport is the only
 // supported egress because it can make each physical attempt accountable.
 func ReserveChannelDetectionSend(req *http.Request, accountID int64) error {
+	_, err := reserveChannelDetectionSend(req, accountID)
+	return err
+}
+
+func reserveChannelDetectionSend(req *http.Request, accountID int64) (*Account, error) {
 	ctx := req.Context()
 	binding := detectionBindingFromContext(ctx)
 	if binding == nil {
-		return nil
+		return nil, nil
 	}
 	if !ChannelDetectionDispatchAllowed(ctx) || binding.budget == nil {
-		return errDetectionDispatch
+		return nil, errDetectionDispatch
 	}
 	if req.Method != http.MethodPost || req.GetBody == nil {
-		return rejectChannelDetectionEgress(ctx)
+		return nil, rejectChannelDetectionEgress(ctx)
 	}
 	body, err := req.GetBody()
 	if err != nil {
-		return rejectChannelDetectionEgress(ctx)
+		return nil, rejectChannelDetectionEgress(ctx)
 	}
 	defer func() { _ = body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(body, detectionCaptureLimit+1))
 	if err != nil || len(payload) > detectionCaptureLimit || !detectionWireLimits(req.URL.Path, payload, binding.maxTokens) {
-		return rejectChannelDetectionEgress(ctx)
+		return nil, rejectChannelDetectionEgress(ctx)
 	}
 
 	budget := binding.budget
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
 	if !binding.claimed || budget.reserve == nil || binding.loadGroup == nil {
-		return errDetectionDispatch
+		return nil, errDetectionDispatch
 	}
 	if budget.accountingFailed {
-		return errDetectionAccounting
+		return nil, errDetectionAccounting
 	}
 	if routed, ok := ctx.Value(ctxkey.Group).(*Group); ok && routed != nil && routed.ID != binding.selection.GroupID {
 		binding.cancel()
-		return errDetectionDispatch
+		return nil, errDetectionDispatch
 	}
 	if binding.sends >= 2 || budget.sends >= channelDetectionRoundSends {
-		return errDetectionBudget
+		return nil, errDetectionBudget
 	}
 	group, err := binding.loadGroup(ctx, binding.selection.GroupID)
 	if err != nil || !validDetectionModel(group, binding.selection.Model) || requireDetectionGroup(ctx, group) != nil {
 		binding.cancel()
-		return errDetectionDispatch
+		return nil, errDetectionDispatch
 	}
 	accountScope, _ := ctx.Value(detectionAccountScopeKey{}).(detectionAccountScope)
 	fresh, err := accountScope.check(ctx, group.ID, accountID)
 	if err != nil {
 		binding.accountFailure = true
-		return err
+		return nil, err
 	}
 	if ok, err := budget.reserve(ctx, group); err != nil || !ok {
 		binding.budgetDenied = true
-		return errDetectionBudget
+		return nil, errDetectionBudget
 	}
 	binding.sends++
 	budget.sends++
 	binding.account = fresh
-	return ctx.Err()
+	return fresh, ctx.Err()
 }
 
 // requireDetectionGroup rejects a routing result outside the selected group.
