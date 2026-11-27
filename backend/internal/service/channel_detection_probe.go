@@ -5,20 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
-	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/modeltrace/trace"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
@@ -174,7 +169,7 @@ func reserveChannelDetectionSend(req *http.Request, accountID int64) (*Account, 
 		binding.cancel()
 		return nil, errDetectionDispatch
 	}
-	if binding.sends >= 2 || budget.sends >= channelDetectionRoundSends {
+	if budget.sends >= channelDetectionRoundSends {
 		return nil, errDetectionBudget
 	}
 	group, err := binding.loadGroup(ctx, binding.selection.GroupID)
@@ -286,6 +281,8 @@ func (w *detectionCapture) Flush() {
 }
 
 func (s *ChannelDetection) probe(ctx context.Context, gateway http.Handler, selection ChannelDetectionSelection, prompt string, maxTokens int, isCurrent func(context.Context) bool, budget *detectionRoundBudget) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, detectionPelicanTimeout)
+	defer cancel()
 	if !isCurrent(ctx) {
 		return "", errDetectionDispatch
 	}
@@ -304,8 +301,6 @@ func (s *ChannelDetection) probe(ctx context.Context, gateway http.Handler, sele
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, channelDetectionRoundTimeout)
-	defer cancel()
 	binding := &detectionBinding{
 		selection: selection, group: group, payload: payload, sessionID: session,
 		maxTokens: maxTokens, stillValid: isCurrent, cancel: cancel, budget: budget, loadGroup: s.groups.GetGroup,
@@ -385,149 +380,34 @@ func detectionResponseText(body []byte) (string, error) {
 	return reply, nil
 }
 
+const (
+	detectionPelicanOutputLimit = 4096
+	detectionPelicanTimeout     = 110 * time.Second
+	detectionPelicanPrompt      = "Draw a recognizable pelican riding a bicycle. Return only one complete SVG with root <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 480 360'>. Use under 40 shapes, only g/path/rect/circle/ellipse/line/polyline/polygon. Use numeric coordinates, d, points, solid hex/none fill and stroke, stroke-width, stroke-linecap, stroke-linejoin, opacity. Close every tag. No prose, Markdown, style/class, text, filters, references, embedded assets or animation."
+)
+
 func (s *ChannelDetection) runSample(ctx context.Context, gateway http.Handler, selection ChannelDetectionSelection, isCurrent func(context.Context) bool, budget *detectionRoundBudget) *ChannelDetectionSample {
-	result := &ChannelDetectionSample{
-		CheckedAt:   time.Now().UTC(),
-		Reasoning:   ChannelDetectionCounts{Untested: 3},
-		Fingerprint: ChannelDetectionCounts{Untested: 3},
-		Pelican:     "untested",
+	result := &ChannelDetectionSample{CheckedAt: time.Now().UTC(), Pelican: "untested"}
+	if ctx.Err() != nil {
+		return result
 	}
-	run := func(kind, prompt string, maxTokens int, timeout time.Duration) (string, error) {
-		requestCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		before := budget.sends
-		answer, err := s.probe(requestCtx, gateway, selection, prompt, maxTokens, isCurrent, budget)
-		if err != nil {
-			slog.Info("channel_detection.question_failed", "group_id", selection.GroupID, "model", selection.Model,
-				"question", kind, "attempts", budget.sends-before, "category", err.Error())
+	answer, err := s.probe(ctx, gateway, selection, detectionPelicanPrompt, detectionPelicanOutputLimit, isCurrent, budget)
+	if err != nil {
+		slog.Info("channel_detection.question_failed", "group_id", selection.GroupID, "model", selection.Model,
+			"question", "pelican", "attempts", budget.sends, "category", err.Error())
+		if !errors.Is(err, errDetectionDispatch) && !errors.Is(err, errDetectionBudget) {
+			result.Pelican = "error"
 		}
-		return answer, err
+		return result
 	}
-	for _, question := range detectionReasoningQuestions() {
-		if ctx.Err() != nil {
-			break
-		}
-		answer, err := run("reasoning", question.prompt, 768, 30*time.Second)
-		if errors.Is(err, errDetectionDispatch) || errors.Is(err, errDetectionBudget) {
-			return result
-		}
-		result.Reasoning.Untested--
-		switch {
-		case err != nil:
-			result.Reasoning.Errors++
-		case answer == question.answer:
-			result.Reasoning.Passed++
-		default:
-			result.Reasoning.Failed++
-		}
-		if errors.Is(err, errDetectionAccounting) {
-			return result
-		}
-	}
-	if bank, err := trace.EmbeddedBank(); err == nil {
-		start := rand.IntN(41)
-		for i := range 3 {
-			if ctx.Err() != nil {
-				break
-			}
-			count := 292 + (start+i*13)%41
-			answer, err := run("fingerprint", detectionFingerprintPrompt(count, i), 2048, 60*time.Second)
-			if errors.Is(err, errDetectionDispatch) || errors.Is(err, errDetectionBudget) {
-				return result
-			}
-			result.Fingerprint.Untested--
-			switch {
-			case err != nil:
-				result.Fingerprint.Errors++
-			default:
-				switch categorizeDetectionFingerprint(bank, selection.Model, answer, count) {
-				case "match":
-					result.Fingerprint.Passed++
-				case "different":
-					result.Fingerprint.Failed++
-				default:
-					result.Fingerprint.Unattributed++
-				}
-			}
-			if errors.Is(err, errDetectionAccounting) {
-				return result
-			}
-		}
-	}
-	if ctx.Err() == nil {
-		answer, err := run("pelican", detectionPelicanPrompt, 4096, 110*time.Second)
-		if errors.Is(err, errDetectionDispatch) || errors.Is(err, errDetectionBudget) {
-			return result
-		}
+	var category string
+	result.SVG, category = parseDetectionSVG(answer)
+	if result.SVG != "" {
+		result.Pelican = "generated"
+	} else {
 		result.Pelican = "error"
-		if err == nil {
-			var category string
-			result.SVG, category = parseDetectionSVG(answer)
-			if result.SVG != "" {
-				result.Pelican = "generated"
-			} else {
-				slog.Info("channel_detection.question_failed", "group_id", selection.GroupID, "model", selection.Model,
-					"question", "pelican", "category", category)
-			}
-		}
+		slog.Info("channel_detection.question_failed", "group_id", selection.GroupID, "model", selection.Model,
+			"question", "pelican", "category", category)
 	}
 	return result
-}
-
-const detectionPelicanPrompt = "Draw a recognizable pelican riding a bicycle. Return only one SVG XML document, with root <svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 480 360'>. Keep it compact (under 40 shapes). Use only g, path, rect, circle, ellipse, line, polyline and polygon. Use numeric coordinates, d, points, fill and stroke (hex colors or none), stroke-width, stroke-linecap, stroke-linejoin and opacity. Use simple solid fills and strokes. No prose, Markdown, style or class attributes, text, filters, references, embedded assets or animation. Close all tags."
-
-type detectionQuestion struct{ prompt, answer string }
-
-func detectionReasoningQuestions() []detectionQuestion {
-	const format = " Reply with only the decimal integer, without explanation or formatting."
-	a, b := 12+rand.IntN(18), 8+rand.IntN(14)
-	x, y, z := 2+rand.IntN(5), 6+rand.IntN(5), 15+rand.IntN(5)
-	return []detectionQuestion{
-		{
-			fmt.Sprintf("A counter begins at %d. Repeat exactly %d times: multiply its current value by 3, then add 5, then take the remainder modulo 31. What is the final value?", a, b) + format,
-			strconv.Itoa(detectionFinalCounter(a, b)),
-		},
-		{
-			fmt.Sprintf("A directed graph has exactly these edges with costs: S→A %d, S→B %d, A→B 2, A→T %d, B→T 4. What is the minimum total cost from S to T?", x, y, z) + format,
-			strconv.Itoa(min(x+2+4, x+z, y+4)),
-		},
-		{
-			fmt.Sprintf("The queue starts with [%d, %d, %d], front first. Remove the first item and append twice its value. Then remove the first item and append that value plus the new front item. Finally reverse the queue. What is the sum of the first and last items now?", a, b, z) + format,
-			strconv.Itoa(b + 2*z),
-		},
-	}
-}
-
-func detectionFinalCounter(value, steps int) int {
-	for range steps {
-		value = (3*value + 5) % 31
-	}
-	return value
-}
-
-func detectionFingerprintPrompt(count, variant int) string {
-	opening := []string{"这是一次独立的数值选择记录。", "请完成下面的无语义整数选择任务。", "进行一轮快速逐项取值。"}
-	return fmt.Sprintf("%s逐项凭第一反应选择 %d 个 1 到 355（含端点）的整数。每个位置都要单独选择；不要从 1 开始计数，不要连续递增或递减，也不要采用等差、循环、重复区块或其他规则化模式。本任务必须由当前语言模型直接完成，禁止调用或借助任何工具、代码或外部随机数生成器。允许偶然重复，不要排序、去重、重排或修改。用逗号或空格分隔，直接从第一个取值开始输出，不要附加说明。", opening[variant], count)
-}
-
-func categorizeDetectionFingerprint(bank *trace.Bank, model, answer string, expected int) string {
-	claimed := strings.ToLower(model)
-	covered := slices.ContainsFunc(bank.Models, func(entry trace.Model) bool {
-		return slices.Contains(entry.Members, claimed)
-	})
-	category := trace.Categorize(bank, []trace.Reply{{Text: answer, ExpectedCount: expected}})
-	if !covered || category.Tier != trace.TierMatch || category.Top < 0 {
-		return "unattributed"
-	}
-	members := bank.Models[category.Top].Members
-	switch {
-	case len(members) == 0:
-		return "unattributed"
-	case !slices.Contains(members, claimed):
-		return "different"
-	case len(members) == 1:
-		return "match"
-	default:
-		return "unattributed"
-	}
 }

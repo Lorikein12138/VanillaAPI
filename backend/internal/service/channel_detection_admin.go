@@ -7,7 +7,6 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/google/uuid"
 )
 
 var (
@@ -25,7 +24,11 @@ type channelDetectionRun struct {
 	PreviousAttemptedAt *time.Time `json:"previous_attempted_at,omitempty"`
 }
 
-const channelDetectionProofVersion = 2
+const (
+	channelDetectionProofVersion = 2
+	// Existing version 2 proofs could cover all 14 attempts of the old round.
+	channelDetectionProofMaxSends = 14
+)
 
 // ChannelDetectionProof is only persisted with the private worker state.
 type ChannelDetectionProof struct {
@@ -39,7 +42,7 @@ type ChannelDetectionProof struct {
 }
 
 func (p ChannelDetectionProof) Attributable() bool {
-	return p.Version == channelDetectionProofVersion && p.Sends > 0 && p.Sends <= channelDetectionRoundSends &&
+	return p.Version == channelDetectionProofVersion && p.Sends > 0 && p.Sends <= channelDetectionProofMaxSends &&
 		p.AccountID > 0 && len(p.RouteFingerprint) == 64 && p.CompletedAt != nil
 }
 
@@ -90,21 +93,18 @@ func (s *ChannelDetection) AdminGroups(ctx context.Context) ([]ChannelDetectionA
 	if err != nil {
 		return nil, err
 	}
-	var running bool
-	if latest.Running != nil {
-		running, err = s.coordinator.Holds(ctx, latest.Running.Owner)
-		if err != nil {
-			return nil, err
-		}
+	active, err := s.coordinator.ActiveLeases(ctx)
+	if err != nil {
+		return nil, err
 	}
 	actions, _ := s.coordinator.(channelDetectionActions)
 	results := make([]ChannelDetectionAdminGroup, 0, len(ranked))
 	for _, group := range ranked {
 		result := ChannelDetectionAdminGroup{ChannelDetectionPublicGroup: group.result, GroupID: group.id, TriggerState: "idle"}
 		switch {
-		case running && latest.Running.GroupID == group.id:
+		case active.Groups[group.id] != "" || (active.LegacyOwner != "" && latest.RunningByGroup[group.id].Owner == active.LegacyOwner):
 			result.TriggerState = "running"
-		case running:
+		case active.Full():
 			result.TriggerState = "busy"
 		case latest.NoSend[group.id]:
 			result.TriggerState = "no_send"
@@ -125,61 +125,16 @@ func (s *ChannelDetection) AdminGroups(ctx context.Context) ([]ChannelDetectionA
 }
 
 func (s *ChannelDetection) Trigger(ctx context.Context, groupID int64) (string, error) {
-	s.lifecycle.Lock()
-	worker, gateway := s.worker, s.gateway
-	if worker == nil || worker.Err() != nil || gateway == nil || s.coordinator == nil {
-		s.lifecycle.Unlock()
+	if s.coordinator == nil {
 		return "", ErrDetectionBusy
 	}
-	s.runs.Add(1)
-	s.lifecycle.Unlock()
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			s.runs.Done()
-		}
-	}()
-
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	stop := context.AfterFunc(worker, cancel)
-	defer stop()
-	if _, _, _, _, err := s.actionSelection(ctx, groupID, false); err != nil {
-		return "", err
-	}
-	owner := uuid.NewString()
-	acquired, err := s.coordinator.TryAcquire(ctx, owner, channelDetectionRoundTimeout+time.Minute)
-	if err != nil {
-		s.release(ctx, owner)
-		return "", err
-	}
-	if !acquired {
-		return "", ErrDetectionBusy
-	}
-	defer func() {
-		if !handedOff {
-			s.release(ctx, owner)
-		}
-	}()
-
-	selection, config, latest, _, err := s.actionSelection(ctx, groupID, true)
+	selection, config, latest, _, err := s.actionSelection(ctx, groupID, false)
 	if err != nil {
 		return "", err
 	}
-	run, started := s.startRun(ctx, owner, config, &latest, selection, "manual")
-	if !started {
-		return "", ErrDetectionChanged
-	}
-	if worker.Err() != nil {
-		return "", ErrDetectionBusy
-	}
-	handedOff = true
-	go func() {
-		defer s.runs.Done()
-		defer s.release(worker, owner)
-		s.run(worker, gateway, run, config, latest, selection)
-	}()
-	return run.SampleID, nil
+	return s.admit(ctx, selection, latest.guard(config), "manual")
 }
 
 func (s *ChannelDetection) Confirm(ctx context.Context, groupID int64, sampleID, scopeVersion string, actorID int64) (ChannelDetectionConfirmation, error) {

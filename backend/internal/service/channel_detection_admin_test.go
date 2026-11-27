@@ -21,6 +21,10 @@ func TestChannelDetectionManualRoundUsesLeaseAndWorkerContext(t *testing.T) {
 		var questionCalls int
 		var checkedModel string
 		s.Start(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if detectionBindingFromContext(req.Context()).selection.GroupID == 2 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			questionCalls++
 			checkedModel = detectionBindingFromContext(req.Context()).selection.Model
 			if questionCalls == 1 {
@@ -38,6 +42,7 @@ func TestChannelDetectionManualRoundUsesLeaseAndWorkerContext(t *testing.T) {
 		}
 		latest.Samples[1] = &ChannelDetectionSample{CheckedAt: time.Now(), Pelican: "error"}
 		oldSample := *latest.Samples[1]
+		latest.Proofs = map[int64]ChannelDetectionProof{1: {SampleID: "previous-sample"}}
 		data, err := json.Marshal(latest)
 		require.NoError(t, err)
 		require.NoError(t, s.storage.Set(context.Background(), SettingKeyChannelDetectionLatest, string(data)))
@@ -48,14 +53,17 @@ func TestChannelDetectionManualRoundUsesLeaseAndWorkerContext(t *testing.T) {
 		require.NotEmpty(t, sampleID)
 		<-started
 		disconnect()
-		_, err = s.Trigger(context.Background(), 2)
+		_, err = s.Trigger(context.Background(), 1)
 		require.ErrorIs(t, err, ErrDetectionBusy)
-		s.tick(context.Background(), s.gateway)
+		s.tick(context.Background())
 		cards, err := s.AdminGroups(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, "running", cards[0].TriggerState)
-		require.Equal(t, "busy", cards[1].TriggerState)
-		require.Empty(t, cards[0].SampleID, "the previous sample predates private evidence")
+		require.Equal(t, "idle", cards[1].TriggerState)
+		_, err = s.Trigger(context.Background(), 2)
+		require.NoError(t, err)
+		synctest.Wait()
+		require.Equal(t, "previous-sample", cards[0].SampleID)
 
 		public, err := s.PublicGroups(context.Background())
 		require.NoError(t, err)
@@ -67,15 +75,142 @@ func TestChannelDetectionManualRoundUsesLeaseAndWorkerContext(t *testing.T) {
 		require.NotContains(t, string(publicJSON), "account_id")
 		close(resume)
 		synctest.Wait()
-		require.Equal(t, 7, questionCalls)
+		require.Equal(t, 1, questionCalls)
 		require.Equal(t, "gpt-6.2-sol", checkedModel)
 		cards, err = s.AdminGroups(context.Background())
 		require.NoError(t, err)
 		require.Equal(t, "no_send", cards[0].TriggerState)
 		require.True(t, oldSample.CheckedAt.Equal(cards[0].Sample.CheckedAt))
+		require.Equal(t, "previous-sample", cards[0].SampleID)
 		require.Nil(t, cards[0].Confirmation)
 		require.NoError(t, s.Stop(context.Background()))
 	})
+}
+
+type detectionShutdownCAS struct {
+	*detectionMemorySettings
+	committed  chan struct{}
+	resume     chan struct{}
+	beforeUndo func(ChannelDetectionSnapshotGuard) error
+	calls      int
+}
+
+func (m *detectionShutdownCAS) CompareAndSetSnapshot(ctx context.Context, id int64, owner string, guard ChannelDetectionSnapshotGuard, next string) (bool, error) {
+	m.calls++
+	switch m.calls {
+	case 1:
+		applied, err := m.detectionMemorySettings.CompareAndSetSnapshot(ctx, id, owner, guard, next)
+		if applied {
+			close(m.committed)
+			<-m.resume
+		}
+		return applied, err
+	case 2:
+		if err := m.beforeUndo(guard); err != nil {
+			return false, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return m.detectionMemorySettings.CompareAndSetSnapshot(ctx, id, owner, guard, next)
+}
+
+func TestChannelDetectionShutdownRetractsCommittedAdmission(t *testing.T) {
+	for _, previouslyAttempted := range []bool{true, false} {
+		name := "first_attempt"
+		if previouslyAttempted {
+			name = "prior_attempt"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx := context.Background()
+				s := newDetectionFixture(t)
+				coord := &detectionShutdownCAS{
+					detectionMemorySettings: s.storage, committed: make(chan struct{}), resume: make(chan struct{}),
+				}
+				s.coordinator = coord
+				gatewayCalls := 0
+				s.Start(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { gatewayCalls++ }))
+				synctest.Wait() // Let startup tick see the disabled plan.
+				require.NoError(t, s.Save(ctx, s.cfg))
+				_, _, latest, err := s.state(ctx, true)
+				require.NoError(t, err)
+				prior := time.Now().UTC().Add(-time.Hour)
+				if previouslyAttempted {
+					latest.AttemptedAt[1] = prior
+				}
+				latest.Samples[1] = &ChannelDetectionSample{CheckedAt: prior, Pelican: "generated", SVG: testDetectionSVG}
+				latest.Proofs = map[int64]ChannelDetectionProof{1: {SampleID: "existing"}}
+				latest.NoSend = map[int64]bool{1: true}
+				latest.RunningByGroup[2] = channelDetectionRun{GroupID: 2, Owner: "other-owner", SampleID: "other-run"}
+				raw, err := json.Marshal(latest)
+				require.NoError(t, err)
+				require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(raw)))
+
+				coord.beforeUndo = func(guard ChannelDetectionSnapshotGuard) error {
+					// An independent publication wins the snapshot CAS while
+					// the retracting worker still holds only its own lease.
+					var other channelDetectionSnapshot
+					if err := json.Unmarshal([]byte(guard.Snapshot), &other); err != nil {
+						return err
+					}
+					delete(other.RunningByGroup, 2)
+					other.Proofs[2] = ChannelDetectionProof{SampleID: "other-completed"}
+					other.Samples[2] = &ChannelDetectionSample{CheckedAt: time.Now().UTC(), Pelican: "generated", SVG: testDetectionSVG}
+					other.AttemptedAt[2] = time.Now().UTC()
+					data, err := json.Marshal(other)
+					if err != nil {
+						return err
+					}
+					return s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(data))
+				}
+				type triggerResult struct {
+					id  string
+					err error
+				}
+				triggered := make(chan triggerResult, 1)
+				go func() {
+					id, err := s.Trigger(ctx, 1)
+					triggered <- triggerResult{id, err}
+				}()
+				select {
+				case <-coord.committed:
+				case result := <-triggered:
+					t.Fatalf("trigger returned before startup CAS: %+v", result)
+				}
+				stopped := make(chan error, 1)
+				go func() { stopped <- s.Stop(ctx) }()
+				synctest.Wait()
+				require.ErrorIs(t, s.worker.Err(), context.Canceled)
+				close(coord.resume)
+
+				result := <-triggered
+				require.ErrorIs(t, result.err, ErrDetectionBusy)
+				require.Empty(t, result.id)
+				require.NoError(t, <-stopped)
+				require.Zero(t, gatewayCalls)
+				require.Equal(t, 3, coord.calls, "startup CAS plus conflicting and retried undo")
+				active, err := coord.ActiveLeases(ctx)
+				require.NoError(t, err)
+				require.Empty(t, active.Groups)
+				_, _, after, err := s.state(ctx, true)
+				require.NoError(t, err)
+				require.Empty(t, after.RunningByGroup)
+				if previouslyAttempted {
+					require.Equal(t, prior, after.AttemptedAt[1])
+				} else {
+					require.NotContains(t, after.AttemptedAt, int64(1))
+				}
+				require.True(t, after.NoSend[1])
+				require.Equal(t, latest.Samples[1], after.Samples[1])
+				require.Equal(t, latest.Proofs[1], after.Proofs[1])
+				require.Equal(t, "other-completed", after.Proofs[2].SampleID)
+				require.NotNil(t, after.Samples[2])
+				require.Contains(t, after.AttemptedAt, int64(2))
+			})
+		})
+	}
 }
 
 func TestChannelDetectionEvidenceActualHTTPResponseAndWrite(t *testing.T) {

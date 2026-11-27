@@ -87,7 +87,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	defer tx.Rollback()
 	ctx = dbent.NewTxContext(ctx, tx)
 	client := tx.Client()
-	ok, err := lockChannelDetectionState(ctx, client, "", input.Guard)
+	_, ok, err := lockChannelDetectionState(ctx, client, 0, "", input.Guard)
 	if err != nil {
 		return receipt, err
 	}
