@@ -421,7 +421,7 @@ func (s *ChannelDetection) runSample(ctx context.Context, gateway http.Handler, 
 				break
 			}
 			count := 292 + (start+i*13)%41
-			answer, err := run("fingerprint", detectionFingerprintPrompt(count, i), 2048, 40*time.Second)
+			answer, err := run("fingerprint", detectionFingerprintPrompt(count, i), 2048, 60*time.Second)
 			if errors.Is(err, errDetectionDispatch) || errors.Is(err, errDetectionBudget) {
 				return result
 			}

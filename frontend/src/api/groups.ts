@@ -11,11 +11,11 @@ import type { Group } from '@/types'
  * This returns groups based on user's permissions:
  * - Standard groups: public (non-exclusive) or explicitly allowed
  * - Subscription groups: user has active subscription
- * @returns List of available groups
+ * @returns Available groups ordered by base rate multiplier, preserving the API order for ties
  */
 export async function getAvailable(): Promise<Group[]> {
   const { data } = await apiClient.get<Group[]>('/groups/available')
-  return data
+  return data.slice().sort((a, b) => a.rate_multiplier - b.rate_multiplier)
 }
 
 /**
