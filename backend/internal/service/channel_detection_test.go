@@ -54,8 +54,9 @@ func (m *detectionMemorySettings) Set(_ context.Context, key, value string) erro
 func (m *detectionMemorySettings) TryAcquire(_ context.Context, id int64, owner string, _ time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.owners) >= ChannelDetectionMaxConcurrentGroups || m.owners[id] != "" {
-		return false, nil
+	limit, err := ChannelDetectionConcurrency(m.values[SettingKeyChannelDetectionConfig])
+	if err != nil || len(m.owners) >= limit || m.owners[id] != "" {
+		return false, err
 	}
 	if m.owners == nil {
 		m.owners = make(map[int64]string)
@@ -170,7 +171,7 @@ func newDetectionFixture(t *testing.T) *detectionFixture {
 		1: {ID: 1, Name: "First", Status: StatusActive, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6.2-sol"}}},
 		2: {ID: 2, Name: "Second", Status: StatusActive, ModelAllowlist: GroupModelAllowlist{Models: []string{"claude-sonnet-5", "*"}}},
 	}
-	cfg := ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, Groups: []ChannelDetectionSelection{
+	cfg := ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, ConcurrentGroups: new(3), Groups: []ChannelDetectionSelection{
 		{GroupID: 1, Model: "gpt-6.2-sol"},
 		{GroupID: 2, Model: "claude-sonnet-5"},
 	}}
@@ -186,7 +187,7 @@ func TestChannelDetectionValidationAndPause(t *testing.T) {
 	config := s.cfg
 	current, err := s.Config(ctx)
 	require.NoError(t, err)
-	require.Equal(t, ChannelDetectionConfig{IntervalMinutes: 60, Groups: []ChannelDetectionSelection{}}, current)
+	require.Equal(t, ChannelDetectionConfig{IntervalMinutes: 60, ConcurrentGroups: new(3), Groups: []ChannelDetectionSelection{}}, current)
 	_, err = s.PublicGroups(ctx)
 	require.ErrorIs(t, err, errDetectionDisabled)
 

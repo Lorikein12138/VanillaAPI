@@ -15,9 +15,22 @@
           </div>
           <Toggle v-model="config.enabled" :disabled="saving" aria-labelledby="detection-schedule" />
         </div>
-        <div class="max-w-xs">
-          <label for="detection-interval" class="input-label">{{ t('channelDetection.interval') }}</label>
-          <input id="detection-interval" v-model.number="config.interval_minutes" class="input" type="number" min="15" max="1440" step="1" required :disabled="saving" />
+        <div class="grid max-w-2xl gap-4 sm:grid-cols-2">
+          <div>
+            <label for="detection-interval" class="input-label">{{ t('channelDetection.interval') }}</label>
+            <input id="detection-interval" v-model.number="config.interval_minutes" class="input" type="number" min="15" max="1440" step="1" required :disabled="saving" />
+          </div>
+          <div>
+            <label for="detection-concurrency" class="input-label">{{ t('channelDetection.concurrentGroups') }}</label>
+            <Select
+              id="detection-concurrency"
+              :aria-label="t('channelDetection.concurrentGroups')"
+              :model-value="config.concurrent_groups"
+              :options="concurrencyOptions"
+              :disabled="saving"
+              @update:model-value="config.concurrent_groups = Number($event)"
+            />
+          </div>
         </div>
       </section>
 
@@ -106,6 +119,10 @@ const directoryLoading = ref(false)
 const saving = ref(false)
 const saved = ref(false)
 const saveError = ref('')
+const concurrencyOptions = Array.from({ length: 10 }, (_, index) => ({
+  value: index + 1,
+  label: String(index + 1),
+}))
 
 const rows = computed(() => {
   const selected = new Map(config.value?.groups.map(group => [group.group_id, group]))

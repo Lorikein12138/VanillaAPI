@@ -53,10 +53,11 @@ func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T)
 	editor := &channelDetectionCoordinator{db: editorDB}
 	worker := &channelDetectionCoordinator{db: workerDB}
 	guard := service.ChannelDetectionSnapshotGuard{Feature: "on"}
-	ok, err := editor.SavePlan(ctx, guard, "initial plan", "initial snapshot")
+	const initialPlan = `{"revision":"initial plan"}`
+	ok, err := editor.SavePlan(ctx, guard, initialPlan, "initial snapshot")
 	require.NoError(t, err)
 	require.True(t, ok, "first save does not require a worker lease")
-	guard.Config, guard.Snapshot = "initial plan", "initial snapshot"
+	guard.Config, guard.Snapshot = initialPlan, "initial snapshot"
 	ok, err = worker.TryAcquire(ctx, 1, "worker", time.Minute)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -77,7 +78,7 @@ func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T)
 		return config, snapshot
 	}
 	config, snapshot := state()
-	require.Equal(t, "initial plan", config)
+	require.Equal(t, initialPlan, config)
 	require.Equal(t, "worker finished", snapshot)
 	guard.Snapshot = snapshot
 
@@ -87,7 +88,7 @@ func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T)
 	require.Error(t, err)
 	require.False(t, ok)
 	config, snapshot = state()
-	require.Equal(t, "initial plan", config)
+	require.Equal(t, initialPlan, config)
 	require.Equal(t, "worker finished", snapshot)
 
 	ok, err = editor.SavePlan(ctx, guard, "next plan", "worker finished retained")
@@ -114,7 +115,7 @@ func TestChannelDetectionPostgresFencesExpiredWriter(t *testing.T) {
 			value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`)
 	require.NoError(t, err)
-	guard := service.ChannelDetectionSnapshotGuard{Feature: "enable-1", Config: "config-1"}
+	guard := service.ChannelDetectionSnapshotGuard{Feature: "enable-1", Config: `{"revision":"config-1"}`}
 	_, err = firstDB.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES ($1, $2), ($3, $4)`,
 		service.SettingKeyChannelDetectionFeature, guard.Feature, service.SettingKeyChannelDetectionConfig, guard.Config)
 	require.NoError(t, err)
@@ -164,12 +165,12 @@ func TestChannelDetectionPostgresFencesExpiredWriter(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, wrote)
 	guard.Snapshot = reservationB
-	_, err = firstDB.ExecContext(ctx, `UPDATE settings SET value = 'config-2' WHERE key = $1`, service.SettingKeyChannelDetectionConfig)
+	_, err = firstDB.ExecContext(ctx, `UPDATE settings SET value = '{"revision":"config-2"}' WHERE key = $1`, service.SettingKeyChannelDetectionConfig)
 	require.NoError(t, err)
 	wrote, err = second.CompareAndSetSnapshot(ctx, 1, "instance-B", guard, "stale config")
 	require.NoError(t, err)
 	require.False(t, wrote)
-	guard.Config = "config-2"
+	guard.Config = `{"revision":"config-2"}`
 	_, err = firstDB.ExecContext(ctx, `UPDATE settings SET value = '' WHERE key = $1`, service.SettingKeyChannelDetectionFeature)
 	require.NoError(t, err)
 	wrote, err = second.CompareAndSetSnapshot(ctx, 1, "instance-B", guard, "feature disabled")
@@ -187,12 +188,12 @@ func TestChannelDetectionPostgresSendBudgetSurvivesLeaseAndConfig(t *testing.T) 
 	defer cancel()
 	_, err := firstDB.ExecContext(ctx, `
 		CREATE TABLE settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','old-config');
+		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','{"revision":"old-config"}');
 	`)
 	require.NoError(t, err)
 	first := &channelDetectionCoordinator{db: firstDB}
 	second := &channelDetectionCoordinator{db: secondDB}
-	old := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "old-config"}
+	old := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: `{"revision":"old-config"}`}
 	reserve := func(coordinator service.ChannelDetectionCoordinator, owner string, guard service.ChannelDetectionSnapshotGuard, want bool) {
 		t.Helper()
 		ok, err := coordinator.ReserveSend(ctx, owner, guard, 1, 0, 2)
@@ -209,9 +210,9 @@ func TestChannelDetectionPostgresSendBudgetSurvivesLeaseAndConfig(t *testing.T) 
 	reserve(second, "worker-two", old, false)
 	reserve(first, "worker-one", old, true)
 	require.NoError(t, first.Release(ctx, 1, "worker-one"))
-	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value='new-config' WHERE key='channel_detection_config'`)
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value='{"revision":"new-config"}' WHERE key='channel_detection_config'`)
 	require.NoError(t, err)
-	next := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "new-config"}
+	next := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: `{"revision":"new-config"}`}
 	acquire(second, "worker-two")
 	reserve(first, "worker-one", old, false)
 	reserve(second, "worker-two", old, false)
@@ -231,10 +232,10 @@ func TestChannelDetectionPostgresGroupRPMSharedAcrossLeases(t *testing.T) {
 	defer cancel()
 	_, err := firstDB.ExecContext(ctx, `
 		CREATE TABLE settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','old-config');
+		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','{"revision":"old-config"}');
 	`)
 	require.NoError(t, err)
-	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "old-config"}
+	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: `{"revision":"old-config"}`}
 	first := &channelDetectionCoordinator{db: firstDB}
 	second := &channelDetectionCoordinator{db: secondDB}
 	acquired, err := first.TryAcquire(ctx, 7, "first", time.Minute)
@@ -245,9 +246,9 @@ func TestChannelDetectionPostgresGroupRPMSharedAcrossLeases(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, first.Release(ctx, 7, "first"))
 
-	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value='new-config' WHERE key='channel_detection_config'`)
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value='{"revision":"new-config"}' WHERE key='channel_detection_config'`)
 	require.NoError(t, err)
-	guard.Config = "new-config"
+	guard.Config = `{"revision":"new-config"}`
 	acquired, err = second.TryAcquire(ctx, 7, "second", time.Minute)
 	require.NoError(t, err)
 	require.True(t, acquired)

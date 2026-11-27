@@ -17,10 +17,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type detectionRouteSettings struct{ service.SettingRepository }
+type detectionRouteSettings struct {
+	service.SettingRepository
+	values map[string]string
+}
 
-func (d detectionRouteSettings) GetMultiple(context.Context, []string) (map[string]string, error) {
-	return map[string]string{}, nil
+func (d detectionRouteSettings) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		values[key] = d.values[key]
+	}
+	return values, nil
 }
 
 func (d detectionRouteSettings) GetValue(_ context.Context, key string) (string, error) {
@@ -133,6 +140,29 @@ func TestChannelDetectionAnonymousRoutesNoStoreAndRateLimit(t *testing.T) {
 	limited := request("/channel-detection", http.StatusTooManyRequests)
 	require.Equal(t, "no-store", limited.Header().Get("Cache-Control"))
 	request("/admin/channel-detection", http.StatusUnauthorized)
+}
+
+func TestChannelDetectionAdminConcurrencyConfig(t *testing.T) {
+	repo := detectionRouteSettings{values: map[string]string{
+		service.SettingKeyChannelDetectionFeature: "on",
+		service.SettingKeyChannelDetectionConfig:  `{"enabled":false,"interval_minutes":60,"groups":[]}`,
+	}}
+	router := gin.New()
+	v1 := router.Group("/api/v1")
+	RegisterChannelDetectionRoutes(v1, v1.Group("/admin"), service.NewChannelDetection(repo, nil, nil, nil), nil)
+	request := func(method, body string, status int) string {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(method, "/api/v1/admin/channel-detection", strings.NewReader(body)))
+		require.Equal(t, status, recorder.Code, recorder.Body.String())
+		return recorder.Body.String()
+	}
+	require.Contains(t, request(http.MethodGet, "", http.StatusOK), `"concurrent_groups":3`)
+	request(http.MethodPut, `{"enabled":false,"interval_minutes":60,"groups":[]}`, http.StatusOK)
+	request(http.MethodPut, `{"enabled":false,"interval_minutes":60,"groups":[],"concurrent_groups":3}`, http.StatusOK)
+	for _, value := range []string{"0", "-1", "11", "1.5", `"3"`, "null"} {
+		request(http.MethodPut, `{"interval_minutes":60,"concurrent_groups":`+value+`}`, http.StatusBadRequest)
+	}
 }
 
 func TestChannelDetectionDoesNotAuthenticatePublicOrUnmarkedRequests(t *testing.T) {
