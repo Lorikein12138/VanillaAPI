@@ -69,6 +69,8 @@ type Account struct {
 	OverloadUntil *time.Time `json:"overload_until,omitempty"`
 	// TempUnschedulableUntil holds the value of the "temp_unschedulable_until" field.
 	TempUnschedulableUntil *time.Time `json:"temp_unschedulable_until,omitempty"`
+	// Minimum temporary suspension deadline set by an audited manual action
+	TempUnschedulableProtectedUntil *time.Time `json:"-"`
 	// TempUnschedulableReason holds the value of the "temp_unschedulable_reason" field.
 	TempUnschedulableReason *string `json:"temp_unschedulable_reason,omitempty"`
 	// SessionWindowStart holds the value of the "session_window_start" field.
@@ -179,7 +181,7 @@ func (*Account) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case account.FieldName, account.FieldNotes, account.FieldPlatform, account.FieldType, account.FieldStatus, account.FieldErrorMessage, account.FieldTempUnschedulableReason, account.FieldSessionWindowStatus, account.FieldQuotaDimension:
 			values[i] = new(sql.NullString)
-		case account.FieldCreatedAt, account.FieldUpdatedAt, account.FieldDeletedAt, account.FieldLastUsedAt, account.FieldExpiresAt, account.FieldRateLimitedAt, account.FieldRateLimitResetAt, account.FieldOverloadUntil, account.FieldTempUnschedulableUntil, account.FieldSessionWindowStart, account.FieldSessionWindowEnd:
+		case account.FieldCreatedAt, account.FieldUpdatedAt, account.FieldDeletedAt, account.FieldLastUsedAt, account.FieldExpiresAt, account.FieldRateLimitedAt, account.FieldRateLimitResetAt, account.FieldOverloadUntil, account.FieldTempUnschedulableUntil, account.FieldTempUnschedulableProtectedUntil, account.FieldSessionWindowStart, account.FieldSessionWindowEnd:
 			values[i] = new(sql.NullTime)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -367,6 +369,13 @@ func (_m *Account) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.TempUnschedulableUntil = new(time.Time)
 				*_m.TempUnschedulableUntil = value.Time
+			}
+		case account.FieldTempUnschedulableProtectedUntil:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field temp_unschedulable_protected_until", values[i])
+			} else if value.Valid {
+				_m.TempUnschedulableProtectedUntil = new(time.Time)
+				*_m.TempUnschedulableProtectedUntil = value.Time
 			}
 		case account.FieldTempUnschedulableReason:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -571,6 +580,11 @@ func (_m *Account) String() string {
 	builder.WriteString(", ")
 	if v := _m.TempUnschedulableUntil; v != nil {
 		builder.WriteString("temp_unschedulable_until=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.TempUnschedulableProtectedUntil; v != nil {
+		builder.WriteString("temp_unschedulable_protected_until=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")

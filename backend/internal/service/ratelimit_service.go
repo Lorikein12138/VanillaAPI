@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -2260,18 +2261,27 @@ func (s *RateLimitService) samplePassiveUsageFromHeaders(ctx context.Context, ac
 
 // ClearRateLimit 清除账号的限流状态
 func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) error {
+	_, err := s.clearRateLimit(ctx, accountID)
+	return err
+}
+
+func (s *RateLimitService) clearRateLimit(ctx context.Context, accountID int64) (tempProtected bool, err error) {
 	if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
-		return err
+		return false, err
 	}
 	if err := s.accountRepo.ClearAntigravityQuotaScopes(ctx, accountID); err != nil {
-		return err
+		return false, err
 	}
 	if err := s.accountRepo.ClearModelRateLimits(ctx, accountID); err != nil {
-		return err
+		return false, err
 	}
 	// 清除限流时一并清理临时不可调度状态，避免周限/窗口重置后仍被本地临时状态阻断。
 	if err := s.accountRepo.ClearTempUnschedulable(ctx, accountID); err != nil {
-		return err
+		if errors.Is(err, ErrTempUnschedulableProtected) {
+			s.ResetOpenAI403Counter(ctx, accountID)
+			return true, nil
+		}
+		return false, err
 	}
 	if s.tempUnschedCache != nil {
 		if err := s.tempUnschedCache.DeleteTempUnsched(ctx, accountID); err != nil {
@@ -2280,7 +2290,7 @@ func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) 
 	}
 	s.ResetOpenAI403Counter(ctx, accountID)
 	s.notifyAccountSchedulingBlockCleared(accountID)
-	return nil
+	return false, nil
 }
 
 func (s *RateLimitService) ResetOpenAI403Counter(ctx context.Context, accountID int64) {
@@ -2312,15 +2322,18 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 		}
 	}
 
-	if hasRecoverableRuntimeState(account) {
-		if err := s.ClearRateLimit(ctx, accountID); err != nil {
+	hasRateLimits := hasRecoverableRateLimitState(account)
+	var tempProtected bool
+	if hasRateLimits || account.TempUnschedulableUntil != nil {
+		tempProtected, err = s.clearRateLimit(ctx, accountID)
+		if err != nil {
 			return nil, err
 		}
-		result.ClearedRateLimit = true
+		result.ClearedRateLimit = !tempProtected || hasRateLimits
 	}
 	if result.ClearedError || result.ClearedRateLimit {
 		s.ResetOpenAI403Counter(ctx, accountID)
-		if result.ClearedError && !result.ClearedRateLimit {
+		if result.ClearedError && !result.ClearedRateLimit && !tempProtected {
 			s.notifyAccountSchedulingBlockCleared(accountID)
 		}
 	}
@@ -2351,11 +2364,11 @@ func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID
 	return nil
 }
 
-func hasRecoverableRuntimeState(account *Account) bool {
+func hasRecoverableRateLimitState(account *Account) bool {
 	if account == nil {
 		return false
 	}
-	if account.RateLimitedAt != nil || account.RateLimitResetAt != nil || account.OverloadUntil != nil || account.TempUnschedulableUntil != nil {
+	if account.RateLimitedAt != nil || account.RateLimitResetAt != nil || account.OverloadUntil != nil {
 		return true
 	}
 	if len(account.Extra) == 0 {

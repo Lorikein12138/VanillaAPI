@@ -41,6 +41,69 @@ func openDetectionTestDatabases(t *testing.T) (*sql.DB, *sql.DB) {
 	return open(), open()
 }
 
+func TestChannelDetectionPostgresPlanCASPreservesConcurrentPublish(t *testing.T) {
+	editorDB, workerDB := openDetectionTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := editorDB.ExecContext(ctx, `
+		CREATE TABLE settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL);
+		INSERT INTO settings VALUES ('channel_detection_enabled','on',now());
+	`)
+	require.NoError(t, err)
+	editor := &channelDetectionCoordinator{db: editorDB}
+	worker := &channelDetectionCoordinator{db: workerDB}
+	guard := service.ChannelDetectionSnapshotGuard{Feature: "on"}
+	ok, err := editor.SavePlan(ctx, guard, "initial plan", "initial snapshot")
+	require.NoError(t, err)
+	require.True(t, ok, "first save does not require a worker lease")
+	guard.Config, guard.Snapshot = "initial plan", "initial snapshot"
+	ok, err = worker.TryAcquire(ctx, "worker", time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	attempted := guard
+	ok, err = worker.CompareAndSetSnapshot(ctx, "worker", guard, "worker finished")
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = editor.SavePlan(ctx, attempted, "next plan", "stale retained snapshot")
+	require.NoError(t, err)
+	require.False(t, ok)
+	state := func() (string, string) {
+		t.Helper()
+		var config, snapshot string
+		require.NoError(t, editorDB.QueryRowContext(ctx, `
+			SELECT a.value,b.value FROM settings a,settings b WHERE a.key=$1 AND b.key=$2`,
+			service.SettingKeyChannelDetectionConfig, service.SettingKeyChannelDetectionLatest).Scan(&config, &snapshot))
+		return config, snapshot
+	}
+	config, snapshot := state()
+	require.Equal(t, "initial plan", config)
+	require.Equal(t, "worker finished", snapshot)
+	guard.Snapshot = snapshot
+
+	_, err = editorDB.ExecContext(ctx, `ALTER TABLE settings ADD CHECK (value <> 'bad snapshot')`)
+	require.NoError(t, err)
+	ok, err = editor.SavePlan(ctx, guard, "next plan", "bad snapshot")
+	require.Error(t, err)
+	require.False(t, ok)
+	config, snapshot = state()
+	require.Equal(t, "initial plan", config)
+	require.Equal(t, "worker finished", snapshot)
+
+	ok, err = editor.SavePlan(ctx, guard, "next plan", "worker finished retained")
+	require.NoError(t, err)
+	require.True(t, ok)
+	config, snapshot = state()
+	require.Equal(t, "next plan", config)
+	require.Equal(t, "worker finished retained", snapshot)
+	ok, err = worker.CompareAndSetSnapshot(ctx, "worker", guard, "old worker must not win")
+	require.NoError(t, err)
+	require.False(t, ok)
+	ok, err = editor.SavePlan(ctx, guard, "stale competing edit", "stale")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
 func TestChannelDetectionPostgresFencesExpiredWriter(t *testing.T) {
 	firstDB, secondDB := openDetectionTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -56,8 +119,8 @@ func TestChannelDetectionPostgresFencesExpiredWriter(t *testing.T) {
 		service.SettingKeyChannelDetectionFeature, guard.Feature, service.SettingKeyChannelDetectionConfig, guard.Config)
 	require.NoError(t, err)
 
-	first := NewChannelDetectionCoordinator(firstDB)
-	second := NewChannelDetectionCoordinator(secondDB)
+	first := &channelDetectionCoordinator{db: firstDB}
+	second := &channelDetectionCoordinator{db: secondDB}
 	acquired, err := first.TryAcquire(ctx, "instance-A", time.Minute)
 	require.NoError(t, err)
 	require.True(t, acquired)
@@ -124,8 +187,8 @@ func TestChannelDetectionPostgresSendBudgetSurvivesLeaseAndConfig(t *testing.T) 
 		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','old-config');
 	`)
 	require.NoError(t, err)
-	first := NewChannelDetectionCoordinator(firstDB)
-	second := NewChannelDetectionCoordinator(secondDB)
+	first := &channelDetectionCoordinator{db: firstDB}
+	second := &channelDetectionCoordinator{db: secondDB}
 	old := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "old-config"}
 	reserve := func(coordinator service.ChannelDetectionCoordinator, owner string, guard service.ChannelDetectionSnapshotGuard, want bool) {
 		t.Helper()
@@ -169,8 +232,8 @@ func TestChannelDetectionPostgresGroupRPMSharedAcrossLeases(t *testing.T) {
 	`)
 	require.NoError(t, err)
 	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "old-config"}
-	first := NewChannelDetectionCoordinator(firstDB)
-	second := NewChannelDetectionCoordinator(secondDB)
+	first := &channelDetectionCoordinator{db: firstDB}
+	second := &channelDetectionCoordinator{db: secondDB}
 	acquired, err := first.TryAcquire(ctx, "first", time.Minute)
 	require.NoError(t, err)
 	require.True(t, acquired)

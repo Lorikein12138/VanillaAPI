@@ -98,6 +98,35 @@ func (m *detectionMemorySettings) CompareAndSetSnapshot(_ context.Context, owner
 	return true, nil
 }
 
+func (m *detectionMemorySettings) SavePlan(_ context.Context, expected ChannelDetectionSnapshotGuard, nextConfig, nextSnapshot string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.values[SettingKeyChannelDetectionFeature] != expected.Feature ||
+		m.values[SettingKeyChannelDetectionConfig] != expected.Config ||
+		m.values[SettingKeyChannelDetectionLatest] != expected.Snapshot {
+		return false, nil
+	}
+	m.values[SettingKeyChannelDetectionConfig] = nextConfig
+	m.values[SettingKeyChannelDetectionLatest] = nextSnapshot
+	return true, nil
+}
+
+func (m *detectionMemorySettings) PublishSnapshot(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string, groupID int64) (bool, error) {
+	var snapshot channelDetectionSnapshot
+	if err := json.Unmarshal([]byte(next), &snapshot); err != nil {
+		return false, err
+	}
+	proof := snapshot.Proofs[groupID]
+	now := time.Now().UTC()
+	proof.CompletedAt = &now
+	snapshot.Proofs[groupID] = proof
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return false, err
+	}
+	return m.CompareAndSetSnapshot(ctx, owner, expected, string(encoded))
+}
+
 type detectionTestGroups map[int64]*Group
 
 func (g detectionTestGroups) GetGroup(_ context.Context, id int64) (*Group, error) {
@@ -330,13 +359,15 @@ func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, groups)
 	s.groupRows[1].ModelAllowlist.Models = []string{"gpt-6.2-sol"}
-	require.NoError(t, s.settings.Set(ctx, SettingKeyChannelDetectionFeature, ""))
+	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionFeature, ""))
 	_, err = s.PublicGroups(ctx)
 	require.ErrorIs(t, err, errDetectionDisabled)
-	require.NoError(t, s.settings.Set(ctx, SettingKeyChannelDetectionFeature, "enable-two"))
+	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionFeature, "enable-two"))
 	groups, err = s.PublicGroups(ctx)
 	require.NoError(t, err)
-	require.Equal(t, []ChannelDetectionPublicGroup{{Name: "First", Model: "gpt-6.2-sol"}}, groups)
+	require.Len(t, groups, 1)
+	require.NotNil(t, groups[0].Sample)
+	require.Equal(t, "generated", groups[0].Sample.Pelican)
 }
 
 func TestChannelDetectionPrivateScopeAndWireBudget(t *testing.T) {

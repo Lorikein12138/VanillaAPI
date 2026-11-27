@@ -306,8 +306,11 @@ func (s *httpUpstreamService) upstreamDrainTimeout() time.Duration {
 // caller's context (which may be detached for billing or reused for retries).
 func doUpstreamRequest(client *http.Client, req *http.Request, accountID int64, drainTimeout time.Duration) (*http.Response, error) {
 	probe := service.IsChannelDetectionProbe(req.Context())
+	var settle func(*http.Response)
 	if probe {
-		if err := service.ReserveChannelDetectionSend(req, accountID); err != nil {
+		var err error
+		req, settle, err = service.PrepareChannelDetectionSend(req, accountID)
+		if err != nil {
 			return nil, err
 		}
 		bounded := *client
@@ -326,6 +329,9 @@ func doUpstreamRequest(client *http.Client, req *http.Request, accountID int64, 
 	}
 	ctx, cancel := pkghttputil.NewUpstreamAttemptContext(req.Context(), drainTimeout)
 	resp, err := servertiming.Do(client, req.WithContext(ctx))
+	if settle != nil {
+		settle(resp)
+	}
 	if err != nil {
 		cancel()
 		return resp, err

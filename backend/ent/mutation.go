@@ -2282,60 +2282,61 @@ func (m *APIKeyMutation) ResetEdge(name string) error {
 // AccountMutation represents an operation that mutates the Account nodes in the graph.
 type AccountMutation struct {
 	config
-	op                          Op
-	typ                         string
-	id                          *int64
-	created_at                  *time.Time
-	updated_at                  *time.Time
-	deleted_at                  *time.Time
-	name                        *string
-	notes                       *string
-	platform                    *string
-	_type                       *string
-	credentials                 *map[string]interface{}
-	extra                       *map[string]interface{}
-	proxy_fallback_origin_id    *int64
-	addproxy_fallback_origin_id *int64
-	concurrency                 *int
-	addconcurrency              *int
-	load_factor                 *int
-	addload_factor              *int
-	priority                    *int
-	addpriority                 *int
-	rate_multiplier             *float64
-	addrate_multiplier          *float64
-	status                      *string
-	error_message               *string
-	last_used_at                *time.Time
-	expires_at                  *time.Time
-	auto_pause_on_expired       *bool
-	schedulable                 *bool
-	rate_limited_at             *time.Time
-	rate_limit_reset_at         *time.Time
-	overload_until              *time.Time
-	temp_unschedulable_until    *time.Time
-	temp_unschedulable_reason   *string
-	session_window_start        *time.Time
-	session_window_end          *time.Time
-	session_window_status       *string
-	quota_dimension             *account.QuotaDimension
-	clearedFields               map[string]struct{}
-	groups                      map[int64]struct{}
-	removedgroups               map[int64]struct{}
-	clearedgroups               bool
-	proxy                       *int64
-	clearedproxy                bool
-	parent                      *int64
-	clearedparent               bool
-	children                    map[int64]struct{}
-	removedchildren             map[int64]struct{}
-	clearedchildren             bool
-	usage_logs                  map[int64]struct{}
-	removedusage_logs           map[int64]struct{}
-	clearedusage_logs           bool
-	done                        bool
-	oldValue                    func(context.Context) (*Account, error)
-	predicates                  []predicate.Account
+	op                                 Op
+	typ                                string
+	id                                 *int64
+	created_at                         *time.Time
+	updated_at                         *time.Time
+	deleted_at                         *time.Time
+	name                               *string
+	notes                              *string
+	platform                           *string
+	_type                              *string
+	credentials                        *map[string]interface{}
+	extra                              *map[string]interface{}
+	proxy_fallback_origin_id           *int64
+	addproxy_fallback_origin_id        *int64
+	concurrency                        *int
+	addconcurrency                     *int
+	load_factor                        *int
+	addload_factor                     *int
+	priority                           *int
+	addpriority                        *int
+	rate_multiplier                    *float64
+	addrate_multiplier                 *float64
+	status                             *string
+	error_message                      *string
+	last_used_at                       *time.Time
+	expires_at                         *time.Time
+	auto_pause_on_expired              *bool
+	schedulable                        *bool
+	rate_limited_at                    *time.Time
+	rate_limit_reset_at                *time.Time
+	overload_until                     *time.Time
+	temp_unschedulable_until           *time.Time
+	temp_unschedulable_protected_until *time.Time
+	temp_unschedulable_reason          *string
+	session_window_start               *time.Time
+	session_window_end                 *time.Time
+	session_window_status              *string
+	quota_dimension                    *account.QuotaDimension
+	clearedFields                      map[string]struct{}
+	groups                             map[int64]struct{}
+	removedgroups                      map[int64]struct{}
+	clearedgroups                      bool
+	proxy                              *int64
+	clearedproxy                       bool
+	parent                             *int64
+	clearedparent                      bool
+	children                           map[int64]struct{}
+	removedchildren                    map[int64]struct{}
+	clearedchildren                    bool
+	usage_logs                         map[int64]struct{}
+	removedusage_logs                  map[int64]struct{}
+	clearedusage_logs                  bool
+	done                               bool
+	oldValue                           func(context.Context) (*Account, error)
+	predicates                         []predicate.Account
 }
 
 var _ ent.Mutation = (*AccountMutation)(nil)
@@ -3594,6 +3595,55 @@ func (m *AccountMutation) ResetTempUnschedulableUntil() {
 	delete(m.clearedFields, account.FieldTempUnschedulableUntil)
 }
 
+// SetTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field.
+func (m *AccountMutation) SetTempUnschedulableProtectedUntil(t time.Time) {
+	m.temp_unschedulable_protected_until = &t
+}
+
+// TempUnschedulableProtectedUntil returns the value of the "temp_unschedulable_protected_until" field in the mutation.
+func (m *AccountMutation) TempUnschedulableProtectedUntil() (r time.Time, exists bool) {
+	v := m.temp_unschedulable_protected_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTempUnschedulableProtectedUntil returns the old "temp_unschedulable_protected_until" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldTempUnschedulableProtectedUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTempUnschedulableProtectedUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTempUnschedulableProtectedUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTempUnschedulableProtectedUntil: %w", err)
+	}
+	return oldValue.TempUnschedulableProtectedUntil, nil
+}
+
+// ClearTempUnschedulableProtectedUntil clears the value of the "temp_unschedulable_protected_until" field.
+func (m *AccountMutation) ClearTempUnschedulableProtectedUntil() {
+	m.temp_unschedulable_protected_until = nil
+	m.clearedFields[account.FieldTempUnschedulableProtectedUntil] = struct{}{}
+}
+
+// TempUnschedulableProtectedUntilCleared returns if the "temp_unschedulable_protected_until" field was cleared in this mutation.
+func (m *AccountMutation) TempUnschedulableProtectedUntilCleared() bool {
+	_, ok := m.clearedFields[account.FieldTempUnschedulableProtectedUntil]
+	return ok
+}
+
+// ResetTempUnschedulableProtectedUntil resets all changes to the "temp_unschedulable_protected_until" field.
+func (m *AccountMutation) ResetTempUnschedulableProtectedUntil() {
+	m.temp_unschedulable_protected_until = nil
+	delete(m.clearedFields, account.FieldTempUnschedulableProtectedUntil)
+}
+
 // SetTempUnschedulableReason sets the "temp_unschedulable_reason" field.
 func (m *AccountMutation) SetTempUnschedulableReason(s string) {
 	m.temp_unschedulable_reason = &s
@@ -4138,7 +4188,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 31)
+	fields := make([]string, 0, 32)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4213,6 +4263,9 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.temp_unschedulable_until != nil {
 		fields = append(fields, account.FieldTempUnschedulableUntil)
+	}
+	if m.temp_unschedulable_protected_until != nil {
+		fields = append(fields, account.FieldTempUnschedulableProtectedUntil)
 	}
 	if m.temp_unschedulable_reason != nil {
 		fields = append(fields, account.FieldTempUnschedulableReason)
@@ -4290,6 +4343,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.OverloadUntil()
 	case account.FieldTempUnschedulableUntil:
 		return m.TempUnschedulableUntil()
+	case account.FieldTempUnschedulableProtectedUntil:
+		return m.TempUnschedulableProtectedUntil()
 	case account.FieldTempUnschedulableReason:
 		return m.TempUnschedulableReason()
 	case account.FieldSessionWindowStart:
@@ -4361,6 +4416,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldOverloadUntil(ctx)
 	case account.FieldTempUnschedulableUntil:
 		return m.OldTempUnschedulableUntil(ctx)
+	case account.FieldTempUnschedulableProtectedUntil:
+		return m.OldTempUnschedulableProtectedUntil(ctx)
 	case account.FieldTempUnschedulableReason:
 		return m.OldTempUnschedulableReason(ctx)
 	case account.FieldSessionWindowStart:
@@ -4557,6 +4614,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetTempUnschedulableUntil(v)
 		return nil
+	case account.FieldTempUnschedulableProtectedUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTempUnschedulableProtectedUntil(v)
+		return nil
 	case account.FieldTempUnschedulableReason:
 		v, ok := value.(string)
 		if !ok {
@@ -4728,6 +4792,9 @@ func (m *AccountMutation) ClearedFields() []string {
 	if m.FieldCleared(account.FieldTempUnschedulableUntil) {
 		fields = append(fields, account.FieldTempUnschedulableUntil)
 	}
+	if m.FieldCleared(account.FieldTempUnschedulableProtectedUntil) {
+		fields = append(fields, account.FieldTempUnschedulableProtectedUntil)
+	}
 	if m.FieldCleared(account.FieldTempUnschedulableReason) {
 		fields = append(fields, account.FieldTempUnschedulableReason)
 	}
@@ -4792,6 +4859,9 @@ func (m *AccountMutation) ClearField(name string) error {
 		return nil
 	case account.FieldTempUnschedulableUntil:
 		m.ClearTempUnschedulableUntil()
+		return nil
+	case account.FieldTempUnschedulableProtectedUntil:
+		m.ClearTempUnschedulableProtectedUntil()
 		return nil
 	case account.FieldTempUnschedulableReason:
 		m.ClearTempUnschedulableReason()
@@ -4890,6 +4960,9 @@ func (m *AccountMutation) ResetField(name string) error {
 		return nil
 	case account.FieldTempUnschedulableUntil:
 		m.ResetTempUnschedulableUntil()
+		return nil
+	case account.FieldTempUnschedulableProtectedUntil:
+		m.ResetTempUnschedulableProtectedUntil()
 		return nil
 	case account.FieldTempUnschedulableReason:
 		m.ResetTempUnschedulableReason()

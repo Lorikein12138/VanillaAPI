@@ -12,15 +12,17 @@ import (
 )
 
 const (
-	baselineV0223UltrafastMultiplierMigration = "252_channel_pricing_ultrafast_multiplier.sql"
-	baselineV0223MigrationCount               = baselineV0222MigrationCount + 1
+	baselineV0223UltrafastMultiplierMigration   = "252_channel_pricing_ultrafast_multiplier.sql"
+	baselineV0223MigrationCount                 = baselineV0222MigrationCount + 1
+	accountTempUnschedulableProtectionMigration = "253_account_temp_unschedulable_protection.sql"
+	currentMigrationCount                       = baselineV0223MigrationCount + 1
 )
 
 func TestBaselineV0223MigrationIdentity(t *testing.T) {
 	names, err := fs.Glob(FS, "*.sql")
 	require.NoError(t, err)
-	require.Len(t, names, baselineV0223MigrationCount)
-	require.Equal(t, baselineV0223UltrafastMultiplierMigration, names[len(names)-1])
+	require.Len(t, names, currentMigrationCount)
+	require.Equal(t, []string{baselineV0223UltrafastMultiplierMigration, accountTempUnschedulableProtectionMigration}, names[baselineV0223MigrationCount-1:])
 	data, err := FS.ReadFile(baselineV0223UltrafastMultiplierMigration)
 	require.NoError(t, err)
 	sum := sha256.Sum256(data)

@@ -170,6 +170,11 @@ func TempUnschedulableUntil(v time.Time) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableUntil, v))
 }
 
+// TempUnschedulableProtectedUntil applies equality check predicate on the "temp_unschedulable_protected_until" field. It's identical to TempUnschedulableProtectedUntilEQ.
+func TempUnschedulableProtectedUntil(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableProtectedUntil, v))
+}
+
 // TempUnschedulableReason applies equality check predicate on the "temp_unschedulable_reason" field. It's identical to TempUnschedulableReasonEQ.
 func TempUnschedulableReason(v string) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableReason, v))
@@ -1303,6 +1308,56 @@ func TempUnschedulableUntilIsNil() predicate.Account {
 // TempUnschedulableUntilNotNil applies the NotNil predicate on the "temp_unschedulable_until" field.
 func TempUnschedulableUntilNotNil() predicate.Account {
 	return predicate.Account(sql.FieldNotNull(FieldTempUnschedulableUntil))
+}
+
+// TempUnschedulableProtectedUntilEQ applies the EQ predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilEQ(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableProtectedUntil, v))
+}
+
+// TempUnschedulableProtectedUntilNEQ applies the NEQ predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilNEQ(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldTempUnschedulableProtectedUntil, v))
+}
+
+// TempUnschedulableProtectedUntilIn applies the In predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilIn(vs ...time.Time) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldTempUnschedulableProtectedUntil, vs...))
+}
+
+// TempUnschedulableProtectedUntilNotIn applies the NotIn predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilNotIn(vs ...time.Time) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldTempUnschedulableProtectedUntil, vs...))
+}
+
+// TempUnschedulableProtectedUntilGT applies the GT predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilGT(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldGT(FieldTempUnschedulableProtectedUntil, v))
+}
+
+// TempUnschedulableProtectedUntilGTE applies the GTE predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilGTE(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldGTE(FieldTempUnschedulableProtectedUntil, v))
+}
+
+// TempUnschedulableProtectedUntilLT applies the LT predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilLT(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldLT(FieldTempUnschedulableProtectedUntil, v))
+}
+
+// TempUnschedulableProtectedUntilLTE applies the LTE predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilLTE(v time.Time) predicate.Account {
+	return predicate.Account(sql.FieldLTE(FieldTempUnschedulableProtectedUntil, v))
+}
+
+// TempUnschedulableProtectedUntilIsNil applies the IsNil predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilIsNil() predicate.Account {
+	return predicate.Account(sql.FieldIsNull(FieldTempUnschedulableProtectedUntil))
+}
+
+// TempUnschedulableProtectedUntilNotNil applies the NotNil predicate on the "temp_unschedulable_protected_until" field.
+func TempUnschedulableProtectedUntilNotNil() predicate.Account {
+	return predicate.Account(sql.FieldNotNull(FieldTempUnschedulableProtectedUntil))
 }
 
 // TempUnschedulableReasonEQ applies the EQ predicate on the "temp_unschedulable_reason" field.

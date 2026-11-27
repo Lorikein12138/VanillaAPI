@@ -335,6 +335,20 @@ func (_c *AccountCreate) SetNillableTempUnschedulableUntil(v *time.Time) *Accoun
 	return _c
 }
 
+// SetTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field.
+func (_c *AccountCreate) SetTempUnschedulableProtectedUntil(v time.Time) *AccountCreate {
+	_c.mutation.SetTempUnschedulableProtectedUntil(v)
+	return _c
+}
+
+// SetNillableTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableTempUnschedulableProtectedUntil(v *time.Time) *AccountCreate {
+	if v != nil {
+		_c.SetTempUnschedulableProtectedUntil(*v)
+	}
+	return _c
+}
+
 // SetTempUnschedulableReason sets the "temp_unschedulable_reason" field.
 func (_c *AccountCreate) SetTempUnschedulableReason(v string) *AccountCreate {
 	_c.mutation.SetTempUnschedulableReason(v)
@@ -780,6 +794,10 @@ func (_c *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.TempUnschedulableUntil(); ok {
 		_spec.SetField(account.FieldTempUnschedulableUntil, field.TypeTime, value)
 		_node.TempUnschedulableUntil = &value
+	}
+	if value, ok := _c.mutation.TempUnschedulableProtectedUntil(); ok {
+		_spec.SetField(account.FieldTempUnschedulableProtectedUntil, field.TypeTime, value)
+		_node.TempUnschedulableProtectedUntil = &value
 	}
 	if value, ok := _c.mutation.TempUnschedulableReason(); ok {
 		_spec.SetField(account.FieldTempUnschedulableReason, field.TypeString, value)
@@ -1326,6 +1344,24 @@ func (u *AccountUpsert) UpdateTempUnschedulableUntil() *AccountUpsert {
 // ClearTempUnschedulableUntil clears the value of the "temp_unschedulable_until" field.
 func (u *AccountUpsert) ClearTempUnschedulableUntil() *AccountUpsert {
 	u.SetNull(account.FieldTempUnschedulableUntil)
+	return u
+}
+
+// SetTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field.
+func (u *AccountUpsert) SetTempUnschedulableProtectedUntil(v time.Time) *AccountUpsert {
+	u.Set(account.FieldTempUnschedulableProtectedUntil, v)
+	return u
+}
+
+// UpdateTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateTempUnschedulableProtectedUntil() *AccountUpsert {
+	u.SetExcluded(account.FieldTempUnschedulableProtectedUntil)
+	return u
+}
+
+// ClearTempUnschedulableProtectedUntil clears the value of the "temp_unschedulable_protected_until" field.
+func (u *AccountUpsert) ClearTempUnschedulableProtectedUntil() *AccountUpsert {
+	u.SetNull(account.FieldTempUnschedulableProtectedUntil)
 	return u
 }
 
@@ -1928,6 +1964,27 @@ func (u *AccountUpsertOne) UpdateTempUnschedulableUntil() *AccountUpsertOne {
 func (u *AccountUpsertOne) ClearTempUnschedulableUntil() *AccountUpsertOne {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearTempUnschedulableUntil()
+	})
+}
+
+// SetTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field.
+func (u *AccountUpsertOne) SetTempUnschedulableProtectedUntil(v time.Time) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetTempUnschedulableProtectedUntil(v)
+	})
+}
+
+// UpdateTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateTempUnschedulableProtectedUntil() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateTempUnschedulableProtectedUntil()
+	})
+}
+
+// ClearTempUnschedulableProtectedUntil clears the value of the "temp_unschedulable_protected_until" field.
+func (u *AccountUpsertOne) ClearTempUnschedulableProtectedUntil() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearTempUnschedulableProtectedUntil()
 	})
 }
 
@@ -2713,6 +2770,27 @@ func (u *AccountUpsertBulk) UpdateTempUnschedulableUntil() *AccountUpsertBulk {
 func (u *AccountUpsertBulk) ClearTempUnschedulableUntil() *AccountUpsertBulk {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearTempUnschedulableUntil()
+	})
+}
+
+// SetTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field.
+func (u *AccountUpsertBulk) SetTempUnschedulableProtectedUntil(v time.Time) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetTempUnschedulableProtectedUntil(v)
+	})
+}
+
+// UpdateTempUnschedulableProtectedUntil sets the "temp_unschedulable_protected_until" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateTempUnschedulableProtectedUntil() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateTempUnschedulableProtectedUntil()
+	})
+}
+
+// ClearTempUnschedulableProtectedUntil clears the value of the "temp_unschedulable_protected_until" field.
+func (u *AccountUpsertBulk) ClearTempUnschedulableProtectedUntil() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.ClearTempUnschedulableProtectedUntil()
 	})
 }
 

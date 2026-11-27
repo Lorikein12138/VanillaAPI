@@ -51,7 +51,7 @@ func TestBaselineV0217MigrationIdentity(t *testing.T) {
 	}
 	sort.Strings(actual)
 	sort.Strings(historical)
-	require.Len(t, actual, baselineV0223MigrationCount)
+	require.Len(t, actual, currentMigrationCount)
 	require.Equal(t, names, historical, "the frozen v0.2.17 target remains byte-identical")
 	require.Contains(t, actual, "246_enable_gemini_image_generation_groups.sql")
 	require.Equal(t, []string{

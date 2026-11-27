@@ -42,6 +42,24 @@ export interface PublicDetectionGroup {
   sample?: DetectionSample
 }
 
+export interface DetectionConfirmationScope {
+  account_name: string
+  groups: { id: number; name: string }[]
+  scope_version: string
+}
+
+export interface AdminDetectionGroup extends PublicDetectionGroup {
+  group_id: number
+  trigger_state: 'idle' | 'running' | 'busy' | 'no_send'
+  sample_id?: string
+  confirmation?: DetectionConfirmationScope
+}
+
+export interface DetectionConfirmation {
+  until: string
+  sync_pending: boolean
+}
+
 const adminPath = '/admin/channel-detection'
 const publicPath = '/channel-detection'
 
@@ -63,5 +81,17 @@ export const channelDetectionAPI = {
   },
   async results(signal?: AbortSignal) {
     return (await apiClient.get<PublicDetectionGroup[]>(publicPath, { signal })).data
+  },
+  async adminResults(signal?: AbortSignal) {
+    return (await apiClient.get<AdminDetectionGroup[]>(adminPath + '/results', { signal })).data
+  },
+  async trigger(groupID: number) {
+    return (await apiClient.post<{ sample_id: string }>(`${adminPath}/groups/${groupID}/trigger`)).data
+  },
+  async confirm(groupID: number, sampleID: string, scopeVersion: string) {
+    return (await apiClient.post<DetectionConfirmation>(
+      `${adminPath}/groups/${groupID}/samples/${sampleID}/confirm`,
+      { scope_version: scopeVersion },
+    )).data
   },
 }

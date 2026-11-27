@@ -341,7 +341,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	apiKeyAuthMiddleware := middleware.NewAPIKeyAuthMiddleware(apiKeyService, subscriptionService, configConfig)
 	auditLogMiddleware := middleware.NewAuditLogMiddleware(auditLogService)
 	stepUpAuthMiddleware := middleware.NewStepUpAuthMiddleware(totpService, userService, settingService)
-	channelDetectionCoordinator := repository.NewChannelDetectionCoordinator(db)
+	channelDetectionCoordinator := repository.NewChannelDetectionCoordinator(db, client, schedulerCache, tempUnschedCache)
 	channelDetection := service.NewChannelDetection(settingRepository, adminService, groupRepository, channelDetectionCoordinator)
 	engine := server.ProvideRouter(configConfig, handlers, jwtAuthMiddleware, optionalJWTAuthMiddleware, adminAuthMiddleware, apiKeyAuthMiddleware, auditLogMiddleware, stepUpAuthMiddleware, apiKeyService, subscriptionService, opsService, settingService, compositeRouteResolver, channelDetection, redisClient)
 	httpServer := server.ProvideHTTPServer(configConfig, engine)

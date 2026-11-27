@@ -176,6 +176,9 @@ func (Account) Fields() []ent.Field {
 			Nillable().
 			SchemaType(map[string]string{dialect.Postgres: "timestamptz"}),
 
+		field.Time("temp_unschedulable_protected_until").Optional().Nillable().StructTag(`json:"-"`).
+			Comment("Minimum temporary suspension deadline set by an audited manual action"),
+
 		// temp_unschedulable_reason: 临时不可调度原因，便于排障审计
 		field.String("temp_unschedulable_reason").
 			Optional().

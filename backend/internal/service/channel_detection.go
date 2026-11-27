@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -89,6 +91,9 @@ type channelDetectionSnapshot struct {
 	Revision        string                            `json:"revision"`
 	Samples         map[int64]*ChannelDetectionSample `json:"samples"`
 	AttemptedAt     map[int64]time.Time               `json:"attempted_at"`
+	Running         *channelDetectionRun              `json:"running,omitempty"`
+	Proofs          map[int64]ChannelDetectionProof   `json:"proofs,omitempty"`
+	NoSend          map[int64]bool                    `json:"no_send,omitempty"`
 	stored          string
 }
 
@@ -107,7 +112,6 @@ type channelDetectionDirectoryModels interface {
 
 type channelDetectionSettings interface {
 	GetMultiple(context.Context, []string) (map[string]string, error)
-	Set(context.Context, string, string) error
 }
 
 // ChannelDetectionSnapshotGuard identifies the settings and snapshot read by a worker.
@@ -125,6 +129,8 @@ type ChannelDetectionCoordinator interface {
 	Release(ctx context.Context, owner string) error
 	ReserveSend(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, groupID int64, groupRPM, dailyLimit int) (bool, error)
 	CompareAndSetSnapshot(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string) (bool, error)
+	PublishSnapshot(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string, completedGroupID int64) (bool, error)
+	SavePlan(ctx context.Context, expected ChannelDetectionSnapshotGuard, nextConfig, nextSnapshot string) (bool, error)
 }
 
 type ChannelDetection struct {
@@ -132,6 +138,10 @@ type ChannelDetection struct {
 	groups      channelDetectionGroups
 	directory   channelDetectionGroupDirectory
 	coordinator ChannelDetectionCoordinator
+	lifecycle   sync.Mutex
+	worker      context.Context
+	gateway     http.Handler
+	runs        sync.WaitGroup
 	cancel      context.CancelFunc
 	done        chan struct{}
 }
@@ -167,16 +177,21 @@ func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string,
 			return "", config, latest, err
 		}
 	}
-	if latest.Feature != feature || latest.Revision != config.Revision {
+	if latest.Revision != config.Revision {
 		latest = channelDetectionSnapshot{Feature: feature, Revision: config.Revision}
 	}
 	latest.stored = storedSnapshot
 	if latest.IdentityVersion != channelDetectionIdentityVersion || latest.Samples == nil {
 		latest.IdentityVersion = channelDetectionIdentityVersion
 		latest.Samples = make(map[int64]*ChannelDetectionSample)
+		latest.Proofs = nil
 	}
 	if latest.AttemptedAt == nil {
 		latest.AttemptedAt = make(map[int64]time.Time)
+	}
+	if latest.Feature != feature {
+		latest.cancelRun()
+		latest.Feature = feature
 	}
 	return feature, config, latest, nil
 }
@@ -195,7 +210,7 @@ func (s *ChannelDetection) Config(ctx context.Context) (ChannelDetectionConfig, 
 }
 
 func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfig) error {
-	feature, current, _, err := s.state(ctx, false)
+	feature, current, latest, err := s.state(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -226,14 +241,68 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 	if current.Enabled == input.Enabled && current.IntervalMinutes == input.IntervalMinutes && slices.Equal(current.Groups, input.Groups) {
 		return nil
 	}
-	data, err := json.Marshal(channelDetectionConfigRecord{
+	next := channelDetectionConfigRecord{
 		ChannelDetectionConfig: input,
 		Revision:               uuid.NewString(),
-	})
+	}
+	data, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
-	return s.settings.Set(ctx, SettingKeyChannelDetectionConfig, string(data))
+	if s.coordinator == nil {
+		return errors.New("detection coordinator unavailable")
+	}
+	keep := make(map[int64]bool, len(input.Groups))
+	for _, selection := range input.Groups {
+		if slices.Contains(current.Groups, selection) {
+			keep[selection.GroupID] = true
+		}
+	}
+	for attempt := range 3 {
+		if attempt != 0 {
+			currentFeature, plan, snapshot, err := s.state(ctx, true)
+			if err != nil {
+				return err
+			}
+			if feature != currentFeature || current.stored != plan.stored {
+				return ErrDetectionChanged
+			}
+			latest = snapshot
+		}
+		guard := latest.guard(current)
+		latest.cancelRun()
+		latest.Revision = next.Revision
+		maps.DeleteFunc(latest.Samples, func(id int64, _ *ChannelDetectionSample) bool { return !keep[id] })
+		maps.DeleteFunc(latest.Proofs, func(id int64, _ ChannelDetectionProof) bool { return !keep[id] })
+		maps.DeleteFunc(latest.AttemptedAt, func(id int64, _ time.Time) bool { return !keep[id] })
+		maps.DeleteFunc(latest.NoSend, func(id int64, _ bool) bool { return !keep[id] })
+		snapshot, err := json.Marshal(latest)
+		if err != nil {
+			return err
+		}
+		saved, err := s.coordinator.SavePlan(ctx, guard, string(data), string(snapshot))
+		if err != nil || saved {
+			return err
+		}
+	}
+	return ErrDetectionChanged
+}
+
+func (s *channelDetectionSnapshot) cancelRun() {
+	if s.Running == nil {
+		return
+	}
+	id := s.Running.GroupID
+	switch {
+	case s.Running.PreviousAttemptedAt != nil:
+		s.AttemptedAt[id] = *s.Running.PreviousAttemptedAt
+	case s.Samples[id] != nil:
+		// Older runtime markers did not retain the previous attempt time.
+		s.AttemptedAt[id] = s.Samples[id].CheckedAt
+	default:
+		delete(s.AttemptedAt, id)
+	}
+	s.Running = nil
 }
 
 func (s *ChannelDetection) GroupOptions(ctx context.Context) ([]ChannelDetectionGroup, error) {
@@ -300,14 +369,28 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 	if err != nil {
 		return nil, err
 	}
+	ranked, err := s.resultGroups(ctx, feature, config, latest)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]ChannelDetectionPublicGroup, 0, len(ranked))
+	for _, group := range ranked {
+		results = append(results, group.result)
+	}
+	return results, nil
+}
+
+type channelDetectionResultGroup struct {
+	id             int64
+	result         ChannelDetectionPublicGroup
+	rateMultiplier float64
+}
+
+func (s *ChannelDetection) resultGroups(ctx context.Context, feature string, config channelDetectionConfigRecord, latest channelDetectionSnapshot) ([]channelDetectionResultGroup, error) {
 	if feature == "" || !config.Enabled {
 		return nil, errDetectionDisabled
 	}
-	type rankedGroup struct {
-		result         ChannelDetectionPublicGroup
-		rateMultiplier float64
-	}
-	ranked := make([]rankedGroup, 0, len(config.Groups))
+	ranked := make([]channelDetectionResultGroup, 0, len(config.Groups))
 	for _, selection := range config.Groups {
 		group, err := s.probeGroup(ctx, selection)
 		if errors.Is(err, errDetectionModel) {
@@ -324,7 +407,7 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 				result.Sample.Pelican = "error"
 			}
 		}
-		ranked = append(ranked, rankedGroup{result: result, rateMultiplier: group.RateMultiplier})
+		ranked = append(ranked, channelDetectionResultGroup{id: group.ID, result: result, rateMultiplier: group.RateMultiplier})
 	}
 	// Group resolution can outlive a switch/config update on another instance.
 	matches, err := s.current(ctx, feature, config.Revision)
@@ -334,14 +417,10 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 	if !matches {
 		return nil, errDetectionDisabled
 	}
-	slices.SortStableFunc(ranked, func(a, b rankedGroup) int {
+	slices.SortStableFunc(ranked, func(a, b channelDetectionResultGroup) int {
 		return cmp.Compare(a.rateMultiplier, b.rateMultiplier)
 	})
-	results := make([]ChannelDetectionPublicGroup, 0, len(ranked))
-	for _, group := range ranked {
-		results = append(results, group.result)
-	}
-	return results, nil
+	return ranked, nil
 }
 
 func concreteDetectionModel(model string) bool {
@@ -377,11 +456,21 @@ func (s *ChannelDetection) current(ctx context.Context, feature, revision string
 }
 
 func (s *ChannelDetection) Start(gateway http.Handler) {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if s.worker != nil {
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
+	s.worker = ctx
+	s.gateway = gateway
 	s.cancel = cancel
 	s.done = make(chan struct{})
 	go func() {
-		defer close(s.done)
+		defer func() {
+			s.runs.Wait()
+			close(s.done)
+		}()
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for ctx.Err() == nil {
@@ -396,10 +485,13 @@ func (s *ChannelDetection) Start(gateway http.Handler) {
 }
 
 func (s *ChannelDetection) Stop(ctx context.Context) error {
+	s.lifecycle.Lock()
 	if s.cancel == nil {
+		s.lifecycle.Unlock()
 		return nil
 	}
 	s.cancel()
+	s.lifecycle.Unlock()
 	select {
 	case <-s.done:
 		return nil
@@ -420,11 +512,7 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 	if err != nil || !locked {
 		return
 	}
-	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		defer cancel()
-		_ = s.coordinator.Release(releaseCtx, token)
-	}()
+	defer s.release(ctx, token)
 
 	loadCtx, stopLoad := context.WithTimeout(ctx, 5*time.Second)
 	feature, config, latest, err := s.state(loadCtx, true)
@@ -447,15 +535,35 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 	if !due {
 		return
 	}
+	run, reserved := s.startRun(ctx, token, config, &latest, selection, "automatic")
+	if reserved {
+		s.run(ctx, gateway, run, config, latest, selection)
+	}
+}
+
+func (s *ChannelDetection) release(ctx context.Context, token string) {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	_ = s.coordinator.Release(releaseCtx, token)
+}
+
+func (s *ChannelDetection) startRun(ctx context.Context, token string, config channelDetectionConfigRecord, latest *channelDetectionSnapshot, selection ChannelDetectionSelection, source string) (channelDetectionRun, bool) {
 	// Reserve the interval before the first billable request. If an instance
 	// stops or cannot persist the result, the next tick respects this attempt.
+	run := channelDetectionRun{GroupID: selection.GroupID, SampleID: uuid.NewString(), Owner: token, Source: source}
+	if previous := latest.AttemptedAt[selection.GroupID]; !previous.IsZero() {
+		run.PreviousAttemptedAt = &previous
+	}
+	latest.Running = &run
+	delete(latest.NoSend, selection.GroupID)
 	latest.AttemptedAt[selection.GroupID] = time.Now().UTC()
 	reserveCtx, stopReserve := context.WithTimeout(ctx, 4*time.Second)
-	reserved := s.writeSnapshot(reserveCtx, token, config, &latest)
-	stopReserve()
-	if !reserved {
-		return
-	}
+	defer stopReserve()
+	return run, s.writeSnapshot(reserveCtx, token, config, latest)
+}
+
+func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run channelDetectionRun, config channelDetectionConfigRecord, latest channelDetectionSnapshot, selection ChannelDetectionSelection) {
+	feature, token := latest.Feature, run.Owner
 	roundCtx, cancel := context.WithTimeout(ctx, channelDetectionRoundTimeout)
 	defer cancel()
 	current := func(ctx context.Context) bool {
@@ -488,8 +596,29 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 	if !current(writeCtx) {
 		return
 	}
+	latest.Running = nil
+	proof, entered := budget.proof(run)
+	if run.Source == "manual" && !entered {
+		if latest.NoSend == nil {
+			latest.NoSend = make(map[int64]bool)
+		}
+		latest.NoSend[selection.GroupID] = true
+		s.writeSnapshot(writeCtx, token, config, &latest)
+		return
+	}
 	latest.Samples[selection.GroupID] = sample
-	s.writeSnapshot(writeCtx, token, config, &latest)
+	if latest.Proofs == nil {
+		latest.Proofs = make(map[int64]ChannelDetectionProof)
+	}
+	latest.Proofs[selection.GroupID] = proof
+	encoded, err := json.Marshal(latest)
+	if err == nil {
+		_, _ = s.coordinator.PublishSnapshot(writeCtx, token, latest.guard(config), string(encoded), selection.GroupID)
+	}
+}
+
+func (latest channelDetectionSnapshot) guard(config channelDetectionConfigRecord) ChannelDetectionSnapshotGuard {
+	return ChannelDetectionSnapshotGuard{Feature: latest.Feature, Config: config.stored, Snapshot: latest.stored}
 }
 
 func (s *ChannelDetection) writeSnapshot(ctx context.Context, owner string, config channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
@@ -498,9 +627,7 @@ func (s *ChannelDetection) writeSnapshot(ctx context.Context, owner string, conf
 		return false
 	}
 	next := string(encoded)
-	applied, err := s.coordinator.CompareAndSetSnapshot(ctx, owner, ChannelDetectionSnapshotGuard{
-		Feature: latest.Feature, Config: config.stored, Snapshot: latest.stored,
-	}, next)
+	applied, err := s.coordinator.CompareAndSetSnapshot(ctx, owner, latest.guard(config), next)
 	if err != nil || !applied {
 		return false
 	}

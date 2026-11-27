@@ -1863,28 +1863,30 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 // when account status changes. Called when account is set to error, disabled,
 // unschedulable, or temporarily unschedulable, ensuring scheduler and sticky session
 // logic can promptly detect the latest account state and avoid using unavailable accounts.
-func (r *accountRepository) syncSchedulerAccountSnapshot(ctx context.Context, accountID int64) {
+func (r *accountRepository) syncSchedulerAccountSnapshot(ctx context.Context, accountID int64) bool {
 	if r == nil || r.schedulerCache == nil || accountID <= 0 {
-		return
+		return true
 	}
 	account, err := r.GetByID(ctx, accountID)
 	if err != nil {
 		logger.LegacyPrintf("repository.account", "[Scheduler] sync account snapshot read failed: id=%d err=%v", accountID, err)
-		return
+		return false
 	}
 	if err := r.schedulerCache.SetAccount(ctx, account); err != nil {
 		logger.LegacyPrintf("repository.account", "[Scheduler] sync account snapshot write failed: id=%d err=%v", accountID, err)
+		return false
 	}
+	return true
 }
 
-func (r *accountRepository) syncSchedulerAccountSnapshotDetached(ctx context.Context, accountID int64) {
+func (r *accountRepository) syncSchedulerAccountSnapshotDetached(ctx context.Context, accountID int64) bool {
 	base := context.Background()
 	if ctx != nil {
 		base = context.WithoutCancel(ctx)
 	}
 	propagationCtx, cancel := context.WithTimeout(base, 2*time.Second)
 	defer cancel()
-	r.syncSchedulerAccountSnapshot(propagationCtx, accountID)
+	return r.syncSchedulerAccountSnapshot(propagationCtx, accountID)
 }
 
 func (r *accountRepository) deleteSchedulerAccountSnapshot(ctx context.Context, accountID int64) {
@@ -2576,30 +2578,36 @@ func (r *accountRepository) SetOverloaded(ctx context.Context, id int64, until t
 }
 
 func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
-	result, err := r.sql.ExecContext(ctx, `
+	changed, err := setTempUnschedulable(ctx, r.sql, id, until, reason)
+	if err != nil || !changed {
+		return err
+	}
+	if err := enqueueTempUnschedulable(ctx, r.sql, id); err != nil {
+		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue temp unschedulable failed: account=%d err=%v", id, err)
+	}
+	r.syncSchedulerAccountSnapshot(ctx, id)
+	return nil
+}
+
+func setTempUnschedulable(ctx context.Context, exec sqlExecutor, id int64, until time.Time, reason string) (bool, error) {
+	result, err := exec.ExecContext(ctx, `
 		UPDATE accounts
 		SET temp_unschedulable_until = $1,
 			temp_unschedulable_reason = $2,
-			updated_at = NOW()
+			updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
 		WHERE id = $3
 			AND deleted_at IS NULL
 			AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $1)
 	`, until, reason, id)
 	if err != nil {
-		return err
+		return false, err
 	}
 	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected <= 0 {
-		return nil
-	}
-	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
-		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue temp unschedulable failed: account=%d err=%v", id, err)
-	}
-	r.syncSchedulerAccountSnapshot(ctx, id)
-	return nil
+	return affected > 0, err
+}
+
+func enqueueTempUnschedulable(ctx context.Context, exec sqlExecutor, id int64) error {
+	return enqueueSchedulerOutbox(ctx, exec, service.SchedulerOutboxEventAccountChanged, &id, nil, nil)
 }
 
 func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
@@ -2651,16 +2659,32 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
 		return scoped.ClearTempUnschedulable(ctx, id)
 	}
-	_, err := r.sql.ExecContext(ctx, `
-		UPDATE accounts
-		SET temp_unschedulable_until = NULL,
-			temp_unschedulable_reason = NULL,
-			updated_at = NOW()
-		WHERE id = $1
-			AND deleted_at IS NULL
-	`, id)
+	var exists, cleared bool
+	err := scanSingleRow(ctx, r.sql, `
+		WITH target AS (
+			SELECT id, temp_unschedulable_protected_until
+			FROM accounts WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
+		), cleared AS (
+			UPDATE accounts AS a
+			SET temp_unschedulable_until = NULL,
+				temp_unschedulable_reason = NULL,
+				temp_unschedulable_protected_until = NULL,
+				updated_at = GREATEST(clock_timestamp(), a.updated_at + interval '1 microsecond')
+			FROM target
+			WHERE a.id = target.id AND (target.temp_unschedulable_protected_until IS NULL
+				OR target.temp_unschedulable_protected_until <= clock_timestamp())
+			RETURNING a.id
+		)
+		SELECT EXISTS (SELECT 1 FROM target), EXISTS (SELECT 1 FROM cleared)
+	`, []any{id}, &exists, &cleared)
 	if err != nil {
 		return err
+	}
+	if !exists {
+		return service.ErrAccountNotFound
+	}
+	if !cleared {
+		return service.ErrTempUnschedulableProtected
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue clear temp unschedulable failed: account=%d err=%v", id, err)
@@ -3788,37 +3812,38 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 	rateMultiplier := m.RateMultiplier
 
 	return &service.Account{
-		ID:                      m.ID,
-		Name:                    m.Name,
-		Notes:                   m.Notes,
-		Platform:                m.Platform,
-		Type:                    m.Type,
-		Credentials:             copyJSONMap(m.Credentials),
-		Extra:                   copyJSONMap(m.Extra),
-		ProxyID:                 m.ProxyID,
-		ProxyFallbackOriginID:   m.ProxyFallbackOriginID,
-		Concurrency:             m.Concurrency,
-		Priority:                m.Priority,
-		RateMultiplier:          &rateMultiplier,
-		LoadFactor:              m.LoadFactor,
-		Status:                  m.Status,
-		ErrorMessage:            derefString(m.ErrorMessage),
-		LastUsedAt:              m.LastUsedAt,
-		ExpiresAt:               m.ExpiresAt,
-		AutoPauseOnExpired:      m.AutoPauseOnExpired,
-		CreatedAt:               m.CreatedAt,
-		UpdatedAt:               m.UpdatedAt,
-		Schedulable:             m.Schedulable,
-		RateLimitedAt:           m.RateLimitedAt,
-		RateLimitResetAt:        m.RateLimitResetAt,
-		OverloadUntil:           m.OverloadUntil,
-		TempUnschedulableUntil:  m.TempUnschedulableUntil,
-		TempUnschedulableReason: derefString(m.TempUnschedulableReason),
-		SessionWindowStart:      m.SessionWindowStart,
-		SessionWindowEnd:        m.SessionWindowEnd,
-		SessionWindowStatus:     derefString(m.SessionWindowStatus),
-		ParentAccountID:         m.ParentAccountID,
-		QuotaDimension:          string(m.QuotaDimension),
+		ID:                              m.ID,
+		Name:                            m.Name,
+		Notes:                           m.Notes,
+		Platform:                        m.Platform,
+		Type:                            m.Type,
+		Credentials:                     copyJSONMap(m.Credentials),
+		Extra:                           copyJSONMap(m.Extra),
+		ProxyID:                         m.ProxyID,
+		ProxyFallbackOriginID:           m.ProxyFallbackOriginID,
+		Concurrency:                     m.Concurrency,
+		Priority:                        m.Priority,
+		RateMultiplier:                  &rateMultiplier,
+		LoadFactor:                      m.LoadFactor,
+		Status:                          m.Status,
+		ErrorMessage:                    derefString(m.ErrorMessage),
+		LastUsedAt:                      m.LastUsedAt,
+		ExpiresAt:                       m.ExpiresAt,
+		AutoPauseOnExpired:              m.AutoPauseOnExpired,
+		CreatedAt:                       m.CreatedAt,
+		UpdatedAt:                       m.UpdatedAt,
+		Schedulable:                     m.Schedulable,
+		RateLimitedAt:                   m.RateLimitedAt,
+		RateLimitResetAt:                m.RateLimitResetAt,
+		OverloadUntil:                   m.OverloadUntil,
+		TempUnschedulableUntil:          m.TempUnschedulableUntil,
+		TempUnschedulableReason:         derefString(m.TempUnschedulableReason),
+		TempUnschedulableProtectedUntil: m.TempUnschedulableProtectedUntil,
+		SessionWindowStart:              m.SessionWindowStart,
+		SessionWindowEnd:                m.SessionWindowEnd,
+		SessionWindowStatus:             derefString(m.SessionWindowStatus),
+		ParentAccountID:                 m.ParentAccountID,
+		QuotaDimension:                  string(m.QuotaDimension),
 	}
 }
 
