@@ -19,23 +19,24 @@ import (
 )
 
 const (
-	SettingKeyChannelDetectionFeature   = "channel_detection_enabled"
-	SettingKeyChannelDetectionConfig    = "channel_detection_config"
-	SettingKeyChannelDetectionLatest    = "channel_detection_latest"
-	channelDetectionMaxGroups           = 16
-	channelDetectionMinInterval         = 15
-	channelDetectionMaxInterval         = 1440
-	channelDetectionRoundTimeout        = 130 * time.Second
-	channelDetectionLeaseTimeout        = 190 * time.Second
-	ChannelDetectionMaxConcurrentGroups = 4
-	channelDetectionIdentityVersion     = 1
-	channelDetectionDailySends          = 672
-	channelDetectionRoundSends          = 2
+	SettingKeyChannelDetectionFeature  = "channel_detection_enabled"
+	SettingKeyChannelDetectionConfig   = "channel_detection_config"
+	SettingKeyChannelDetectionLatest   = "channel_detection_latest"
+	channelDetectionMaxGroups          = 16
+	channelDetectionMinInterval        = 15
+	channelDetectionMaxInterval        = 1440
+	channelDetectionRoundTimeout       = 130 * time.Second
+	channelDetectionLeaseTimeout       = 190 * time.Second
+	channelDetectionDefaultConcurrency = 3
+	channelDetectionMaxConcurrency     = 10
+	channelDetectionIdentityVersion    = 1
+	channelDetectionDailySends         = 672
+	channelDetectionRoundSends         = 2
 )
 
 var (
 	errDetectionDisabled = infraerrors.NotFound("CHANNEL_DETECTION_DISABLED", "Channel detection is disabled")
-	errDetectionConfig   = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_CONFIG", "Invalid detection interval or group selection")
+	errDetectionConfig   = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_CONFIG", "Invalid detection interval, concurrency, or group selection")
 	errDetectionModel    = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_MODEL", "Select an effective allowlist model in an active group")
 )
 
@@ -45,9 +46,10 @@ type ChannelDetectionSelection struct {
 }
 
 type ChannelDetectionConfig struct {
-	Enabled         bool                        `json:"enabled"`
-	IntervalMinutes int                         `json:"interval_minutes"`
-	Groups          []ChannelDetectionSelection `json:"groups"`
+	Enabled          bool                        `json:"enabled"`
+	IntervalMinutes  int                         `json:"interval_minutes"`
+	ConcurrentGroups *int                        `json:"concurrent_groups"`
+	Groups           []ChannelDetectionSelection `json:"groups"`
 }
 
 type ChannelDetectionGroup struct {
@@ -120,8 +122,8 @@ type ChannelDetectionActiveLeases struct {
 	Blocked     bool
 }
 
-func (a ChannelDetectionActiveLeases) Full() bool {
-	return len(a.Groups) >= ChannelDetectionMaxConcurrentGroups || a.LegacyOwner != "" || a.Blocked
+func (a ChannelDetectionActiveLeases) Full(limit int) bool {
+	return len(a.Groups) >= limit || a.LegacyOwner != "" || a.Blocked
 }
 
 // ChannelDetectionCoordinator serializes probe runs and fences snapshot writes
@@ -155,11 +157,39 @@ func NewChannelDetection(settings SettingRepository, groups AdminService, direct
 	return &ChannelDetection{settings: settings, groups: groups, directory: directory, coordinator: coordinator}
 }
 
-func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string, channelDetectionConfigRecord, channelDetectionSnapshot, error) {
+func decodeChannelDetectionConfig(raw string) (channelDetectionConfigRecord, error) {
 	config := channelDetectionConfigRecord{ChannelDetectionConfig: ChannelDetectionConfig{
 		IntervalMinutes: 60,
 		Groups:          []ChannelDetectionSelection{},
-	}}
+	}, stored: raw}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &config); err != nil {
+			return config, err
+		}
+	}
+	if config.ConcurrentGroups == nil {
+		config.ConcurrentGroups = new(channelDetectionDefaultConcurrency)
+	}
+	if !validChannelDetectionConcurrency(*config.ConcurrentGroups) {
+		return config, errors.New("invalid stored channel detection concurrency")
+	}
+	return config, nil
+}
+
+func validChannelDetectionConcurrency(limit int) bool {
+	return limit >= 1 && limit <= channelDetectionMaxConcurrency
+}
+
+// ChannelDetectionConcurrency reads the effective limit from a settings value.
+func ChannelDetectionConcurrency(raw string) (int, error) {
+	config, err := decodeChannelDetectionConfig(raw)
+	if err != nil {
+		return 0, err
+	}
+	return *config.ConcurrentGroups, nil
+}
+
+func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string, channelDetectionConfigRecord, channelDetectionSnapshot, error) {
 	var latest channelDetectionSnapshot
 	keys := []string{SettingKeyChannelDetectionFeature, SettingKeyChannelDetectionConfig}
 	if withSamples {
@@ -167,14 +197,12 @@ func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string,
 	}
 	values, err := s.settings.GetMultiple(ctx, keys)
 	if err != nil {
-		return "", config, latest, err
+		return "", channelDetectionConfigRecord{}, latest, err
 	}
 	feature := values[SettingKeyChannelDetectionFeature]
-	config.stored = values[SettingKeyChannelDetectionConfig]
-	if value := config.stored; value != "" {
-		if err := json.Unmarshal([]byte(value), &config); err != nil {
-			return "", config, latest, err
-		}
+	config, err := decodeChannelDetectionConfig(values[SettingKeyChannelDetectionConfig])
+	if err != nil {
+		return "", config, latest, err
 	}
 	storedSnapshot := values[SettingKeyChannelDetectionLatest]
 	if value := storedSnapshot; value != "" && withSamples {
@@ -231,7 +259,11 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 	if feature == "" {
 		return errDetectionDisabled
 	}
+	if input.ConcurrentGroups == nil {
+		input.ConcurrentGroups = current.ConcurrentGroups
+	}
 	if input.IntervalMinutes < channelDetectionMinInterval || input.IntervalMinutes > channelDetectionMaxInterval ||
+		!validChannelDetectionConcurrency(*input.ConcurrentGroups) ||
 		len(input.Groups) > channelDetectionMaxGroups || (input.Enabled && len(input.Groups) == 0) {
 		return errDetectionConfig
 	}
@@ -252,7 +284,8 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 	if input.Groups == nil {
 		input.Groups = []ChannelDetectionSelection{}
 	}
-	if current.Enabled == input.Enabled && current.IntervalMinutes == input.IntervalMinutes && slices.Equal(current.Groups, input.Groups) {
+	if current.Enabled == input.Enabled && current.IntervalMinutes == input.IntervalMinutes &&
+		*current.ConcurrentGroups == *input.ConcurrentGroups && slices.Equal(current.Groups, input.Groups) {
 		return nil
 	}
 	next := channelDetectionConfigRecord{
@@ -527,14 +560,15 @@ func (s *ChannelDetection) tick(ctx context.Context) {
 		return
 	}
 	active, err := s.coordinator.ActiveLeases(checkCtx)
-	if err != nil || active.Full() {
+	limit := *config.ConcurrentGroups
+	if err != nil || active.Full(limit) {
 		return
 	}
 	groups := slices.Clone(config.Groups)
 	slices.SortStableFunc(groups, func(a, b ChannelDetectionSelection) int {
 		return latest.AttemptedAt[a.GroupID].Compare(latest.AttemptedAt[b.GroupID])
 	})
-	available := ChannelDetectionMaxConcurrentGroups - len(active.Groups)
+	available := limit - len(active.Groups)
 	now := time.Now()
 	for _, selection := range groups {
 		if checkCtx.Err() != nil || available == 0 || !detectionGroupDue(config, latest, selection.GroupID, now) {

@@ -42,12 +42,12 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 		);
 		CREATE UNIQUE INDEX scheduler_outbox_test_dedup ON scheduler_outbox(dedup_key) WHERE dedup_key IS NOT NULL;
 		INSERT INTO settings (key,value,updated_at) VALUES
-			('channel_detection_enabled','on',now()), ('channel_detection_config','fixture',now());
+			('channel_detection_enabled','on',now()), ('channel_detection_config','{"revision":"fixture"}',now());
 	`)
 	require.NoError(t, err)
 	first := NewChannelDetectionCoordinator(firstDB, firstClient, nil, nil).(*channelDetectionCoordinator)
 	second := NewChannelDetectionCoordinator(secondDB, secondClient, nil, nil).(*channelDetectionCoordinator)
-	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "fixture"}
+	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: `{"revision":"fixture"}`}
 	makeGroup := func(name string) int64 {
 		return firstClient.Group.Create().SetName(name).SetPlatform(service.PlatformOpenAI).
 			SetModelAllowlist(domain.GroupModelAllowlist{Models: []string{"fixture-model"}}).SaveX(ctx).ID

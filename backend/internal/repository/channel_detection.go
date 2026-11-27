@@ -120,7 +120,19 @@ func (r *channelDetectionCoordinator) TryAcquire(ctx context.Context, groupID in
 	}
 	lease, now, blocked, err := lockDetectionLease(ctx, tx)
 	lease.prune(now)
-	if err != nil || blocked || len(lease.Groups) >= service.ChannelDetectionMaxConcurrentGroups || lease.Groups[groupID].Owner != "" {
+	if err != nil || blocked || lease.Groups[groupID].Owner != "" {
+		return false, err
+	}
+	// SavePlan also locks the lease before the config. Read the limit under
+	// those locks so a worker with an older plan cannot bypass a lowered cap.
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR SHARE`,
+		service.SettingKeyChannelDetectionConfig).Scan(&raw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	limit, err := service.ChannelDetectionConcurrency(raw)
+	if err != nil || len(lease.Groups) >= limit {
 		return false, err
 	}
 	lease.Groups[groupID] = channelDetectionLeaseSlot{Owner: owner, ExpiresAt: now.Add(ttl)}

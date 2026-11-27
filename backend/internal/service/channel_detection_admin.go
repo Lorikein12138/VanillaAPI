@@ -104,7 +104,7 @@ func (s *ChannelDetection) AdminGroups(ctx context.Context) ([]ChannelDetectionA
 		switch {
 		case active.Groups[group.id] != "" || (active.LegacyOwner != "" && latest.RunningByGroup[group.id].Owner == active.LegacyOwner):
 			result.TriggerState = "running"
-		case active.Full():
+		case active.Full(*config.ConcurrentGroups):
 			result.TriggerState = "busy"
 		case latest.NoSend[group.id]:
 			result.TriggerState = "no_send"

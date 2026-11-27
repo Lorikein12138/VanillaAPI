@@ -17,6 +17,7 @@ export interface DetectionGroupOption {
 export interface DetectionConfig {
   enabled: boolean
   interval_minutes: number
+  concurrent_groups: number
   groups: DetectionSelection[]
 }
 

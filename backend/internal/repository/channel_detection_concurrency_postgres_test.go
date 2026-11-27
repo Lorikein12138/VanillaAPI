@@ -82,6 +82,104 @@ func (c postgresDetectionCoordinator) PublishSnapshot(ctx context.Context, owner
 
 const postgresDetectionSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360"><circle cx="2" cy="2" r="1"/></svg>`
 
+func TestChannelDetectionPostgresConfiguredConcurrency(t *testing.T) {
+	first, second := openDetectionTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := first.ExecContext(ctx, `
+		CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+		INSERT INTO settings (key,value) VALUES ('channel_detection_enabled','on');
+	`)
+	require.NoError(t, err)
+	databases := []*sql.DB{first, second}
+	coordinators := make([]*channelDetectionCoordinator, len(databases))
+	workers := make([]*service.ChannelDetection, len(databases))
+	for i, db := range databases {
+		coordinators[i] = &channelDetectionCoordinator{db: db}
+		workers[i] = service.NewChannelDetection(postgresDetectionSettings{db: db}, postgresDetectionGroups{}, nil, coordinators[i])
+	}
+	read := func(worker int, want int) service.ChannelDetectionConfig {
+		t.Helper()
+		config, err := workers[worker].Config(ctx)
+		require.NoError(t, err)
+		require.Equal(t, new(want), config.ConcurrentGroups)
+		return config
+	}
+	fill := func(limit int) service.ChannelDetectionActiveLeases {
+		t.Helper()
+		start := make(chan struct{})
+		var accepted atomic.Int32
+		var wait sync.WaitGroup
+		for id := int64(1); id <= 12; id++ {
+			wait.Go(func() {
+				<-start
+				ok, err := coordinators[id%2].TryAcquire(ctx, id, "worker", time.Minute)
+				if err != nil {
+					t.Errorf("acquire group %d: %v", id, err)
+				} else if ok {
+					accepted.Add(1)
+				}
+			})
+		}
+		close(start)
+		wait.Wait()
+		require.EqualValues(t, limit, accepted.Load())
+		active, err := coordinators[1].ActiveLeases(ctx)
+		require.NoError(t, err)
+		require.Len(t, active.Groups, limit)
+		return active
+	}
+
+	read(0, 3)
+	_, err = first.ExecContext(ctx, `
+		INSERT INTO settings (key,value) VALUES ('channel_detection_config',
+			'{"enabled":true,"interval_minutes":60,"groups":[{"group_id":1,"model":"fixture"}],"revision":"legacy"}');
+	`)
+	require.NoError(t, err)
+	config := read(1, 3)
+	for id, owner := range fill(3).Groups {
+		require.NoError(t, coordinators[0].Release(ctx, id, owner))
+	}
+	for _, invalid := range []int{0, -1, 11} {
+		config.ConcurrentGroups = new(invalid)
+		require.Error(t, workers[0].Save(ctx, config))
+		read(1, 3)
+	}
+
+	config.ConcurrentGroups = new(10)
+	require.NoError(t, workers[0].Save(ctx, config))
+	legacyUpdate := read(1, 10)
+	legacyUpdate.ConcurrentGroups = nil
+	legacyUpdate.IntervalMinutes++
+	require.NoError(t, workers[1].Save(ctx, legacyUpdate))
+	stale := read(0, 10)
+	require.Equal(t, 61, stale.IntervalMinutes)
+	active := fill(10)
+
+	config = stale
+	config.ConcurrentGroups = new(1)
+	require.NoError(t, workers[1].Save(ctx, config))
+	canAcquire := func(want bool) {
+		t.Helper()
+		ok, err := coordinators[0].TryAcquire(ctx, 13, "other", time.Minute)
+		require.NoError(t, err)
+		require.Equal(t, want, ok)
+	}
+	for id, owner := range active.Groups {
+		canAcquire(false) // Even the worker that saw 10 is now bound by 1.
+		require.NoError(t, coordinators[1].Release(ctx, id, owner))
+	}
+	canAcquire(true)
+	ok, err := coordinators[1].TryAcquire(ctx, 14, "third", time.Minute)
+	require.NoError(t, err)
+	require.False(t, ok)
+	read(0, 1)
+	cards, err := workers[0].AdminGroups(ctx)
+	require.NoError(t, err)
+	require.Len(t, cards, 1)
+	require.Equal(t, "busy", cards[0].TriggerState)
+}
+
 func TestChannelDetectionPostgresWorkersShareSlotsAndMergeResults(t *testing.T) {
 	first, second := openDetectionTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -101,7 +199,7 @@ func TestChannelDetectionPostgresWorkersShareSlotsAndMergeResults(t *testing.T) 
 		service.NewChannelDetection(postgresDetectionSettings{db: first}, postgresDetectionGroups{}, nil, one),
 		service.NewChannelDetection(postgresDetectionSettings{db: second}, postgresDetectionGroups{}, nil, two),
 	}
-	plan := service.ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60}
+	plan := service.ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, ConcurrentGroups: new(4)}
 	started := make(chan int64, 16)
 	finish := make(map[int64]chan struct{})
 	for id := int64(1); id <= 5; id++ {
@@ -170,13 +268,17 @@ func TestChannelDetectionPostgresWorkersShareSlotsAndMergeResults(t *testing.T) 
 	require.ErrorIs(t, err, service.ErrDetectionBusy)
 	_, err = workers[1].Trigger(ctx, 5)
 	require.ErrorIs(t, err, service.ErrDetectionBusy)
+	cards, err := workers[1].AdminGroups(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "running", cards[0].TriggerState)
+	require.Equal(t, "busy", cards[4].TriggerState)
 
 	// Reverse completion order. An available slot wakes the releasing worker.
 	releasedAt := time.Now()
 	close(finish[4])
 	require.EqualValues(t, 5, nextStart())
 	t.Logf("group 5 started %s after group 4 was unblocked", time.Since(releasedAt))
-	cards, err := workers[1].AdminGroups(ctx)
+	cards, err = workers[1].AdminGroups(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "generated", cards[3].Sample.Pelican)
 	require.NotEmpty(t, cards[3].SampleID)
@@ -225,7 +327,7 @@ func TestChannelDetectionPostgresLeaseInteropAndConcurrentBudget(t *testing.T) {
 	defer cancel()
 	_, err := first.ExecContext(ctx, `
 		CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-		INSERT INTO settings (key,value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','config'), ('channel_detection_daily_sends','670');
+		INSERT INTO settings (key,value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','{"revision":"config"}'), ('channel_detection_daily_sends','670');
 	`)
 	require.NoError(t, err)
 	one, two := &channelDetectionCoordinator{db: first}, &channelDetectionCoordinator{db: second}
@@ -263,7 +365,7 @@ func TestChannelDetectionPostgresLeaseInteropAndConcurrentBudget(t *testing.T) {
 				FROM jsonb_each(settings.value::jsonb->'groups') AS slots(group_id,slot))
 		FROM settings WHERE key=$1`, channelDetectionLeaseSetting).Scan(&finiteMax))
 	require.True(t, finiteMax)
-	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "config"}
+	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: `{"revision":"config"}`}
 
 	var accepted atomic.Int32
 	var wait sync.WaitGroup
