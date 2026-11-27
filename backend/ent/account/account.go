@@ -68,6 +68,8 @@ const (
 	FieldTempUnschedulableUntil = "temp_unschedulable_until"
 	// FieldTempUnschedulableProtectedUntil holds the string denoting the temp_unschedulable_protected_until field in the database.
 	FieldTempUnschedulableProtectedUntil = "temp_unschedulable_protected_until"
+	// FieldTempUnschedulableRevision holds the string denoting the temp_unschedulable_revision field in the database.
+	FieldTempUnschedulableRevision = "temp_unschedulable_revision"
 	// FieldTempUnschedulableReason holds the string denoting the temp_unschedulable_reason field in the database.
 	FieldTempUnschedulableReason = "temp_unschedulable_reason"
 	// FieldSessionWindowStart holds the string denoting the session_window_start field in the database.
@@ -159,6 +161,7 @@ var Columns = []string{
 	FieldOverloadUntil,
 	FieldTempUnschedulableUntil,
 	FieldTempUnschedulableProtectedUntil,
+	FieldTempUnschedulableRevision,
 	FieldTempUnschedulableReason,
 	FieldSessionWindowStart,
 	FieldSessionWindowEnd,
@@ -221,6 +224,8 @@ var (
 	DefaultAutoPauseOnExpired bool
 	// DefaultSchedulable holds the default value on creation for the "schedulable" field.
 	DefaultSchedulable bool
+	// DefaultTempUnschedulableRevision holds the default value on creation for the "temp_unschedulable_revision" field.
+	DefaultTempUnschedulableRevision int64
 	// SessionWindowStatusValidator is a validator for the "session_window_status" field. It is called by the builders before save.
 	SessionWindowStatusValidator func(string) error
 )
@@ -377,6 +382,11 @@ func ByTempUnschedulableUntil(opts ...sql.OrderTermOption) OrderOption {
 // ByTempUnschedulableProtectedUntil orders the results by the temp_unschedulable_protected_until field.
 func ByTempUnschedulableProtectedUntil(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTempUnschedulableProtectedUntil, opts...).ToFunc()
+}
+
+// ByTempUnschedulableRevision orders the results by the temp_unschedulable_revision field.
+func ByTempUnschedulableRevision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTempUnschedulableRevision, opts...).ToFunc()
 }
 
 // ByTempUnschedulableReason orders the results by the temp_unschedulable_reason field.

@@ -349,6 +349,20 @@ func (_c *AccountCreate) SetNillableTempUnschedulableProtectedUntil(v *time.Time
 	return _c
 }
 
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (_c *AccountCreate) SetTempUnschedulableRevision(v int64) *AccountCreate {
+	_c.mutation.SetTempUnschedulableRevision(v)
+	return _c
+}
+
+// SetNillableTempUnschedulableRevision sets the "temp_unschedulable_revision" field if the given value is not nil.
+func (_c *AccountCreate) SetNillableTempUnschedulableRevision(v *int64) *AccountCreate {
+	if v != nil {
+		_c.SetTempUnschedulableRevision(*v)
+	}
+	return _c
+}
+
 // SetTempUnschedulableReason sets the "temp_unschedulable_reason" field.
 func (_c *AccountCreate) SetTempUnschedulableReason(v string) *AccountCreate {
 	_c.mutation.SetTempUnschedulableReason(v)
@@ -591,6 +605,10 @@ func (_c *AccountCreate) defaults() error {
 		v := account.DefaultSchedulable
 		_c.mutation.SetSchedulable(v)
 	}
+	if _, ok := _c.mutation.TempUnschedulableRevision(); !ok {
+		v := account.DefaultTempUnschedulableRevision
+		_c.mutation.SetTempUnschedulableRevision(v)
+	}
 	if _, ok := _c.mutation.QuotaDimension(); !ok {
 		v := account.DefaultQuotaDimension
 		_c.mutation.SetQuotaDimension(v)
@@ -658,6 +676,9 @@ func (_c *AccountCreate) check() error {
 	}
 	if _, ok := _c.mutation.Schedulable(); !ok {
 		return &ValidationError{Name: "schedulable", err: errors.New(`ent: missing required field "Account.schedulable"`)}
+	}
+	if _, ok := _c.mutation.TempUnschedulableRevision(); !ok {
+		return &ValidationError{Name: "temp_unschedulable_revision", err: errors.New(`ent: missing required field "Account.temp_unschedulable_revision"`)}
 	}
 	if v, ok := _c.mutation.SessionWindowStatus(); ok {
 		if err := account.SessionWindowStatusValidator(v); err != nil {
@@ -798,6 +819,10 @@ func (_c *AccountCreate) createSpec() (*Account, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.TempUnschedulableProtectedUntil(); ok {
 		_spec.SetField(account.FieldTempUnschedulableProtectedUntil, field.TypeTime, value)
 		_node.TempUnschedulableProtectedUntil = &value
+	}
+	if value, ok := _c.mutation.TempUnschedulableRevision(); ok {
+		_spec.SetField(account.FieldTempUnschedulableRevision, field.TypeInt64, value)
+		_node.TempUnschedulableRevision = value
 	}
 	if value, ok := _c.mutation.TempUnschedulableReason(); ok {
 		_spec.SetField(account.FieldTempUnschedulableReason, field.TypeString, value)
@@ -1362,6 +1387,24 @@ func (u *AccountUpsert) UpdateTempUnschedulableProtectedUntil() *AccountUpsert {
 // ClearTempUnschedulableProtectedUntil clears the value of the "temp_unschedulable_protected_until" field.
 func (u *AccountUpsert) ClearTempUnschedulableProtectedUntil() *AccountUpsert {
 	u.SetNull(account.FieldTempUnschedulableProtectedUntil)
+	return u
+}
+
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (u *AccountUpsert) SetTempUnschedulableRevision(v int64) *AccountUpsert {
+	u.Set(account.FieldTempUnschedulableRevision, v)
+	return u
+}
+
+// UpdateTempUnschedulableRevision sets the "temp_unschedulable_revision" field to the value that was provided on create.
+func (u *AccountUpsert) UpdateTempUnschedulableRevision() *AccountUpsert {
+	u.SetExcluded(account.FieldTempUnschedulableRevision)
+	return u
+}
+
+// AddTempUnschedulableRevision adds v to the "temp_unschedulable_revision" field.
+func (u *AccountUpsert) AddTempUnschedulableRevision(v int64) *AccountUpsert {
+	u.Add(account.FieldTempUnschedulableRevision, v)
 	return u
 }
 
@@ -1985,6 +2028,27 @@ func (u *AccountUpsertOne) UpdateTempUnschedulableProtectedUntil() *AccountUpser
 func (u *AccountUpsertOne) ClearTempUnschedulableProtectedUntil() *AccountUpsertOne {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearTempUnschedulableProtectedUntil()
+	})
+}
+
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (u *AccountUpsertOne) SetTempUnschedulableRevision(v int64) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetTempUnschedulableRevision(v)
+	})
+}
+
+// AddTempUnschedulableRevision adds v to the "temp_unschedulable_revision" field.
+func (u *AccountUpsertOne) AddTempUnschedulableRevision(v int64) *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.AddTempUnschedulableRevision(v)
+	})
+}
+
+// UpdateTempUnschedulableRevision sets the "temp_unschedulable_revision" field to the value that was provided on create.
+func (u *AccountUpsertOne) UpdateTempUnschedulableRevision() *AccountUpsertOne {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateTempUnschedulableRevision()
 	})
 }
 
@@ -2791,6 +2855,27 @@ func (u *AccountUpsertBulk) UpdateTempUnschedulableProtectedUntil() *AccountUpse
 func (u *AccountUpsertBulk) ClearTempUnschedulableProtectedUntil() *AccountUpsertBulk {
 	return u.Update(func(s *AccountUpsert) {
 		s.ClearTempUnschedulableProtectedUntil()
+	})
+}
+
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (u *AccountUpsertBulk) SetTempUnschedulableRevision(v int64) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.SetTempUnschedulableRevision(v)
+	})
+}
+
+// AddTempUnschedulableRevision adds v to the "temp_unschedulable_revision" field.
+func (u *AccountUpsertBulk) AddTempUnschedulableRevision(v int64) *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.AddTempUnschedulableRevision(v)
+	})
+}
+
+// UpdateTempUnschedulableRevision sets the "temp_unschedulable_revision" field to the value that was provided on create.
+func (u *AccountUpsertBulk) UpdateTempUnschedulableRevision() *AccountUpsertBulk {
+	return u.Update(func(s *AccountUpsert) {
+		s.UpdateTempUnschedulableRevision()
 	})
 }
 

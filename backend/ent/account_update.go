@@ -470,6 +470,27 @@ func (_u *AccountUpdate) ClearTempUnschedulableProtectedUntil() *AccountUpdate {
 	return _u
 }
 
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (_u *AccountUpdate) SetTempUnschedulableRevision(v int64) *AccountUpdate {
+	_u.mutation.ResetTempUnschedulableRevision()
+	_u.mutation.SetTempUnschedulableRevision(v)
+	return _u
+}
+
+// SetNillableTempUnschedulableRevision sets the "temp_unschedulable_revision" field if the given value is not nil.
+func (_u *AccountUpdate) SetNillableTempUnschedulableRevision(v *int64) *AccountUpdate {
+	if v != nil {
+		_u.SetTempUnschedulableRevision(*v)
+	}
+	return _u
+}
+
+// AddTempUnschedulableRevision adds value to the "temp_unschedulable_revision" field.
+func (_u *AccountUpdate) AddTempUnschedulableRevision(v int64) *AccountUpdate {
+	_u.mutation.AddTempUnschedulableRevision(v)
+	return _u
+}
+
 // SetTempUnschedulableReason sets the "temp_unschedulable_reason" field.
 func (_u *AccountUpdate) SetTempUnschedulableReason(v string) *AccountUpdate {
 	_u.mutation.SetTempUnschedulableReason(v)
@@ -944,6 +965,12 @@ func (_u *AccountUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.TempUnschedulableProtectedUntilCleared() {
 		_spec.ClearField(account.FieldTempUnschedulableProtectedUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.TempUnschedulableRevision(); ok {
+		_spec.SetField(account.FieldTempUnschedulableRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedTempUnschedulableRevision(); ok {
+		_spec.AddField(account.FieldTempUnschedulableRevision, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.TempUnschedulableReason(); ok {
 		_spec.SetField(account.FieldTempUnschedulableReason, field.TypeString, value)
@@ -1636,6 +1663,27 @@ func (_u *AccountUpdateOne) ClearTempUnschedulableProtectedUntil() *AccountUpdat
 	return _u
 }
 
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (_u *AccountUpdateOne) SetTempUnschedulableRevision(v int64) *AccountUpdateOne {
+	_u.mutation.ResetTempUnschedulableRevision()
+	_u.mutation.SetTempUnschedulableRevision(v)
+	return _u
+}
+
+// SetNillableTempUnschedulableRevision sets the "temp_unschedulable_revision" field if the given value is not nil.
+func (_u *AccountUpdateOne) SetNillableTempUnschedulableRevision(v *int64) *AccountUpdateOne {
+	if v != nil {
+		_u.SetTempUnschedulableRevision(*v)
+	}
+	return _u
+}
+
+// AddTempUnschedulableRevision adds value to the "temp_unschedulable_revision" field.
+func (_u *AccountUpdateOne) AddTempUnschedulableRevision(v int64) *AccountUpdateOne {
+	_u.mutation.AddTempUnschedulableRevision(v)
+	return _u
+}
+
 // SetTempUnschedulableReason sets the "temp_unschedulable_reason" field.
 func (_u *AccountUpdateOne) SetTempUnschedulableReason(v string) *AccountUpdateOne {
 	_u.mutation.SetTempUnschedulableReason(v)
@@ -2140,6 +2188,12 @@ func (_u *AccountUpdateOne) sqlSave(ctx context.Context) (_node *Account, err er
 	}
 	if _u.mutation.TempUnschedulableProtectedUntilCleared() {
 		_spec.ClearField(account.FieldTempUnschedulableProtectedUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.TempUnschedulableRevision(); ok {
+		_spec.SetField(account.FieldTempUnschedulableRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedTempUnschedulableRevision(); ok {
+		_spec.AddField(account.FieldTempUnschedulableRevision, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.TempUnschedulableReason(); ok {
 		_spec.SetField(account.FieldTempUnschedulableReason, field.TypeString, value)

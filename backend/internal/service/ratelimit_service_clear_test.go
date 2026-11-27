@@ -119,11 +119,6 @@ func TestProtectedTempUnschedulableDoesNotReportOrInvalidateRecovery(t *testing.
 	svc.SetAccountRuntimeBlocker(blocker)
 	ctx := context.Background()
 
-	require.ErrorIs(t, svc.ClearTempUnschedulable(ctx, 42), ErrTempUnschedulableProtected)
-	require.Zero(t, repo.clearModelRateLimitCalls)
-	require.Zero(t, repo.clearRateLimitCalls)
-	require.Empty(t, cache.deletedIDs)
-
 	result, err := svc.RecoverAccountAfterSuccessfulTest(ctx, 42)
 	require.NoError(t, err)
 	require.False(t, result.ClearedRateLimit, "the sole runtime block is still present")
@@ -132,7 +127,7 @@ func TestProtectedTempUnschedulableDoesNotReportOrInvalidateRecovery(t *testing.
 	refresh := &TokenRefreshService{accountRepo: repo, tempUnschedCache: cache}
 	refresh.SetAccountRuntimeBlocker(blocker)
 	refresh.postRefreshActions(ctx, account)
-	require.Equal(t, 3, repo.clearTempUnschedCalls)
+	require.Equal(t, 2, repo.clearTempUnschedCalls)
 	require.Empty(t, cache.deletedIDs)
 	require.Empty(t, blocker.clearedIDs)
 }

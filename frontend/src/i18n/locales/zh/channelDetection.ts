@@ -40,7 +40,7 @@ export default {
   degradationQuestion: '是否降智？',
   yes: '是',
   confirmTitle: '确认停调账号',
-  confirmMessage: '确认后，「{account}」将停调至少 24 小时，影响此账号在所有分组的调度。',
+  confirmMessage: '确认后，「{account}」预计停调 24 小时，影响此账号在所有分组的调度。可在账号管理提前恢复。',
   confirmAction: '确认停调',
   confirming: '正在确认…',
   confirmationChanged: '样本、账号或关联分组已变更，请刷新后重新核对。',

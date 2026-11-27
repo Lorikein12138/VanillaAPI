@@ -1339,7 +1339,8 @@ func (h *AccountHandler) RecoverState(c *gin.Context) {
 	}
 
 	if _, err := h.rateLimitService.RecoverAccountState(c.Request.Context(), accountID, service.AccountRecoveryOptions{
-		InvalidateToken: true,
+		InvalidateToken:        true,
+		OverrideTempProtection: true,
 	}); err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -2662,7 +2663,7 @@ func (h *AccountHandler) ClearTempUnschedulable(c *gin.Context) {
 		return
 	}
 
-	if err := h.rateLimitService.ClearTempUnschedulable(c.Request.Context(), accountID); err != nil {
+	if err := h.rateLimitService.ClearTempUnschedulableManually(c.Request.Context(), accountID); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}

@@ -216,6 +216,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	}
 	if _, err := client.ExecContext(ctx, `
 		UPDATE accounts SET temp_unschedulable_protected_until = $1,
+			temp_unschedulable_revision = temp_unschedulable_revision + 1,
 			updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = $2
 	`, until, proof.AccountID); err != nil {
 		return receipt, err

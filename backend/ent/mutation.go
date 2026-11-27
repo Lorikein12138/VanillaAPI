@@ -2315,6 +2315,8 @@ type AccountMutation struct {
 	overload_until                     *time.Time
 	temp_unschedulable_until           *time.Time
 	temp_unschedulable_protected_until *time.Time
+	temp_unschedulable_revision        *int64
+	addtemp_unschedulable_revision     *int64
 	temp_unschedulable_reason          *string
 	session_window_start               *time.Time
 	session_window_end                 *time.Time
@@ -3644,6 +3646,62 @@ func (m *AccountMutation) ResetTempUnschedulableProtectedUntil() {
 	delete(m.clearedFields, account.FieldTempUnschedulableProtectedUntil)
 }
 
+// SetTempUnschedulableRevision sets the "temp_unschedulable_revision" field.
+func (m *AccountMutation) SetTempUnschedulableRevision(i int64) {
+	m.temp_unschedulable_revision = &i
+	m.addtemp_unschedulable_revision = nil
+}
+
+// TempUnschedulableRevision returns the value of the "temp_unschedulable_revision" field in the mutation.
+func (m *AccountMutation) TempUnschedulableRevision() (r int64, exists bool) {
+	v := m.temp_unschedulable_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTempUnschedulableRevision returns the old "temp_unschedulable_revision" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldTempUnschedulableRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTempUnschedulableRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTempUnschedulableRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTempUnschedulableRevision: %w", err)
+	}
+	return oldValue.TempUnschedulableRevision, nil
+}
+
+// AddTempUnschedulableRevision adds i to the "temp_unschedulable_revision" field.
+func (m *AccountMutation) AddTempUnschedulableRevision(i int64) {
+	if m.addtemp_unschedulable_revision != nil {
+		*m.addtemp_unschedulable_revision += i
+	} else {
+		m.addtemp_unschedulable_revision = &i
+	}
+}
+
+// AddedTempUnschedulableRevision returns the value that was added to the "temp_unschedulable_revision" field in this mutation.
+func (m *AccountMutation) AddedTempUnschedulableRevision() (r int64, exists bool) {
+	v := m.addtemp_unschedulable_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTempUnschedulableRevision resets all changes to the "temp_unschedulable_revision" field.
+func (m *AccountMutation) ResetTempUnschedulableRevision() {
+	m.temp_unschedulable_revision = nil
+	m.addtemp_unschedulable_revision = nil
+}
+
 // SetTempUnschedulableReason sets the "temp_unschedulable_reason" field.
 func (m *AccountMutation) SetTempUnschedulableReason(s string) {
 	m.temp_unschedulable_reason = &s
@@ -4188,7 +4246,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 32)
+	fields := make([]string, 0, 33)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4266,6 +4324,9 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.temp_unschedulable_protected_until != nil {
 		fields = append(fields, account.FieldTempUnschedulableProtectedUntil)
+	}
+	if m.temp_unschedulable_revision != nil {
+		fields = append(fields, account.FieldTempUnschedulableRevision)
 	}
 	if m.temp_unschedulable_reason != nil {
 		fields = append(fields, account.FieldTempUnschedulableReason)
@@ -4345,6 +4406,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.TempUnschedulableUntil()
 	case account.FieldTempUnschedulableProtectedUntil:
 		return m.TempUnschedulableProtectedUntil()
+	case account.FieldTempUnschedulableRevision:
+		return m.TempUnschedulableRevision()
 	case account.FieldTempUnschedulableReason:
 		return m.TempUnschedulableReason()
 	case account.FieldSessionWindowStart:
@@ -4418,6 +4481,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldTempUnschedulableUntil(ctx)
 	case account.FieldTempUnschedulableProtectedUntil:
 		return m.OldTempUnschedulableProtectedUntil(ctx)
+	case account.FieldTempUnschedulableRevision:
+		return m.OldTempUnschedulableRevision(ctx)
 	case account.FieldTempUnschedulableReason:
 		return m.OldTempUnschedulableReason(ctx)
 	case account.FieldSessionWindowStart:
@@ -4621,6 +4686,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetTempUnschedulableProtectedUntil(v)
 		return nil
+	case account.FieldTempUnschedulableRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTempUnschedulableRevision(v)
+		return nil
 	case account.FieldTempUnschedulableReason:
 		v, ok := value.(string)
 		if !ok {
@@ -4686,6 +4758,9 @@ func (m *AccountMutation) AddedFields() []string {
 	if m.addrate_multiplier != nil {
 		fields = append(fields, account.FieldRateMultiplier)
 	}
+	if m.addtemp_unschedulable_revision != nil {
+		fields = append(fields, account.FieldTempUnschedulableRevision)
+	}
 	return fields
 }
 
@@ -4704,6 +4779,8 @@ func (m *AccountMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedPriority()
 	case account.FieldRateMultiplier:
 		return m.AddedRateMultiplier()
+	case account.FieldTempUnschedulableRevision:
+		return m.AddedTempUnschedulableRevision()
 	}
 	return nil, false
 }
@@ -4747,6 +4824,13 @@ func (m *AccountMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddRateMultiplier(v)
+		return nil
+	case account.FieldTempUnschedulableRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTempUnschedulableRevision(v)
 		return nil
 	}
 	return fmt.Errorf("unknown Account numeric field %s", name)
@@ -4963,6 +5047,9 @@ func (m *AccountMutation) ResetField(name string) error {
 		return nil
 	case account.FieldTempUnschedulableProtectedUntil:
 		m.ResetTempUnschedulableProtectedUntil()
+		return nil
+	case account.FieldTempUnschedulableRevision:
+		m.ResetTempUnschedulableRevision()
 		return nil
 	case account.FieldTempUnschedulableReason:
 		m.ResetTempUnschedulableReason()

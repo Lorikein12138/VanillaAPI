@@ -58,6 +58,10 @@ func (m *sessionWindowMockRepo) ClearModelRateLimits(_ context.Context, _ int64)
 func (m *sessionWindowMockRepo) ClearModelRateLimit(_ context.Context, _ int64, _ string) error {
 	return nil
 }
+func (m *sessionWindowMockRepo) ClearTempUnschedulableManually(context.Context, int64) error {
+	return nil
+}
+
 func (m *sessionWindowMockRepo) ClearTempUnschedulable(_ context.Context, _ int64) error {
 	return nil
 }

@@ -1817,6 +1817,7 @@ func (r *accountRepository) SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnc
 		UPDATE accounts AS a
 		SET temp_unschedulable_until = $1,
 			temp_unschedulable_reason = $2,
+			temp_unschedulable_revision = a.temp_unschedulable_revision + 1,
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
@@ -2591,9 +2592,10 @@ func (r *accountRepository) SetTempUnschedulable(ctx context.Context, id int64, 
 
 func setTempUnschedulable(ctx context.Context, exec sqlExecutor, id int64, until time.Time, reason string) (bool, error) {
 	result, err := exec.ExecContext(ctx, `
-		UPDATE accounts
+		UPDATE accounts AS a
 		SET temp_unschedulable_until = $1,
 			temp_unschedulable_reason = $2,
+			temp_unschedulable_revision = a.temp_unschedulable_revision + 1,
 			updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
 		WHERE id = $3
 			AND deleted_at IS NULL
@@ -2625,6 +2627,7 @@ func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 				ELSE a.temp_unschedulable_until
 			END,
 			temp_unschedulable_reason = $2,
+			temp_unschedulable_revision = a.temp_unschedulable_revision + 1,
 			updated_at = NOW()
 		WHERE a.id = $3
 			AND a.deleted_at IS NULL
@@ -2656,8 +2659,31 @@ func (r *accountRepository) SetGrokCredentialTempUnschedulableIfMatch(
 }
 
 func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64) error {
+	return r.clearTempUnschedulable(ctx, id, false)
+}
+
+func (r *accountRepository) ClearTempUnschedulableManually(ctx context.Context, id int64) error {
+	if dbent.TxFromContext(ctx) != nil {
+		return r.clearTempUnschedulable(ctx, id, true)
+	}
+	tx, err := r.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := r.clearTempUnschedulable(dbent.NewTxContext(ctx, tx), id, true); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	r.syncSchedulerAccountSnapshotDetached(ctx, id)
+	return nil
+}
+
+func (r *accountRepository) clearTempUnschedulable(ctx context.Context, id int64, manual bool) error {
 	if scoped := r.accountTransactionScope(ctx); scoped != r {
-		return scoped.ClearTempUnschedulable(ctx, id)
+		return scoped.clearTempUnschedulable(ctx, id, manual)
 	}
 	var exists, cleared bool
 	err := scanSingleRow(ctx, r.sql, `
@@ -2669,14 +2695,15 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 			SET temp_unschedulable_until = NULL,
 				temp_unschedulable_reason = NULL,
 				temp_unschedulable_protected_until = NULL,
+				temp_unschedulable_revision = a.temp_unschedulable_revision + 1,
 				updated_at = GREATEST(clock_timestamp(), a.updated_at + interval '1 microsecond')
 			FROM target
-			WHERE a.id = target.id AND (target.temp_unschedulable_protected_until IS NULL
+			WHERE a.id = target.id AND ($2 OR target.temp_unschedulable_protected_until IS NULL
 				OR target.temp_unschedulable_protected_until <= clock_timestamp())
 			RETURNING a.id
 		)
 		SELECT EXISTS (SELECT 1 FROM target), EXISTS (SELECT 1 FROM cleared)
-	`, []any{id}, &exists, &cleared)
+	`, []any{id, manual}, &exists, &cleared)
 	if err != nil {
 		return err
 	}
@@ -2687,6 +2714,9 @@ func (r *accountRepository) ClearTempUnschedulable(ctx context.Context, id int64
 		return service.ErrTempUnschedulableProtected
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
+		if manual {
+			return err
+		}
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue clear temp unschedulable failed: account=%d err=%v", id, err)
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
@@ -3839,6 +3869,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		TempUnschedulableUntil:          m.TempUnschedulableUntil,
 		TempUnschedulableReason:         derefString(m.TempUnschedulableReason),
 		TempUnschedulableProtectedUntil: m.TempUnschedulableProtectedUntil,
+		TempUnschedulableRevision:       m.TempUnschedulableRevision,
 		SessionWindowStart:              m.SessionWindowStart,
 		SessionWindowEnd:                m.SessionWindowEnd,
 		SessionWindowStatus:             derefString(m.SessionWindowStatus),

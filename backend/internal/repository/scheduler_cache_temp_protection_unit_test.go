@@ -120,16 +120,76 @@ func TestSchedulerCacheProtectedProjectionRejectsDelayedWritersAndSelection(t *t
 		}
 	}
 
-	// Once protection expires, a normal projection can replace it with the
-	// account's authoritative remaining state. Unprotected writes never fence.
-	mr.SetTime(hold.Add(time.Second))
-	remaining := protected
-	remaining.TempUnschedulableProtectedUntil = nil
-	require.NoError(t, cache.SetAccount(ctx, &remaining))
+	// An outbox refetch can publish the committed clear over an active hold.
+	// A delayed normal snapshot in between cannot erase the clear watermark.
+	recovered := protected
+	recovered.Name = "recovered"
+	recovered.TempUnschedulableRevision = 1
+	recovered.TempUnschedulableUntil = nil
+	recovered.TempUnschedulableProtectedUntil = nil
+	require.NoError(t, cache.SetAccount(ctx, &recovered))
+	assertProjection := func(expected service.Account) {
+		t.Helper()
+		full, err := cache.GetAccount(ctx, stale.ID)
+		require.NoError(t, err)
+		require.Equal(t, expected.Name, full.Name)
+		require.Equal(t, expected.TempUnschedulableUntil, full.TempUnschedulableUntil)
+		require.Equal(t, expected.TempUnschedulableProtectedUntil, full.TempUnschedulableProtectedUntil)
+		require.Equal(t, expected.TempUnschedulableRevision, full.TempUnschedulableRevision)
+		accounts, ok, err := cache.GetSnapshot(ctx, bucketFor(groups[0]))
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, expected.TempUnschedulableUntil, accounts[0].TempUnschedulableUntil)
+		require.Equal(t, expected.TempUnschedulableProtectedUntil, accounts[0].TempUnschedulableProtectedUntil)
+		require.Equal(t, expected.TempUnschedulableRevision, accounts[0].TempUnschedulableRevision)
+	}
 	require.NoError(t, delayed.SetAccount(ctx, &stale))
-	full, err = cache.GetAccount(ctx, stale.ID)
-	require.NoError(t, err)
-	require.Equal(t, stale.Name, full.Name)
-	require.Nil(t, full.TempUnschedulableUntil)
-	require.Nil(t, full.TempUnschedulableProtectedUntil)
+	require.NoError(t, delayed.SetAccount(ctx, &protected))
+	assertProjection(recovered)
+	for _, selectionCtx := range []context.Context{ctx, adaptive} {
+		selected, err := gateway.SelectAccount(selectionCtx, &groups[0], "")
+		require.NoError(t, err)
+		require.Equal(t, recovered.ID, selected.ID)
+	}
+
+	ordinary := recovered
+	ordinary.Name = "ordinary"
+	ordinary.TempUnschedulableRevision = 2
+	ordinary.TempUnschedulableUntil = ptrTime(hold.Add(time.Hour))
+	require.NoError(t, cache.SetAccount(ctx, &ordinary))
+	require.NoError(t, delayed.SetAccount(ctx, &recovered))
+	assertProjection(ordinary)
+
+	cleared := recovered
+	cleared.Name = "cleared"
+	cleared.TempUnschedulableRevision = 3
+	require.NoError(t, cache.SetAccount(ctx, &cleared))
+	require.NoError(t, delayed.SetAccount(ctx, &ordinary))
+	assertProjection(cleared)
+
+	// Even a matching deadline from an older revision cannot lower the watermark.
+	require.NoError(t, delayed.SetAccount(ctx, &recovered))
+	require.NoError(t, delayed.SetAccount(ctx, &ordinary))
+	assertProjection(cleared)
+
+	// A fresh confirmation advances the revision. The previously recovered
+	// and ordinary snapshots cannot clear or alter that protection.
+	reconfirmed := protected
+	reconfirmed.Name = "reconfirmed"
+	reconfirmed.TempUnschedulableRevision = 4
+	reconfirmed.TempUnschedulableProtectedUntil = ptrTime(hold.Add(time.Microsecond))
+	require.NoError(t, cache.SetAccount(ctx, &reconfirmed))
+	publish(groups[0], recovered)
+	require.NoError(t, delayed.SetAccount(ctx, &ordinary))
+	require.NoError(t, delayed.SetAccount(ctx, &protected))
+	assertProjection(reconfirmed)
+
+	mr.SetTime(hold.Add(time.Second))
+	expired := reconfirmed
+	expired.TempUnschedulableRevision = 5
+	expired.TempUnschedulableUntil = nil
+	expired.TempUnschedulableProtectedUntil = nil
+	require.NoError(t, cache.SetAccount(ctx, &expired))
+	require.NoError(t, delayed.SetAccount(ctx, &stale))
+	assertProjection(expired)
 }
