@@ -178,6 +178,8 @@ func (Account) Fields() []ent.Field {
 
 		field.Time("temp_unschedulable_protected_until").Optional().Nillable().StructTag(`json:"-"`).
 			Comment("Minimum temporary suspension deadline set by an audited manual action"),
+		field.Int64("temp_unschedulable_revision").Default(0).StructTag(`json:"-"`).
+			Comment("Revision of temporary suspension state for scheduler projection ordering"),
 
 		// temp_unschedulable_reason: 临时不可调度原因，便于排障审计
 		field.String("temp_unschedulable_reason").

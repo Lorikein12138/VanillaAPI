@@ -58,7 +58,8 @@ type SuccessfulTestRecoveryResult struct {
 
 // AccountRecoveryOptions 控制账号恢复时的附加行为。
 type AccountRecoveryOptions struct {
-	InvalidateToken bool
+	InvalidateToken        bool
+	OverrideTempProtection bool
 }
 
 type geminiUsageCacheEntry struct {
@@ -2261,11 +2262,11 @@ func (s *RateLimitService) samplePassiveUsageFromHeaders(ctx context.Context, ac
 
 // ClearRateLimit 清除账号的限流状态
 func (s *RateLimitService) ClearRateLimit(ctx context.Context, accountID int64) error {
-	_, err := s.clearRateLimit(ctx, accountID)
+	_, err := s.clearRateLimit(ctx, accountID, false)
 	return err
 }
 
-func (s *RateLimitService) clearRateLimit(ctx context.Context, accountID int64) (tempProtected bool, err error) {
+func (s *RateLimitService) clearRateLimit(ctx context.Context, accountID int64, overrideTempProtection bool) (tempProtected bool, err error) {
 	if err := s.accountRepo.ClearRateLimit(ctx, accountID); err != nil {
 		return false, err
 	}
@@ -2276,7 +2277,11 @@ func (s *RateLimitService) clearRateLimit(ctx context.Context, accountID int64) 
 		return false, err
 	}
 	// 清除限流时一并清理临时不可调度状态，避免周限/窗口重置后仍被本地临时状态阻断。
-	if err := s.accountRepo.ClearTempUnschedulable(ctx, accountID); err != nil {
+	clearTemp := s.accountRepo.ClearTempUnschedulable
+	if overrideTempProtection {
+		clearTemp = s.accountRepo.ClearTempUnschedulableManually
+	}
+	if err := clearTemp(ctx, accountID); err != nil {
 		if errors.Is(err, ErrTempUnschedulableProtected) {
 			s.ResetOpenAI403Counter(ctx, accountID)
 			return true, nil
@@ -2324,8 +2329,9 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 
 	hasRateLimits := hasRecoverableRateLimitState(account)
 	var tempProtected bool
-	if hasRateLimits || account.TempUnschedulableUntil != nil {
-		tempProtected, err = s.clearRateLimit(ctx, accountID)
+	hasActiveProtection := account.TempUnschedulableProtectedUntil != nil && account.TempUnschedulableProtectedUntil.After(time.Now())
+	if hasRateLimits || account.TempUnschedulableUntil != nil || (options.OverrideTempProtection && hasActiveProtection) {
+		tempProtected, err = s.clearRateLimit(ctx, accountID, options.OverrideTempProtection)
 		if err != nil {
 			return nil, err
 		}
@@ -2347,8 +2353,8 @@ func (s *RateLimitService) RecoverAccountAfterSuccessfulTest(ctx context.Context
 	return s.RecoverAccountState(ctx, accountID, AccountRecoveryOptions{})
 }
 
-func (s *RateLimitService) ClearTempUnschedulable(ctx context.Context, accountID int64) error {
-	if err := s.accountRepo.ClearTempUnschedulable(ctx, accountID); err != nil {
+func (s *RateLimitService) ClearTempUnschedulableManually(ctx context.Context, accountID int64) error {
+	if err := s.accountRepo.ClearTempUnschedulableManually(ctx, accountID); err != nil {
 		return err
 	}
 	if s.tempUnschedCache != nil {

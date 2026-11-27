@@ -14,6 +14,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/Wei-Shaw/sub2api/migrations"
@@ -191,15 +192,85 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 		UPDATE accounts SET temp_unschedulable_until=$1, temp_unschedulable_reason='existing',
 			temp_unschedulable_protected_until=now()-interval '1 second' WHERE id=$2`, longer, accountID)
 	require.NoError(t, err)
+	priorRevision := firstClient.Account.GetX(ctx, accountID).TempUnschedulableRevision
 	preserved, err := first.Confirm(ctx, input)
 	require.NoError(t, err)
 	require.True(t, longer.Equal(preserved.Until))
 	require.ErrorIs(t, second.accounts.ClearTempUnschedulable(ctx, accountID), service.ErrTempUnschedulableProtected)
 	paused = firstClient.Account.GetX(ctx, accountID)
+	require.Equal(t, priorRevision+1, paused.TempUnschedulableRevision, "confirmation advances revision even with a longer existing deadline")
 	require.True(t, longer.Equal(*paused.TempUnschedulableUntil))
 	require.Equal(t, "existing", *paused.TempUnschedulableReason)
 	require.NoError(t, firstDB.QueryRowContext(ctx, `SELECT count(*) FROM scheduler_outbox WHERE account_id=$1`, accountID).Scan(&outboxEvents))
 	require.Equal(t, 1, outboxEvents, "the protection changes the scheduler projection")
+
+	schedulerCache, _ := newSchedulerCacheUnitWithRedis(t)
+	beforeRecovery, err := first.accounts.GetByID(ctx, accountID)
+	require.NoError(t, err)
+	require.NoError(t, schedulerCache.SetAccount(ctx, beforeRecovery))
+
+	// A manual clear commits the new projection and its outbox event together.
+	_, err = firstDB.ExecContext(ctx, `DELETE FROM scheduler_outbox WHERE account_id=$1`, accountID)
+	require.NoError(t, err)
+	_, err = firstDB.ExecContext(ctx, `ALTER TABLE scheduler_outbox ADD CONSTRAINT fail_recovery_event CHECK (false)`)
+	require.NoError(t, err)
+	require.ErrorContains(t, second.accounts.ClearTempUnschedulableManually(ctx, accountID), "fail_recovery_event")
+	require.Equal(t, *paused.TempUnschedulableUntil, *firstClient.Account.GetX(ctx, accountID).TempUnschedulableUntil)
+	_, err = firstDB.ExecContext(ctx, `ALTER TABLE scheduler_outbox DROP CONSTRAINT fail_recovery_event`)
+	require.NoError(t, err)
+	recovery := service.NewRateLimitService(second.accounts, nil, &config.Config{}, nil, nil)
+	result, err := recovery.RecoverAccountState(ctx, accountID, service.AccountRecoveryOptions{OverrideTempProtection: true})
+	require.NoError(t, err)
+	require.True(t, result.ClearedRateLimit)
+	recovered := firstClient.Account.GetX(ctx, accountID)
+	require.Nil(t, recovered.TempUnschedulableUntil)
+	require.Nil(t, recovered.TempUnschedulableProtectedUntil)
+	require.Nil(t, recovered.TempUnschedulableReason)
+	require.Equal(t, paused.TempUnschedulableRevision+1, recovered.TempUnschedulableRevision)
+	require.NoError(t, firstDB.QueryRowContext(ctx, `SELECT count(*) FROM scheduler_outbox WHERE account_id=$1 AND event_type=$2`, accountID, service.SchedulerOutboxEventAccountChanged).Scan(&outboxEvents))
+	require.Equal(t, 1, outboxEvents)
+	// The outbox consumer refetches with GetByID and writes through SetAccount.
+	// Neither coordinator has a direct scheduler cache attached in this fixture.
+	recoveryProjection, err := first.accounts.GetByID(ctx, accountID)
+	require.NoError(t, err)
+	require.Empty(t, recoveryProjection.TempUnschedulableReason)
+	require.Equal(t, recovered.TempUnschedulableRevision, recoveryProjection.TempUnschedulableRevision)
+	require.NoError(t, schedulerCache.SetAccount(ctx, recoveryProjection))
+	require.NoError(t, schedulerCache.SetAccount(ctx, beforeRecovery))
+	cachedRecovery, err := schedulerCache.GetAccount(ctx, accountID)
+	require.NoError(t, err)
+	require.Nil(t, cachedRecovery.TempUnschedulableUntil)
+	require.Nil(t, cachedRecovery.TempUnschedulableProtectedUntil)
+	require.Equal(t, recovered.TempUnschedulableRevision, cachedRecovery.TempUnschedulableRevision)
+	for _, id := range []int64{groupID, otherGroupID} {
+		candidates, err := first.accounts.ListSchedulableByGroupIDAndPlatform(ctx, id, service.PlatformOpenAI)
+		require.NoError(t, err)
+		require.Len(t, candidates, 1)
+	}
+
+	// Retrying the same proof returns its receipt without recreating a block.
+	scope, err = first.ConfirmationScope(ctx, selection, input.Proof)
+	require.NoError(t, err)
+	require.Nil(t, scope)
+	replayed, err := first.Confirm(ctx, input)
+	require.NoError(t, err)
+	require.Equal(t, preserved.Until, replayed.Until)
+	require.Nil(t, firstClient.Account.GetX(ctx, accountID).TempUnschedulableUntil)
+	require.Equal(t, recovered.TempUnschedulableRevision, firstClient.Account.GetX(ctx, accountID).TempUnschedulableRevision)
+
+	// The revision advances on an ordinary suspension and its automatic clear.
+	require.NoError(t, second.accounts.SetTempUnschedulable(ctx, accountID, time.Now().Add(time.Hour), "ordinary"))
+	require.Equal(t, "ordinary", *firstClient.Account.GetX(ctx, accountID).TempUnschedulableReason)
+	require.NoError(t, second.accounts.ClearTempUnschedulable(ctx, accountID))
+	ordinaryCleared := firstClient.Account.GetX(ctx, accountID)
+	require.Equal(t, recovered.TempUnschedulableRevision+2, ordinaryCleared.TempUnschedulableRevision)
+
+	input.Proof = publish(groupID)
+	_, err = first.Confirm(ctx, input)
+	require.NoError(t, err)
+	reconfirmed := firstClient.Account.GetX(ctx, accountID)
+	require.Greater(t, reconfirmed.TempUnschedulableRevision, ordinaryCleared.TempUnschedulableRevision)
+	require.ErrorIs(t, second.accounts.ClearTempUnschedulable(ctx, accountID), service.ErrTempUnschedulableProtected)
 
 	// Natural expiry restores the account through the existing eligibility path.
 	_, err = firstDB.ExecContext(ctx, `
@@ -210,7 +281,9 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, candidates, 1)
 	require.NoError(t, second.accounts.ClearTempUnschedulable(ctx, accountID))
-	require.Nil(t, firstClient.Account.GetX(ctx, accountID).TempUnschedulableProtectedUntil)
+	expired := firstClient.Account.GetX(ctx, accountID)
+	require.Nil(t, expired.TempUnschedulableUntil)
+	require.Nil(t, expired.TempUnschedulableProtectedUntil)
 
 	_, err = firstDB.ExecContext(ctx, `
 		UPDATE settings SET value=jsonb_set(value::jsonb, ARRAY['proofs',$1::text,'completed_at'],
@@ -221,4 +294,86 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	input.Proof = snapshot.Proofs[groupID]
 	_, err = first.Confirm(ctx, input)
 	require.ErrorIs(t, err, service.ErrDetectionChanged)
+}
+
+func TestTempUnschedulablePostgresOrdersWritesAfterRecovery(t *testing.T) {
+	db, _ := openDetectionTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	require.NoError(t, client.Schema.Create(ctx))
+	_, err := db.ExecContext(ctx, `CREATE TABLE scheduler_outbox (
+		event_type TEXT NOT NULL, account_id BIGINT, group_id BIGINT, payload JSONB, dedup_key TEXT
+	);
+	CREATE UNIQUE INDEX test_outbox_dedup ON scheduler_outbox(dedup_key) WHERE dedup_key IS NOT NULL;`)
+	require.NoError(t, err)
+	repo := newAccountRepositoryWithSQL(client, db, nil)
+	credentials := map[string]any{"access_token": "fixture"}
+	until := time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour)
+	id := client.Account.Create().SetName("Grok fixture").SetPlatform(service.PlatformGrok).
+		SetType(service.AccountTypeOAuth).SetCredentials(credentials).
+		SetTempUnschedulableUntil(until).SetTempUnschedulableProtectedUntil(until).
+		SetTempUnschedulableReason("legacy").SaveX(ctx).ID
+
+	// Simulate a populated schema at migration 253, then apply the embedded 254.
+	_, err = db.ExecContext(ctx, `ALTER TABLE accounts DROP COLUMN temp_unschedulable_revision`)
+	require.NoError(t, err)
+	var originalFile, migratedFile int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT pg_relation_filenode('accounts'::regclass)`).Scan(&originalFile))
+	migration, err := migrations.FS.ReadFile("254_account_temp_unschedulable_revision.sql")
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, string(migration))
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT pg_relation_filenode('accounts'::regclass)`).Scan(&migratedFile))
+	require.Equal(t, originalFile, migratedFile, "adding the constant default does not rewrite existing rows")
+	legacy, err := repo.GetByID(ctx, id)
+	require.NoError(t, err)
+	require.Zero(t, legacy.TempUnschedulableRevision)
+	require.Equal(t, until, *legacy.TempUnschedulableProtectedUntil)
+	require.Equal(t, "legacy", legacy.TempUnschedulableReason)
+	require.ErrorIs(t, repo.ClearTempUnschedulable(ctx, id), service.ErrTempUnschedulableProtected)
+
+	var previousRevision int64
+	assertNext := func(deadline *time.Time, reason string) {
+		t.Helper()
+		account, err := repo.GetByID(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, previousRevision+1, account.TempUnschedulableRevision)
+		previousRevision = account.TempUnschedulableRevision
+		require.Nil(t, account.TempUnschedulableProtectedUntil)
+		require.Equal(t, reason, account.TempUnschedulableReason)
+		if deadline == nil {
+			require.Nil(t, account.TempUnschedulableUntil)
+		} else {
+			require.True(t, deadline.Equal(*account.TempUnschedulableUntil))
+		}
+		// Other updates are allowed to reset UpdatedAt to an older transaction time.
+		_, err = db.ExecContext(ctx, `UPDATE accounts SET updated_at = updated_at - interval '1 day' WHERE id = $1`, id)
+		require.NoError(t, err)
+	}
+	require.NoError(t, repo.ClearTempUnschedulableManually(ctx, id))
+	assertNext(nil, "")
+	_, err = db.ExecContext(ctx, string(migration))
+	require.NoError(t, err)
+	require.Equal(t, previousRevision, client.Account.GetX(ctx, id).TempUnschedulableRevision)
+	require.NoError(t, repo.SetTempUnschedulable(ctx, id, until, "ordinary"))
+	assertNext(&until, "ordinary")
+	require.NoError(t, repo.ClearTempUnschedulable(ctx, id))
+	assertNext(nil, "")
+
+	retryReason := "token refresh retry exhausted: fixture"
+	applied, err := repo.SetGrokOAuthRefreshTempUnschedulableIfCredentialsUnchanged(ctx, id, credentials, nil, until, retryReason)
+	require.NoError(t, err)
+	require.True(t, applied)
+	assertNext(&until, retryReason)
+	require.NoError(t, repo.ClearTempUnschedulable(ctx, id))
+	assertNext(nil, "")
+
+	snapshot := service.GrokCredentialMutationSnapshot{CredentialsJSON: `{"access_token":"fixture"}`}
+	applied, err = repo.SetGrokCredentialTempUnschedulableIfMatch(ctx, id, snapshot, until, "credential check")
+	require.NoError(t, err)
+	require.True(t, applied)
+	assertNext(&until, "credential check")
+	require.NoError(t, repo.ClearTempUnschedulableManually(ctx, id))
+	assertNext(nil, "")
 }

@@ -93,21 +93,28 @@ end
 return updated
 `)
 
-// Write both account projections together. During an active manual protection
-// window, a delayed projection may neither lose the protection nor shorten its
-// effective block. All other projections retain the normal replacement rules.
+// Both projections carry the database revision of the temporary suspension.
+// Revision zero retains the original protection check for pre-upgrade writers.
 var writeSchedulerAccountScript = redis.NewScript(`
 local previous = redis.call('GET', KEYS[2])
+local revision = ARGV[5]
 if previous and string.find(previous, '"_temp_protection":', 1, true) then
     local ok, meta = pcall(cjson.decode, previous)
     local protection = ok and type(meta) == 'table' and meta._temp_protection
-    if type(protection) == 'table' and type(protection.until_us) == 'number' and
-        type(protection.effective_until_us) == 'number' then
-        local clock = redis.call('TIME')
-        local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])
-        if protection.until_us > now and
-            (tonumber(ARGV[3]) < protection.until_us or tonumber(ARGV[4]) < protection.effective_until_us) then
+    if type(protection) == 'table' then
+        local current = type(protection.revision) == 'string' and protection.revision or '0'
+        -- Compare nonnegative BIGINT revisions without rounding through a Lua number.
+        if #revision < #current or (#revision == #current and revision < current) then
             return false
+        end
+        if revision == '0' and current == '0' and type(protection.until_us) == 'number' and
+            type(protection.effective_until_us) == 'number' then
+            local clock = redis.call('TIME')
+            local now = tonumber(clock[1]) * 1000000 + tonumber(clock[2])
+            if protection.until_us > now and
+                (tonumber(ARGV[3]) < protection.until_us or tonumber(ARGV[4]) < protection.effective_until_us) then
+                return false
+            end
         end
     end
 end
@@ -1216,7 +1223,10 @@ func decodeCachedAccountPayload(payload string) (*service.Account, error) {
 		return nil, err
 	}
 	if projection.Protection != nil {
-		projection.Account.TempUnschedulableProtectedUntil = ptrTime(time.UnixMicro(projection.Protection.Until).UTC())
+		if projection.Protection.Until != 0 {
+			projection.Account.TempUnschedulableProtectedUntil = ptrTime(time.UnixMicro(projection.Protection.Until).UTC())
+		}
+		projection.Account.TempUnschedulableRevision = projection.Protection.Revision
 	}
 	return &projection.Account, nil
 }
@@ -1229,6 +1239,7 @@ type schedulerAccountJSON struct {
 type schedulerAccountProtection struct {
 	Until          int64 `json:"until_us"`
 	EffectiveUntil int64 `json:"effective_until_us"`
+	Revision       int64 `json:"revision,string,omitempty"`
 }
 
 // writeAccountIDs 分块写入整账号与精简记录，返回成功编码并写入的有序账号 ID。
@@ -1303,7 +1314,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 			platform: account.Platform, previous: writeSchedulerAccountScript.Eval(ctx, pipe,
 				[]string{schedulerAccountKey(id), schedulerAccountMetaKey(id)},
 				fullPayload, metaPayload, schedulerDeadlineMicros(account.TempUnschedulableProtectedUntil),
-				schedulerDeadlineMicros(account.TempUnschedulableUntil)),
+				schedulerDeadlineMicros(account.TempUnschedulableUntil), account.TempUnschedulableRevision),
 		})
 		// Keep the hot LastUsedAt side key untouched: a lagging snapshot rebuild
 		// must not overwrite a newer scheduler update.
@@ -1386,8 +1397,11 @@ func marshalSchedulerCacheAccount(account service.Account) ([]byte, []byte, erro
 	account.Groups = nil
 	account.AccountGroups = filterSchedulerAccountGroups(account.AccountGroups)
 	var protection *schedulerAccountProtection
-	if until := schedulerDeadlineMicros(account.TempUnschedulableProtectedUntil); until != 0 {
-		protection = &schedulerAccountProtection{Until: until, EffectiveUntil: schedulerDeadlineMicros(account.TempUnschedulableUntil)}
+	if until := schedulerDeadlineMicros(account.TempUnschedulableProtectedUntil); until != 0 || account.TempUnschedulableRevision != 0 {
+		protection = &schedulerAccountProtection{
+			Until: until, EffectiveUntil: schedulerDeadlineMicros(account.TempUnschedulableUntil),
+			Revision: account.TempUnschedulableRevision,
+		}
 	}
 	fullPayload, err := json.Marshal(schedulerAccountJSON{Account: account, Protection: protection})
 	if err != nil {

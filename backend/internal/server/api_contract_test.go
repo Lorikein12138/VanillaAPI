@@ -2091,6 +2091,10 @@ func (s *stubAccountRepo) SetTempUnschedulable(ctx context.Context, id int64, un
 	return errors.New("not implemented")
 }
 
+func (s *stubAccountRepo) ClearTempUnschedulableManually(context.Context, int64) error {
+	return errors.New("not implemented")
+}
+
 func (s *stubAccountRepo) ClearTempUnschedulable(ctx context.Context, id int64) error {
 	return errors.New("not implemented")
 }

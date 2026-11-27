@@ -40,7 +40,7 @@ export default {
   degradationQuestion: 'Degraded performance?',
   yes: 'Yes',
   confirmTitle: 'Confirm account suspension',
-  confirmMessage: 'Suspend “{account}” for at least 24 hours across all its groups.',
+  confirmMessage: '“{account}” is scheduled to be suspended across all its groups for 24 hours. You can restore it early in Accounts.',
   confirmAction: 'Suspend account',
   confirming: 'Confirming…',
   confirmationChanged: 'The sample, account, or group membership changed. Refresh and review again.',

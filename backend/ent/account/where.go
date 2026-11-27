@@ -175,6 +175,11 @@ func TempUnschedulableProtectedUntil(v time.Time) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableProtectedUntil, v))
 }
 
+// TempUnschedulableRevision applies equality check predicate on the "temp_unschedulable_revision" field. It's identical to TempUnschedulableRevisionEQ.
+func TempUnschedulableRevision(v int64) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableRevision, v))
+}
+
 // TempUnschedulableReason applies equality check predicate on the "temp_unschedulable_reason" field. It's identical to TempUnschedulableReasonEQ.
 func TempUnschedulableReason(v string) predicate.Account {
 	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableReason, v))
@@ -1358,6 +1363,46 @@ func TempUnschedulableProtectedUntilIsNil() predicate.Account {
 // TempUnschedulableProtectedUntilNotNil applies the NotNil predicate on the "temp_unschedulable_protected_until" field.
 func TempUnschedulableProtectedUntilNotNil() predicate.Account {
 	return predicate.Account(sql.FieldNotNull(FieldTempUnschedulableProtectedUntil))
+}
+
+// TempUnschedulableRevisionEQ applies the EQ predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionEQ(v int64) predicate.Account {
+	return predicate.Account(sql.FieldEQ(FieldTempUnschedulableRevision, v))
+}
+
+// TempUnschedulableRevisionNEQ applies the NEQ predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionNEQ(v int64) predicate.Account {
+	return predicate.Account(sql.FieldNEQ(FieldTempUnschedulableRevision, v))
+}
+
+// TempUnschedulableRevisionIn applies the In predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionIn(vs ...int64) predicate.Account {
+	return predicate.Account(sql.FieldIn(FieldTempUnschedulableRevision, vs...))
+}
+
+// TempUnschedulableRevisionNotIn applies the NotIn predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionNotIn(vs ...int64) predicate.Account {
+	return predicate.Account(sql.FieldNotIn(FieldTempUnschedulableRevision, vs...))
+}
+
+// TempUnschedulableRevisionGT applies the GT predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionGT(v int64) predicate.Account {
+	return predicate.Account(sql.FieldGT(FieldTempUnschedulableRevision, v))
+}
+
+// TempUnschedulableRevisionGTE applies the GTE predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionGTE(v int64) predicate.Account {
+	return predicate.Account(sql.FieldGTE(FieldTempUnschedulableRevision, v))
+}
+
+// TempUnschedulableRevisionLT applies the LT predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionLT(v int64) predicate.Account {
+	return predicate.Account(sql.FieldLT(FieldTempUnschedulableRevision, v))
+}
+
+// TempUnschedulableRevisionLTE applies the LTE predicate on the "temp_unschedulable_revision" field.
+func TempUnschedulableRevisionLTE(v int64) predicate.Account {
+	return predicate.Account(sql.FieldLTE(FieldTempUnschedulableRevision, v))
 }
 
 // TempUnschedulableReasonEQ applies the EQ predicate on the "temp_unschedulable_reason" field.

@@ -179,6 +179,10 @@ func (s *accountRepoStub) SetTempUnschedulable(ctx context.Context, id int64, un
 	panic("unexpected SetTempUnschedulable call")
 }
 
+func (s *accountRepoStub) ClearTempUnschedulableManually(context.Context, int64) error {
+	panic("unexpected ClearTempUnschedulableManually call")
+}
+
 func (s *accountRepoStub) ClearTempUnschedulable(ctx context.Context, id int64) error {
 	panic("unexpected ClearTempUnschedulable call")
 }
