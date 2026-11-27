@@ -10,7 +10,7 @@
       <p v-else-if="!groups.length" class="card p-5 text-sm text-gray-600 dark:text-dark-300">{{ t('channelDetection.empty') }}</p>
       <div v-else class="grid grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-4">
         <article v-for="group in groups" :key="group.group_id ?? group.name" class="card min-w-0 self-start overflow-hidden">
-          <div class="grid aspect-square min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5 p-3 sm:p-4">
+          <div class="grid aspect-square min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2.5 p-3 sm:p-4">
             <header class="min-w-0">
               <h2 :title="group.name" class="truncate font-serif text-xl font-normal leading-6 text-gray-950 dark:text-dark-50">{{ group.name }}</h2>
               <div class="flex min-w-0 items-baseline justify-between gap-2 text-xs leading-4 text-gray-600 dark:text-dark-300">
@@ -21,14 +21,6 @@
               </div>
             </header>
             <template v-if="group.sample">
-              <dl class="grid grid-cols-2 gap-3 border-t border-gray-200 pt-2 dark:border-dark-700">
-                <div v-for="metric in metrics(group.sample)" :key="metric.key" class="min-w-0 [overflow-wrap:anywhere]">
-                  <div class="flex flex-wrap items-baseline gap-x-2">
-                    <dt class="text-xs font-medium leading-4 text-gray-700 dark:text-dark-200">{{ t('channelDetection.' + metric.key) }}</dt>
-                    <dd class="font-serif text-base leading-5 tabular-nums text-gray-950 dark:text-dark-50">{{ t('channelDetection.' + metric.key + 'Count', { count: metric.counts.passed }) }}</dd>
-                  </div>
-                </div>
-              </dl>
               <figure class="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1">
                 <figcaption class="text-xs font-medium leading-4 text-gray-700 dark:text-dark-200">{{ t('channelDetection.pelican') }}</figcaption>
                 <div class="detection-preview grid min-h-0 min-w-0 place-items-center">
@@ -53,11 +45,11 @@
               <button
                 type="button"
                 class="btn btn-secondary btn-sm gap-1.5"
-                :disabled="pendingTrigger !== undefined || group.trigger_state === 'running' || group.trigger_state === 'busy'"
+                :disabled="pendingTriggers.has(group.group_id) || group.trigger_state === 'running' || group.trigger_state === 'busy'"
                 @click="trigger(group.group_id)"
               >
                 <Icon name="play" size="sm" aria-hidden="true" />
-                {{ t(pendingTrigger === group.group_id ? 'channelDetection.triggering' : group.trigger_state === 'running' ? 'channelDetection.running' : 'channelDetection.trigger') }}
+                {{ t(pendingTriggers.has(group.group_id) ? 'channelDetection.triggering' : group.trigger_state === 'running' ? 'channelDetection.running' : 'channelDetection.trigger') }}
               </button>
               <div v-if="group.confirmation && group.sample_id" class="ml-auto flex items-center gap-2 text-xs text-gray-700 dark:text-dark-200">
                 <span>{{ t('channelDetection.degradationQuestion') }}</span>
@@ -94,7 +86,7 @@ import { useI18n } from 'vue-i18n'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import { channelDetectionAPI, type AdminDetectionGroup, type DetectionConfirmationScope, type DetectionSample, type PublicDetectionGroup } from '@/api/channelDetection'
+import { channelDetectionAPI, type AdminDetectionGroup, type DetectionConfirmationScope, type PublicDetectionGroup } from '@/api/channelDetection'
 import { useAppStore, useAuthStore } from '@/stores'
 import { useChannelDetectionStore } from '@/stores/channelDetection'
 
@@ -107,7 +99,7 @@ type DetectionCard = PublicDetectionGroup & Partial<AdminDetectionGroup>
 const groups = ref<DetectionCard[]>([])
 const loading = ref(true)
 const errorKey = ref('')
-const pendingTrigger = ref<number>()
+const pendingTriggers = ref(new Set<number>())
 const confirming = ref(false)
 const confirmation = ref<{ groupID: number; sampleID: string; scope: DetectionConfirmationScope }>()
 let request: AbortController | undefined
@@ -141,8 +133,8 @@ async function load(replace = false) {
 }
 
 async function trigger(groupID: number) {
-  if (pendingTrigger.value !== undefined || !administrator.value) return
-  pendingTrigger.value = groupID
+  if (pendingTriggers.value.has(groupID) || !administrator.value) return
+  pendingTriggers.value.add(groupID)
   try {
     await channelDetectionAPI.trigger(groupID)
   } catch (error) {
@@ -150,7 +142,7 @@ async function trigger(groupID: number) {
     appStore.showError(t(reason === 'CHANNEL_DETECTION_BUSY' ? 'channelDetection.busyRetry' : 'channelDetection.triggerError'))
   } finally {
     await load(true)
-    pendingTrigger.value = undefined
+    pendingTriggers.value.delete(groupID)
   }
 }
 
@@ -192,13 +184,6 @@ function imageSource(svg: string) {
 
 function formatTime(date: string) {
   return new Intl.DateTimeFormat(locale.value, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date))
-}
-
-function metrics(sample: DetectionSample) {
-  return [
-    { key: 'reasoning' as const, counts: sample.reasoning },
-    { key: 'fingerprint' as const, counts: sample.fingerprint },
-  ]
 }
 
 function loadIfVisible() {

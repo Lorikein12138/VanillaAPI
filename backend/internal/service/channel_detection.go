@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
@@ -18,17 +19,18 @@ import (
 )
 
 const (
-	SettingKeyChannelDetectionFeature = "channel_detection_enabled"
-	SettingKeyChannelDetectionConfig  = "channel_detection_config"
-	SettingKeyChannelDetectionLatest  = "channel_detection_latest"
-	channelDetectionMaxGroups         = 16
-	channelDetectionMinInterval       = 15
-	channelDetectionMaxInterval       = 1440
-	// Three 30s reasoning questions, three 60s fingerprints and one 110s SVG leave 40s of headroom.
-	channelDetectionRoundTimeout    = 7 * time.Minute
-	channelDetectionIdentityVersion = 1
-	channelDetectionDailySends      = 672
-	channelDetectionRoundSends      = 14
+	SettingKeyChannelDetectionFeature   = "channel_detection_enabled"
+	SettingKeyChannelDetectionConfig    = "channel_detection_config"
+	SettingKeyChannelDetectionLatest    = "channel_detection_latest"
+	channelDetectionMaxGroups           = 16
+	channelDetectionMinInterval         = 15
+	channelDetectionMaxInterval         = 1440
+	channelDetectionRoundTimeout        = 130 * time.Second
+	channelDetectionLeaseTimeout        = 190 * time.Second
+	ChannelDetectionMaxConcurrentGroups = 4
+	channelDetectionIdentityVersion     = 1
+	channelDetectionDailySends          = 672
+	channelDetectionRoundSends          = 2
 )
 
 var (
@@ -57,20 +59,10 @@ type ChannelDetectionGroup struct {
 	ClaudeCodeOnly bool   `json:"claude_code_only"`
 }
 
-type ChannelDetectionCounts struct {
-	Passed       int `json:"passed"`
-	Failed       int `json:"failed"`
-	Errors       int `json:"errors"`
-	Unattributed int `json:"unattributed"`
-	Untested     int `json:"untested"`
-}
-
 type ChannelDetectionSample struct {
-	CheckedAt   time.Time              `json:"checked_at"`
-	Reasoning   ChannelDetectionCounts `json:"reasoning"`
-	Fingerprint ChannelDetectionCounts `json:"fingerprint"`
-	Pelican     string                 `json:"pelican_status"`
-	SVG         string                 `json:"svg,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+	Pelican   string    `json:"pelican_status"`
+	SVG       string    `json:"svg,omitempty"`
 }
 
 type ChannelDetectionPublicGroup struct {
@@ -91,7 +83,8 @@ type channelDetectionSnapshot struct {
 	Revision        string                            `json:"revision"`
 	Samples         map[int64]*ChannelDetectionSample `json:"samples"`
 	AttemptedAt     map[int64]time.Time               `json:"attempted_at"`
-	Running         *channelDetectionRun              `json:"running,omitempty"`
+	LegacyRunning   *channelDetectionRun              `json:"running,omitempty"`
+	RunningByGroup  map[int64]channelDetectionRun     `json:"running_by_group,omitempty"`
 	Proofs          map[int64]ChannelDetectionProof   `json:"proofs,omitempty"`
 	NoSend          map[int64]bool                    `json:"no_send,omitempty"`
 	stored          string
@@ -121,14 +114,25 @@ type ChannelDetectionSnapshotGuard struct {
 	Snapshot string
 }
 
+type ChannelDetectionActiveLeases struct {
+	Groups      map[int64]string
+	LegacyOwner string
+	Blocked     bool
+}
+
+func (a ChannelDetectionActiveLeases) Full() bool {
+	return len(a.Groups) >= ChannelDetectionMaxConcurrentGroups || a.LegacyOwner != "" || a.Blocked
+}
+
 // ChannelDetectionCoordinator serializes probe runs and fences snapshot writes
 // against the current owner, configuration, and previously read snapshot.
 type ChannelDetectionCoordinator interface {
-	TryAcquire(ctx context.Context, owner string, ttl time.Duration) (bool, error)
-	Holds(ctx context.Context, owner string) (bool, error)
-	Release(ctx context.Context, owner string) error
+	TryAcquire(ctx context.Context, groupID int64, owner string, ttl time.Duration) (bool, error)
+	ActiveLeases(ctx context.Context) (ChannelDetectionActiveLeases, error)
+	Holds(ctx context.Context, groupID int64, owner string) (bool, error)
+	Release(ctx context.Context, groupID int64, owner string) error
 	ReserveSend(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, groupID int64, groupRPM, dailyLimit int) (bool, error)
-	CompareAndSetSnapshot(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string) (bool, error)
+	CompareAndSetSnapshot(ctx context.Context, groupID int64, owner string, expected ChannelDetectionSnapshotGuard, next string) (bool, error)
 	PublishSnapshot(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string, completedGroupID int64) (bool, error)
 	SavePlan(ctx context.Context, expected ChannelDetectionSnapshotGuard, nextConfig, nextSnapshot string) (bool, error)
 }
@@ -144,6 +148,7 @@ type ChannelDetection struct {
 	runs        sync.WaitGroup
 	cancel      context.CancelFunc
 	done        chan struct{}
+	wake        chan struct{}
 }
 
 func NewChannelDetection(settings SettingRepository, groups AdminService, directory GroupRepository, coordinator ChannelDetectionCoordinator) *ChannelDetection {
@@ -189,8 +194,17 @@ func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string,
 	if latest.AttemptedAt == nil {
 		latest.AttemptedAt = make(map[int64]time.Time)
 	}
+	if latest.RunningByGroup == nil {
+		latest.RunningByGroup = make(map[int64]channelDetectionRun)
+	}
+	if old := latest.LegacyRunning; old != nil {
+		if _, exists := latest.RunningByGroup[old.GroupID]; !exists {
+			latest.RunningByGroup[old.GroupID] = *old
+		}
+		latest.LegacyRunning = nil
+	}
 	if latest.Feature != feature {
-		latest.cancelRun()
+		latest.cancelRuns()
 		latest.Feature = feature
 	}
 	return feature, config, latest, nil
@@ -270,7 +284,7 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 			latest = snapshot
 		}
 		guard := latest.guard(current)
-		latest.cancelRun()
+		latest.cancelRuns()
 		latest.Revision = next.Revision
 		maps.DeleteFunc(latest.Samples, func(id int64, _ *ChannelDetectionSample) bool { return !keep[id] })
 		maps.DeleteFunc(latest.Proofs, func(id int64, _ ChannelDetectionProof) bool { return !keep[id] })
@@ -288,21 +302,19 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 	return ErrDetectionChanged
 }
 
-func (s *channelDetectionSnapshot) cancelRun() {
-	if s.Running == nil {
-		return
+func (s *channelDetectionSnapshot) cancelRuns() {
+	for id, run := range s.RunningByGroup {
+		switch {
+		case run.PreviousAttemptedAt != nil:
+			s.AttemptedAt[id] = *run.PreviousAttemptedAt
+		case s.Samples[id] != nil:
+			// Older runtime markers did not retain the previous attempt time.
+			s.AttemptedAt[id] = s.Samples[id].CheckedAt
+		default:
+			delete(s.AttemptedAt, id)
+		}
 	}
-	id := s.Running.GroupID
-	switch {
-	case s.Running.PreviousAttemptedAt != nil:
-		s.AttemptedAt[id] = *s.Running.PreviousAttemptedAt
-	case s.Samples[id] != nil:
-		// Older runtime markers did not retain the previous attempt time.
-		s.AttemptedAt[id] = s.Samples[id].CheckedAt
-	default:
-		delete(s.AttemptedAt, id)
-	}
-	s.Running = nil
+	clear(s.RunningByGroup)
 }
 
 func (s *ChannelDetection) GroupOptions(ctx context.Context) ([]ChannelDetectionGroup, error) {
@@ -402,6 +414,8 @@ func (s *ChannelDetection) resultGroups(ctx context.Context, feature string, con
 		result := ChannelDetectionPublicGroup{Name: group.Name, Model: selection.Model}
 		result.Sample = latest.Samples[selection.GroupID]
 		if result.Sample != nil && result.Sample.SVG != "" {
+			sample := *result.Sample
+			result.Sample = &sample
 			result.Sample.SVG = sanitizeDetectionSVG(result.Sample.SVG)
 			if result.Sample.SVG == "" {
 				result.Sample.Pelican = "error"
@@ -466,6 +480,7 @@ func (s *ChannelDetection) Start(gateway http.Handler) {
 	s.gateway = gateway
 	s.cancel = cancel
 	s.done = make(chan struct{})
+	s.wake = make(chan struct{}, 1)
 	go func() {
 		defer func() {
 			s.runs.Wait()
@@ -474,11 +489,12 @@ func (s *ChannelDetection) Start(gateway http.Handler) {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for ctx.Err() == nil {
-			s.tick(ctx, gateway)
+			s.tick(ctx)
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			case <-s.wake:
 			}
 		}
 	}()
@@ -500,78 +516,168 @@ func (s *ChannelDetection) Stop(ctx context.Context) error {
 	}
 }
 
-func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
-	checkCtx, stopCheck := context.WithTimeout(ctx, 4*time.Second)
-	enabled, err := s.PublicEnabled(checkCtx)
-	token := uuid.NewString()
-	var locked bool
-	if err == nil && enabled && s.coordinator != nil {
-		locked, err = s.coordinator.TryAcquire(checkCtx, token, channelDetectionRoundTimeout+time.Minute)
-	}
-	stopCheck()
-	if err != nil || !locked {
+func (s *ChannelDetection) tick(ctx context.Context) {
+	if s.coordinator == nil {
 		return
 	}
-	defer s.release(ctx, token)
-
-	loadCtx, stopLoad := context.WithTimeout(ctx, 5*time.Second)
-	feature, config, latest, err := s.state(loadCtx, true)
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	feature, config, latest, err := s.state(checkCtx, true)
 	if err != nil || feature == "" || !config.Enabled {
-		stopLoad()
 		return
 	}
-	eligible := config
-	eligible.Groups = make([]ChannelDetectionSelection, 0, len(config.Groups))
-	for _, selection := range config.Groups {
-		if _, err := s.probeGroup(loadCtx, selection); err == nil {
-			eligible.Groups = append(eligible.Groups, selection)
-		} else if !errors.Is(err, errDetectionModel) {
-			stopLoad()
+	active, err := s.coordinator.ActiveLeases(checkCtx)
+	if err != nil || active.Full() {
+		return
+	}
+	groups := slices.Clone(config.Groups)
+	slices.SortStableFunc(groups, func(a, b ChannelDetectionSelection) int {
+		return latest.AttemptedAt[a.GroupID].Compare(latest.AttemptedAt[b.GroupID])
+	})
+	available := ChannelDetectionMaxConcurrentGroups - len(active.Groups)
+	now := time.Now()
+	for _, selection := range groups {
+		if checkCtx.Err() != nil || available == 0 || !detectionGroupDue(config, latest, selection.GroupID, now) {
 			return
 		}
-	}
-	stopLoad()
-	selection, due := dueDetectionGroup(eligible, latest, time.Now())
-	if !due {
-		return
-	}
-	run, reserved := s.startRun(ctx, token, config, &latest, selection, "automatic")
-	if reserved {
-		s.run(ctx, gateway, run, config, latest, selection)
+		if active.Groups[selection.GroupID] == "" {
+			if _, err := s.admit(checkCtx, selection, latest.guard(config), "automatic"); err == nil {
+				available--
+			}
+		}
 	}
 }
 
-func (s *ChannelDetection) release(ctx context.Context, token string) {
+func (s *ChannelDetection) admit(ctx context.Context, selection ChannelDetectionSelection, expected ChannelDetectionSnapshotGuard, source string) (string, error) {
+	s.lifecycle.Lock()
+	worker, gateway, wake := s.worker, s.gateway, s.wake
+	if worker == nil || worker.Err() != nil || gateway == nil || s.coordinator == nil {
+		s.lifecycle.Unlock()
+		return "", ErrDetectionBusy
+	}
+	s.runs.Add(1)
+	s.lifecycle.Unlock()
+
+	id, owner := selection.GroupID, uuid.NewString()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			s.runs.Done()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	stop := context.AfterFunc(worker, cancel)
+	defer stop()
+
+	acquired, err := s.coordinator.TryAcquire(ctx, id, owner, channelDetectionLeaseTimeout)
+	if err != nil {
+		_ = s.release(ctx, id, owner)
+		return "", err
+	}
+	if !acquired {
+		return "", ErrDetectionBusy
+	}
+	defer func() {
+		if !handedOff {
+			_ = s.release(ctx, id, owner)
+		}
+	}()
+
+	if _, err := s.probeGroup(ctx, selection); err != nil {
+		if errors.Is(err, errDetectionModel) {
+			err = ErrDetectionChanged
+		}
+		return "", err
+	}
+	run := channelDetectionRun{GroupID: id, Owner: owner, SampleID: uuid.NewString(), Source: source}
+	var previousNoSend bool
+	started, err := s.updateRunSnapshot(ctx, run, expected, false, func(config channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
+		now := time.Now().UTC()
+		if !slices.Contains(config.Groups, selection) ||
+			(source == "automatic" && !detectionGroupDue(config, *latest, id, now)) {
+			return false
+		}
+		run.PreviousAttemptedAt = nil
+		if previous, exists := latest.AttemptedAt[id]; exists {
+			run.PreviousAttemptedAt = &previous
+		}
+		previousNoSend = latest.NoSend[id]
+		latest.RunningByGroup[id] = run
+		delete(latest.NoSend, id)
+		latest.AttemptedAt[id] = now
+		return true
+	})
+	if err != nil {
+		return "", err
+	}
+	if !started {
+		return "", ErrDetectionChanged
+	}
+
+	// Stop and handoff must agree on whether this run was accepted.
+	s.lifecycle.Lock()
+	if worker.Err() != nil {
+		s.lifecycle.Unlock()
+		// The gateway has not been called. Undo only this run while we still
+		// hold its lease, even though shutdown canceled the admission context.
+		undoCtx, stopUndo := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer stopUndo()
+		_, err := s.updateRunSnapshot(undoCtx, run, expected, false, func(_ channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
+			marker := latest.RunningByGroup[id]
+			if marker.Owner != owner || marker.SampleID != run.SampleID {
+				return false
+			}
+			delete(latest.RunningByGroup, id)
+			if marker.PreviousAttemptedAt == nil {
+				delete(latest.AttemptedAt, id)
+			} else {
+				latest.AttemptedAt[id] = *marker.PreviousAttemptedAt
+			}
+			if previousNoSend {
+				if latest.NoSend == nil {
+					latest.NoSend = make(map[int64]bool)
+				}
+				latest.NoSend[id] = true
+			}
+			return true
+		})
+		if err != nil {
+			slog.Warn("channel_detection.admission_undo_failed", "group_id", id, "error", err)
+		}
+		return "", ErrDetectionBusy
+	}
+	handedOff = true
+	go func() {
+		defer s.runs.Done()
+		s.run(worker, gateway, run, expected, selection)
+		if err := s.release(worker, id, owner); err == nil && worker.Err() == nil {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	s.lifecycle.Unlock()
+	return run.SampleID, nil
+}
+
+func (s *ChannelDetection) release(ctx context.Context, groupID int64, owner string) error {
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
-	_ = s.coordinator.Release(releaseCtx, token)
+	return s.coordinator.Release(releaseCtx, groupID, owner)
 }
 
-func (s *ChannelDetection) startRun(ctx context.Context, token string, config channelDetectionConfigRecord, latest *channelDetectionSnapshot, selection ChannelDetectionSelection, source string) (channelDetectionRun, bool) {
-	// Reserve the interval before the first billable request. If an instance
-	// stops or cannot persist the result, the next tick respects this attempt.
-	run := channelDetectionRun{GroupID: selection.GroupID, SampleID: uuid.NewString(), Owner: token, Source: source}
-	if previous := latest.AttemptedAt[selection.GroupID]; !previous.IsZero() {
-		run.PreviousAttemptedAt = &previous
-	}
-	latest.Running = &run
-	delete(latest.NoSend, selection.GroupID)
-	latest.AttemptedAt[selection.GroupID] = time.Now().UTC()
-	reserveCtx, stopReserve := context.WithTimeout(ctx, 4*time.Second)
-	defer stopReserve()
-	return run, s.writeSnapshot(reserveCtx, token, config, latest)
-}
-
-func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run channelDetectionRun, config channelDetectionConfigRecord, latest channelDetectionSnapshot, selection ChannelDetectionSelection) {
-	feature, token := latest.Feature, run.Owner
+func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run channelDetectionRun, expected ChannelDetectionSnapshotGuard, selection ChannelDetectionSelection) {
+	id, owner := run.GroupID, run.Owner
 	roundCtx, cancel := context.WithTimeout(ctx, channelDetectionRoundTimeout)
 	defer cancel()
 	current := func(ctx context.Context) bool {
-		same, err := s.current(ctx, feature, config.Revision)
-		if err != nil || !same {
+		feature, config, _, err := s.state(ctx, false)
+		if err != nil || feature != expected.Feature || config.stored != expected.Config {
 			return false
 		}
-		held, err := s.coordinator.Holds(ctx, token)
+		held, err := s.coordinator.Holds(ctx, id, owner)
 		if err != nil || !held {
 			return false
 		}
@@ -580,14 +686,12 @@ func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run ch
 	}
 	go watchDetectionConfiguration(roundCtx, current, cancel)
 	budget := &detectionRoundBudget{reserve: func(ctx context.Context, group *Group) (bool, error) {
-		return s.coordinator.ReserveSend(ctx, token, ChannelDetectionSnapshotGuard{
-			Feature: feature, Config: config.stored,
-		}, group.ID, group.RPMLimit, channelDetectionDailySends)
+		return s.coordinator.ReserveSend(ctx, owner, expected, group.ID, group.RPMLimit, channelDetectionDailySends)
 	}}
 	sample := s.runSample(roundCtx, gateway, selection, current, budget)
 
-	// A timed-out sample can record partial results. A canceled or superseded
-	// sample cannot write, even if an upstream ignores request cancellation.
+	// A question timeout can be published. Shutdown and superseded rounds
+	// cannot write, even if an upstream ignores cancellation.
 	if errors.Is(roundCtx.Err(), context.Canceled) || ctx.Err() != nil {
 		return
 	}
@@ -596,24 +700,30 @@ func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run ch
 	if !current(writeCtx) {
 		return
 	}
-	latest.Running = nil
 	proof, entered := budget.proof(run)
-	if run.Source == "manual" && !entered {
-		if latest.NoSend == nil {
-			latest.NoSend = make(map[int64]bool)
+	noSend := run.Source == "manual" && !entered
+	_, err := s.updateRunSnapshot(writeCtx, run, expected, !noSend, func(_ channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
+		marker := latest.RunningByGroup[id]
+		if marker.Owner != owner || marker.SampleID != run.SampleID {
+			return false
 		}
-		latest.NoSend[selection.GroupID] = true
-		s.writeSnapshot(writeCtx, token, config, &latest)
-		return
-	}
-	latest.Samples[selection.GroupID] = sample
-	if latest.Proofs == nil {
-		latest.Proofs = make(map[int64]ChannelDetectionProof)
-	}
-	latest.Proofs[selection.GroupID] = proof
-	encoded, err := json.Marshal(latest)
-	if err == nil {
-		_, _ = s.coordinator.PublishSnapshot(writeCtx, token, latest.guard(config), string(encoded), selection.GroupID)
+		delete(latest.RunningByGroup, id)
+		if noSend {
+			if latest.NoSend == nil {
+				latest.NoSend = make(map[int64]bool)
+			}
+			latest.NoSend[id] = true
+			return true
+		}
+		latest.Samples[id] = sample
+		if latest.Proofs == nil {
+			latest.Proofs = make(map[int64]ChannelDetectionProof)
+		}
+		latest.Proofs[id] = proof
+		return true
+	})
+	if err != nil && ctx.Err() == nil {
+		slog.Warn("channel_detection.publish_failed", "group_id", id, "error", err)
 	}
 }
 
@@ -621,33 +731,38 @@ func (latest channelDetectionSnapshot) guard(config channelDetectionConfigRecord
 	return ChannelDetectionSnapshotGuard{Feature: latest.Feature, Config: config.stored, Snapshot: latest.stored}
 }
 
-func (s *ChannelDetection) writeSnapshot(ctx context.Context, owner string, config channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
-	encoded, err := json.Marshal(latest)
-	if err != nil {
-		return false
+func (s *ChannelDetection) updateRunSnapshot(ctx context.Context, run channelDetectionRun, expected ChannelDetectionSnapshotGuard, publish bool, update func(channelDetectionConfigRecord, *channelDetectionSnapshot) bool) (bool, error) {
+	for ctx.Err() == nil {
+		feature, config, latest, err := s.state(ctx, true)
+		if err != nil || feature != expected.Feature || config.stored != expected.Config || !config.Enabled {
+			return false, err
+		}
+		if !update(config, &latest) {
+			return false, nil
+		}
+		encoded, err := json.Marshal(latest)
+		if err != nil {
+			return false, err
+		}
+		guard := latest.guard(config)
+		var applied bool
+		if publish {
+			applied, err = s.coordinator.PublishSnapshot(ctx, run.Owner, guard, string(encoded), run.GroupID)
+		} else {
+			applied, err = s.coordinator.CompareAndSetSnapshot(ctx, run.GroupID, run.Owner, guard, string(encoded))
+		}
+		if err != nil || applied {
+			return applied, err
+		}
+		if held, err := s.coordinator.Holds(ctx, run.GroupID, run.Owner); err != nil || !held {
+			return false, err
+		}
 	}
-	next := string(encoded)
-	applied, err := s.coordinator.CompareAndSetSnapshot(ctx, owner, latest.guard(config), next)
-	if err != nil || !applied {
-		return false
-	}
-	latest.stored = next
-	return true
+	return false, ctx.Err()
 }
 
-func dueDetectionGroup(config channelDetectionConfigRecord, latest channelDetectionSnapshot, now time.Time) (ChannelDetectionSelection, bool) {
-	var selected ChannelDetectionSelection
-	var oldest time.Time
-	for _, group := range config.Groups {
-		lastAttempt := latest.AttemptedAt[group.GroupID]
-		if lastAttempt.IsZero() {
-			return group, true
-		}
-		if selected.GroupID == 0 || lastAttempt.Before(oldest) {
-			selected, oldest = group, lastAttempt
-		}
-	}
-	return selected, selected.GroupID != 0 && !oldest.Add(time.Duration(config.IntervalMinutes)*time.Minute).After(now)
+func detectionGroupDue(config channelDetectionConfigRecord, latest channelDetectionSnapshot, id int64, now time.Time) bool {
+	return !latest.AttemptedAt[id].Add(time.Duration(config.IntervalMinutes) * time.Minute).After(now)
 }
 
 func watchDetectionConfiguration(ctx context.Context, current func(context.Context) bool, cancel context.CancelFunc) {

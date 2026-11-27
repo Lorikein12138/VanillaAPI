@@ -26,7 +26,7 @@ func TestChannelDetectionPlanRetainsCompletedMatchingGroups(t *testing.T) {
 		2: {Version: channelDetectionProofVersion, SampleID: "prior-two"},
 	}
 	latest.AttemptedAt[1] = past.Add(20 * time.Minute)
-	latest.Running = &channelDetectionRun{GroupID: 1, Owner: "old-owner", PreviousAttemptedAt: &past}
+	latest.LegacyRunning = &channelDetectionRun{GroupID: 1, Owner: "old-owner", PreviousAttemptedAt: &past}
 	raw, err := json.Marshal(latest)
 	require.NoError(t, err)
 	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(raw)))
@@ -41,13 +41,12 @@ func TestChannelDetectionPlanRetainsCompletedMatchingGroups(t *testing.T) {
 	_, updated, kept, err := s.state(ctx, true)
 	require.NoError(t, err)
 	require.NotEqual(t, config.Revision, updated.Revision)
-	require.Nil(t, kept.Running)
+	require.Empty(t, kept.RunningByGroup)
 	require.Len(t, kept.Samples, 2)
 	require.Equal(t, latest.Proofs, kept.Proofs)
 	require.Equal(t, map[int64]time.Time{1: past, 2: past}, kept.AttemptedAt)
-	selection, due := dueDetectionGroup(updated, kept, past.Add(time.Hour))
+	due := detectionGroupDue(updated, kept, 3, past.Add(time.Hour))
 	require.True(t, due)
-	require.EqualValues(t, 3, selection.GroupID)
 
 	next.Enabled = true
 	require.NoError(t, s.Save(ctx, next))
@@ -62,9 +61,8 @@ func TestChannelDetectionPlanRetainsCompletedMatchingGroups(t *testing.T) {
 	require.NotContains(t, kept.AttemptedAt, int64(1))
 	require.Equal(t, past, kept.Samples[2].CheckedAt)
 	require.Equal(t, "prior-two", kept.Proofs[2].SampleID)
-	selection, due = dueDetectionGroup(updated, kept, past.Add(45*time.Minute))
+	due = detectionGroupDue(updated, kept, 1, past.Add(45*time.Minute))
 	require.True(t, due)
-	require.EqualValues(t, 1, selection.GroupID)
 
 	// Removing and re-adding the same group/model cannot resurrect its data.
 	next.Groups = next.Groups[1:]
@@ -98,7 +96,7 @@ func TestChannelDetectionPlanRetriesAfterWorkerPublish(t *testing.T) {
 	require.NoError(t, s.Save(ctx, s.cfg))
 	store := &detectionPlanRace{detectionMemorySettings: s.storage}
 	s.coordinator = store
-	locked, err := store.TryAcquire(ctx, "worker", time.Minute)
+	locked, err := store.TryAcquire(ctx, 1, "worker", time.Minute)
 	require.NoError(t, err)
 	require.True(t, locked)
 	now := time.Now().UTC()
@@ -131,14 +129,18 @@ func TestChannelDetectionFeatureChangeCancelsUnfinishedAttempt(t *testing.T) {
 	feature, plan, latest, err := s.state(ctx, true)
 	require.NoError(t, err)
 	now := time.Now().UTC()
-	lock, err := s.storage.TryAcquire(ctx, "worker", time.Minute)
+	lock, err := s.storage.TryAcquire(ctx, 1, "worker", time.Minute)
 	require.NoError(t, err)
 	require.True(t, lock)
 	latest.Samples[2] = &ChannelDetectionSample{CheckedAt: now}
 	latest.AttemptedAt[2] = now
-	run, started := s.startRun(ctx, "worker", plan, &latest, s.cfg.Groups[0], "automatic")
+	latest.RunningByGroup[1] = channelDetectionRun{GroupID: 1, Owner: "worker", SampleID: "in-flight"}
+	latest.AttemptedAt[1] = now
+	data, err := json.Marshal(latest)
+	require.NoError(t, err)
+	started, err := s.storage.CompareAndSetSnapshot(ctx, 1, "worker", latest.guard(plan), string(data))
+	require.NoError(t, err)
 	require.True(t, started)
-	require.EqualValues(t, 1, run.GroupID)
 	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionFeature, ""))
 	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionFeature, "enable-two"))
 	reenabled, current, kept, err := s.state(ctx, true)
@@ -147,9 +149,9 @@ func TestChannelDetectionFeatureChangeCancelsUnfinishedAttempt(t *testing.T) {
 	require.Equal(t, plan.Revision, current.Revision)
 	require.Equal(t, now, kept.Samples[2].CheckedAt)
 	require.Equal(t, now, kept.AttemptedAt[2])
-	require.Nil(t, kept.Running)
+	require.Empty(t, kept.RunningByGroup)
 	require.NotContains(t, kept.AttemptedAt, int64(1))
-	applied, err := s.storage.CompareAndSetSnapshot(ctx, "worker", latest.guard(plan), "stale")
+	applied, err := s.storage.CompareAndSetSnapshot(ctx, 1, "worker", latest.guard(plan), "stale")
 	require.NoError(t, err)
 	require.False(t, applied)
 }

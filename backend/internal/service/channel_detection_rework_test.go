@@ -247,9 +247,7 @@ func TestChannelDetectionPricingFailureStopsRound(t *testing.T) {
 	require.Equal(t, 1, questions)
 	require.Equal(t, 1, budget.sends)
 	require.Zero(t, repo.writes)
-	require.Equal(t, ChannelDetectionCounts{Errors: 1, Untested: 2}, sample.Reasoning)
-	require.Equal(t, 3, sample.Fingerprint.Untested)
-	require.Equal(t, "untested", sample.Pelican)
+	require.Equal(t, "error", sample.Pelican)
 }
 
 func TestChannelDetectionClaudeCodeOnlyGroupEligibility(t *testing.T) {
@@ -285,7 +283,7 @@ func TestChannelDetectionClaudeCodeOnlyGroupEligibility(t *testing.T) {
 	results, err = s.PublicGroups(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []ChannelDetectionPublicGroup{{Name: second.Name, Model: s.cfg.Groups[1].Model}}, results)
-	s.tick(ctx, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	s.tickAndWait(ctx, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		binding := detectionBindingFromContext(r.Context())
 		require.Equal(t, second.ID, binding.selection.GroupID)
 	}))

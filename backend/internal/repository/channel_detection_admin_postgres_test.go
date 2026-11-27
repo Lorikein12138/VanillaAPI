@@ -48,14 +48,16 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	first := NewChannelDetectionCoordinator(firstDB, firstClient, nil, nil).(*channelDetectionCoordinator)
 	second := NewChannelDetectionCoordinator(secondDB, secondClient, nil, nil).(*channelDetectionCoordinator)
 	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "fixture"}
-	ok, err := first.TryAcquire(ctx, "scheduled-worker", time.Minute)
-	require.NoError(t, err)
-	require.True(t, ok)
 	makeGroup := func(name string) int64 {
 		return firstClient.Group.Create().SetName(name).SetPlatform(service.PlatformOpenAI).
 			SetModelAllowlist(domain.GroupModelAllowlist{Models: []string{"fixture-model"}}).SaveX(ctx).ID
 	}
 	groupID, otherGroupID := makeGroup("Detection group"), makeGroup("Other group")
+	for _, id := range []int64{groupID, otherGroupID} {
+		ok, err := first.TryAcquire(ctx, id, "scheduled-worker", time.Minute)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
 	accountID := firstClient.Account.Create().SetName("Fixture account").SetPlatform(service.PlatformOpenAI).
 		SetType(service.AccountTypeAPIKey).SetCredentials(map[string]any{"api_key": "fixture"}).SaveX(ctx).ID
 	bind := func(groupID int64) {
@@ -72,7 +74,7 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 		t.Helper()
 		proofs[groupID] = service.ChannelDetectionProof{
 			Version: 2, SampleID: uuid.NewString(), Source: "manual", AccountID: accountID,
-			RouteFingerprint: hex.EncodeToString(digest[:]), Sends: 1,
+			RouteFingerprint: hex.EncodeToString(digest[:]), Sends: 14, // Legacy seven-question v2 proof.
 		}
 		next, err := json.Marshal(map[string]any{"proofs": proofs})
 		require.NoError(t, err)
@@ -127,6 +129,9 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	var previousVersion time.Time
 	require.NoError(t, firstDB.QueryRowContext(ctx, `
 		UPDATE accounts SET updated_at=clock_timestamp()+interval '1 minute' WHERE id=$1 RETURNING updated_at`, accountID).Scan(&previousVersion))
+
+	// A publish from another group leaves the original proof confirmable.
+	publish(otherGroupID)
 
 	// Two confirmations and an automatic clear compete on separate connections.
 	// Confirmation needs only the lease row lock; the scheduled owner stays live.

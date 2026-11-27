@@ -20,18 +20,8 @@ export interface DetectionConfig {
   groups: DetectionSelection[]
 }
 
-export interface DetectionCounts {
-  passed: number
-  failed: number
-  errors: number
-  unattributed: number
-  untested: number
-}
-
 export interface DetectionSample {
   checked_at: string
-  reasoning: DetectionCounts
-  fingerprint: DetectionCounts
   pelican_status: 'generated' | 'error' | 'untested'
   svg?: string
 }
