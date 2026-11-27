@@ -1,6 +1,10 @@
 <template>
   <aside
+    id="app-sidebar"
+    ref="sidebarRef"
     class="sidebar"
+    :inert="!desktop && !mobileOpen"
+    tabindex="-1"
     :class="[
       sidebarCollapsed ? 'w-[72px]' : 'w-64',
       { '-translate-x-full lg:translate-x-0': !mobileOpen }
@@ -189,6 +193,7 @@
 
 <script setup lang="ts">
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useMediaQuery } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAdminSettingsStore, useAppStore, useAuthStore, useOnboardingStore } from '@/stores'
@@ -200,6 +205,7 @@ import { FeatureFlags, makeSidebarFlag } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
 import { useChannelDetectionStore } from '@/stores/channelDetection'
+import { containTab, getTabStops } from '@/utils/tabStops'
 
 interface NavItem {
   path: string
@@ -270,6 +276,8 @@ const { canUseBatchImage, refreshBatchImageAccess } = useBatchImageAccess()
 
 const sidebarCollapsed = computed(() => appStore.sidebarCollapsed)
 const mobileOpen = computed(() => appStore.mobileOpen)
+const desktop = useMediaQuery('(min-width: 1024px)')
+const sidebarRef = ref<HTMLElement | null>(null)
 const isAdmin = computed(() => authStore.isAdmin)
 const sidebarNavRef = ref<HTMLElement | null>(null)
 const isDark = ref(document.documentElement.classList.contains('dark'))
@@ -917,14 +925,42 @@ function toggleTheme() {
   localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
 }
 
-function closeMobile() {
+async function closeMobile() {
+  const active = document.activeElement
+  const restoreFocus = active === document.body || sidebarRef.value?.contains(active)
   appStore.setMobileOpen(false)
+  await nextTick()
+  if (restoreFocus && !mobileOpen.value && !desktop.value &&
+      (document.activeElement === active || document.activeElement === document.body)) {
+    document.getElementById('mobile-sidebar-toggle')?.focus()
+  }
 }
+
+function handleMobileKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || !mobileOpen.value || desktop.value ||
+      document.body.classList.contains('modal-open')) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    void closeMobile()
+  } else if (event.key === 'Tab' && sidebarRef.value) {
+    containTab(event, sidebarRef.value)
+  }
+}
+
+watch([mobileOpen, desktop], async ([open, isDesktop]) => {
+  if (!open || isDesktop) return
+  await nextTick()
+  if (sidebarRef.value && mobileOpen.value && !desktop.value) {
+    const sidebar = sidebarRef.value
+    const target = getTabStops(sidebar)[0] ?? sidebar
+    target.focus()
+  }
+})
 
 function handleMenuItemClick(itemPath: string) {
   if (mobileOpen.value) {
     setTimeout(() => {
-      appStore.setMobileOpen(false)
+      void closeMobile()
     }, 150)
   }
 
@@ -1002,6 +1038,7 @@ watch(
 )
 
 onMounted(() => {
+  document.addEventListener('keydown', handleMobileKeydown)
   void detectionStore.refresh()
   void refreshBatchImageAccess()
   if (isAdmin.value) {
@@ -1018,6 +1055,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('keydown', handleMobileKeydown)
   if (sidebarNavRef.value) {
     appStore.sidebarScrollTop = sidebarNavRef.value.scrollTop
   }

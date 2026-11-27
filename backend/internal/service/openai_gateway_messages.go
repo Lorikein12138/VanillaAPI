@@ -1464,10 +1464,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				zap.String("model", originalModel),
 				zap.Duration("interval", streamInterval),
 			)
-			if account != nil && account.Platform == PlatformOpenAI && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
-				_ = resp.Body.Close()
-				return resultWithUsage(), s.openAIStreamIdleFailover(c.Request.Context(), c, account, false, requestID, upstreamModel, resp.Header)
-			}
+			// End the stream on a data interval timeout per the Messages contract.
+			// Explicit retryable failure frames use the pre-content failover path.
 			releaseHeld()
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")
 

@@ -4,9 +4,13 @@
       <!-- Left: Mobile Menu Toggle + Page Title -->
       <div class="flex shrink-0 items-center gap-2 sm:gap-4">
         <button
+          id="mobile-sidebar-toggle"
+          type="button"
           @click="toggleMobileSidebar"
           class="btn-ghost btn-icon lg:hidden"
           :aria-label="t('common.toggleMenu')"
+          :aria-expanded="appStore.mobileOpen"
+          aria-controls="app-sidebar"
         >
           <Icon name="menu" size="md" />
         </button>

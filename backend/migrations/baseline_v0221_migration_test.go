@@ -26,7 +26,7 @@ func isMigrationAfterV0219(name string) bool {
 	case baselineV0220MCPOAuthMigration, baselineGroupDisplayMigration, baselineV0221CostIndexMigration, baselineV0221CacheTTLMigration, advisorRequestIDMigration:
 		return true
 	default:
-		return name == baselineV0223UltrafastMultiplierMigration || isAccountTempUnschedulableMigration(name) || isV0222UpstreamMigration(name)
+		return name == baselineV0223UltrafastMultiplierMigration || (isAccountTempUnschedulableMigration(name) || name == groupLifecycleMigration) || isV0222UpstreamMigration(name)
 	}
 }
 
@@ -66,7 +66,7 @@ func TestBaselineV0221MigrationIdentity(t *testing.T) {
 	require.Contains(t, actual, advisorRequestIDMigration)
 	actual = slices.DeleteFunc(actual, func(name string) bool {
 		return name == advisorRequestIDMigration || name == baselineV0223UltrafastMultiplierMigration ||
-			isAccountTempUnschedulableMigration(name) || isV0222UpstreamMigration(name)
+			(isAccountTempUnschedulableMigration(name) || name == groupLifecycleMigration) || isV0222UpstreamMigration(name)
 	})
 	require.Equal(t, expected, actual)
 	require.Equal(t, []string{

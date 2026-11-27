@@ -261,7 +261,9 @@ func TestGatewayAdaptiveStreamHealthSelection(t *testing.T) {
 							route, _ := gatewayAdaptiveRoute(ctx)
 							_, ok := adaptiveStreamCandidateKey(ctx, route, &c, streamHealthPublicModel)
 							require.False(t, ok)
-							require.Nil(t, ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress).recovery.Load())
+							ingress, ok := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress)
+							require.True(t, ok)
+							require.Nil(t, ingress.recovery.Load())
 						}
 					}
 					if scenario == "no-slot" || scenario == "probe-no-slot" {
@@ -279,7 +281,9 @@ func TestGatewayAdaptiveStreamHealthSelection(t *testing.T) {
 						require.Equal(t, []int64{b.ID, c.ID}, concurrency.attempts)
 					}
 					if scenario == "missing-samples" || scenario == "compat-probe" {
-						lease := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress).recovery.Load()
+						ingress, ok := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress)
+						require.True(t, ok)
+						lease := ingress.recovery.Load()
 						require.NotNil(t, lease)
 						require.Equal(t, bKey, lease.streamKey)
 						require.True(t, lease.acquired.Load())
@@ -328,7 +332,8 @@ func TestGatewayAdaptiveStreamHealthEvidenceProbe(t *testing.T) {
 	peer := func(*Account, *Account) bool { return true }
 	choose := func(ctx context.Context, at time.Time) (adaptiveStreamChoice, func(adaptiveSampleKey, adaptiveStreamKey) bool) {
 		ctx = withAdaptiveStreamPermission(ctx, adaptiveBindingMiss, true)
-		ingress := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress)
+		ingress, ok := ctx.Value(adaptiveIngressKey{}).(*adaptiveIngress)
+		require.True(t, ok)
 		route, _ := gatewayAdaptiveRoute(ctx)
 		reserve := telemetry.recovery.opportunityWithStream(ctx, ingress, adaptiveProbeScope{groupID: 72, model: streamHealthPublicModel, route: route}, at)
 		return chooseAdaptiveStreamAccount(ctx, pool, adaptiveAccount, peer, nil, streamHealthPublicModel, at, func(key adaptiveStreamKey) bool { return reserve(key.sample, key) }), reserve

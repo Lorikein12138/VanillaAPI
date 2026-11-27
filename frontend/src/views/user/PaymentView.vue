@@ -94,7 +94,7 @@
                       :multiplier="balanceRechargeMultiplier"
                       :currency="selectedCurrency"
                     />
-                    <p v-if="amountError" class="text-xs text-amber-600 dark:text-amber-300">{{ amountError }}</p>
+                    <p v-if="amountError" class="text-xs text-amber-800 dark:text-amber-300">{{ amountError }}</p>
                   </section>
                   <section class="flex flex-col gap-3.5">
                     <div class="flex items-baseline gap-2.5">
@@ -172,9 +172,11 @@
                   </div>
                   <div v-if="hasHelpContent" class="rounded-[10px] border border-gray-200 px-6 py-5 dark:border-dark-700">
                     <div class="flex flex-col gap-3">
-                      <img v-if="checkout.help_image_url" :src="checkout.help_image_url" alt=""
-                        class="max-h-40 max-w-full cursor-pointer self-center rounded-lg object-contain transition-opacity hover:opacity-80"
-                        @click="previewImage = checkout.help_image_url" />
+                      <button v-if="checkout.help_image_url" type="button"
+                        class="max-w-full self-center rounded-lg transition-opacity hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-600"
+                        :aria-label="t('payment.helpImagePreview')" @click="previewImage = checkout.help_image_url">
+                        <img :src="checkout.help_image_url" alt="" class="max-h-40 max-w-full rounded-lg object-contain" />
+                      </button>
                       <div v-if="checkout.help_text" class="markdown-body w-full overflow-x-auto break-words text-[13.5px]" v-html="renderedHelpText"></div>
                     </div>
                   </div>
@@ -309,9 +311,11 @@
         </template>
         <div v-if="hasHelpContent && paymentPhase === 'select' && !selectedPlan && !rechargeFormVisible" class="card p-4">
           <div class="flex flex-col items-center gap-3">
-            <img v-if="checkout.help_image_url" :src="checkout.help_image_url" alt=""
-              class="h-40 max-w-full cursor-pointer rounded-lg object-contain transition-opacity hover:opacity-80"
-              @click="previewImage = checkout.help_image_url" />
+            <button v-if="checkout.help_image_url" type="button"
+              class="max-w-full rounded-lg transition-opacity hover:opacity-80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-600"
+              :aria-label="t('payment.helpImagePreview')" @click="previewImage = checkout.help_image_url">
+              <img :src="checkout.help_image_url" alt="" class="h-40 max-w-full rounded-lg object-contain" />
+            </button>
             <div v-if="checkout.help_text" class="markdown-body w-full overflow-x-auto break-words" v-html="renderedHelpText"></div>
           </div>
         </div>
@@ -334,18 +338,16 @@
         </div>
       </Transition>
     </Teleport>
-    <!-- Image Preview Overlay -->
-    <Teleport to="body">
-      <Transition name="modal">
-        <div v-if="previewImage" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm" @click="previewImage = ''">
-          <img :src="previewImage" alt="" class="max-h-[85vh] max-w-[90vw] rounded-xl object-contain shadow-2xl" />
-        </div>
-      </Transition>
-    </Teleport>
+    <BaseDialog :show="Boolean(previewImage)" :title="t('payment.helpImagePreview')" width="wide"
+      :z-index="60" close-on-click-outside @close="previewImage = ''">
+      <img v-if="previewImage" :src="previewImage" :alt="t('payment.helpImageAlt')"
+        class="mx-auto max-h-[70vh] max-w-full rounded-lg object-contain" />
+    </BaseDialog>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import { getSiteCurrencySymbol } from '@/utils/siteCurrency'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'

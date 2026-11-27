@@ -552,31 +552,25 @@
           </div>
 
           <div class="md:col-span-2">
-            <label class="input-label">API Key</label>
-            <select v-model.number="form.apiKeyId" class="input" :disabled="loadingKeys">
-              <option :value="0">{{ loadingKeys ? t('batchImage.create.loadingKeys') : t('batchImage.create.selectKeyPlaceholder') }}</option>
-              <option v-for="key in geminiApiKeys" :key="key.id" :value="key.id">
-                {{ key.name }} · {{ key.group?.name || 'Gemini' }}
-              </option>
-            </select>
-            <p v-if="!loadingKeys && geminiApiKeys.length === 0" class="input-hint text-amber-600 dark:text-amber-400">
+            <label for="batch-create-key" class="input-label">{{ t('batchImage.columns.apiKey') }}</label>
+            <Select id="batch-create-key" v-model="form.apiKeyId" :options="createApiKeyOptions"
+              :aria-label="t('batchImage.columns.apiKey')" :disabled="loadingKeys"
+              :placeholder="t(loadingKeys ? 'batchImage.create.loadingKeys' : 'batchImage.create.selectKeyPlaceholder')" />
+            <p v-if="!loadingKeys && geminiApiKeys.length === 0" class="input-hint text-amber-800 dark:text-amber-300">
               {{ t('batchImage.create.noKeysHint') }}
             </p>
           </div>
 
           <div>
-            <label class="input-label">{{ t('batchImage.create.model') }}</label>
-            <select v-model="form.model" class="input" :disabled="loadingModels || availableBatchImageModels.length === 0">
-              <option v-if="loadingModels" value="">{{ batchImageText('loadingModels') }}</option>
-              <option v-else-if="availableBatchImageModels.length === 0" value="">{{ batchImageText('noModels') }}</option>
-              <option v-for="model in availableBatchImageModels" :key="model.value" :value="model.value">
-                {{ model.label }}
-              </option>
-            </select>
-            <p v-if="modelLoadError" class="input-hint text-amber-600 dark:text-amber-400">
+            <label for="batch-create-model" class="input-label">{{ t('batchImage.create.model') }}</label>
+            <Select id="batch-create-model" v-model="form.model" :options="availableBatchImageModels"
+              :aria-label="t('batchImage.create.model')"
+              :disabled="loadingModels || availableBatchImageModels.length === 0"
+              :placeholder="batchImageText(loadingModels ? 'loadingModels' : 'noModels')" />
+            <p v-if="modelLoadError" class="input-hint text-amber-800 dark:text-amber-300">
               {{ modelLoadError }}
             </p>
-            <p v-else-if="selectedApiKey && !loadingModels && availableBatchImageModels.length === 0" class="input-hint text-amber-600 dark:text-amber-400">
+            <p v-else-if="selectedApiKey && !loadingModels && availableBatchImageModels.length === 0" class="input-hint text-amber-800 dark:text-amber-300">
               {{ batchImageText('noModelsHint') }}
             </p>
           </div>
@@ -590,12 +584,9 @@
           </div>
 
           <div>
-            <label class="input-label">{{ t('batchImage.create.outputFormat') }}</label>
-            <select v-model="form.responseMimeType" class="input">
-              <option value="image/png">PNG</option>
-              <option value="image/jpeg">JPEG</option>
-              <option value="image/webp">WebP</option>
-            </select>
+            <label for="batch-create-format" class="input-label">{{ t('batchImage.create.outputFormat') }}</label>
+            <Select id="batch-create-format" v-model="form.responseMimeType"
+              :aria-label="t('batchImage.create.outputFormat')" :options="outputFormatOptions" />
           </div>
 
           <div>
@@ -945,6 +936,16 @@ const geminiApiKeys = computed(() =>
     key.group?.allow_batch_image_generation === true,
   ),
 )
+
+const createApiKeyOptions = computed<SelectOption[]>(() => geminiApiKeys.value.map(key => ({
+  value: key.id,
+  label: `${key.name} · ${key.group?.name || 'Gemini'}`,
+})))
+const outputFormatOptions: SelectOption[] = [
+  { value: 'image/png', label: 'PNG' },
+  { value: 'image/jpeg', label: 'JPEG' },
+  { value: 'image/webp', label: 'WebP' },
+]
 
 const selectedApiKey = computed(() =>
   geminiApiKeys.value.find((key) => key.id === Number(form.apiKeyId)) || null,

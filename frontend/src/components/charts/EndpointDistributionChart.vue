@@ -1,13 +1,13 @@
 <template>
-  <div class="card p-4">
-    <div class="mb-4 flex items-center justify-between gap-3">
+  <div class="card min-w-0 p-4">
+    <div class="mb-4 flex min-w-0 flex-col items-start justify-between gap-3 sm:flex-row sm:flex-wrap sm:items-center">
       <h3 class="text-[0.9375rem] font-serif font-normal text-gray-950 dark:text-dark-50">
         {{ title || t('usage.endpointDistribution') }}
       </h3>
-      <div class="flex flex-wrap items-center justify-end gap-2">
+      <div class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
         <div
           v-if="showSourceToggle"
-          class="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5 dark:border-dark-700 dark:bg-dark-800"
+          class="inline-flex max-w-full flex-wrap rounded-lg border border-gray-200 bg-gray-50 p-0.5 dark:border-dark-700 dark:bg-dark-800"
         >
           <button
             type="button"
@@ -43,7 +43,7 @@
 
         <div
           v-if="showMetricToggle"
-          class="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5 dark:border-dark-700 dark:bg-dark-800"
+          class="inline-flex max-w-full flex-wrap rounded-lg border border-gray-200 bg-gray-50 p-0.5 dark:border-dark-700 dark:bg-dark-800"
         >
           <button
             type="button"

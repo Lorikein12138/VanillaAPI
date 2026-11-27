@@ -26,6 +26,27 @@ type detectionAccountRepo struct {
 	writes int
 }
 
+type detectionGatewayGroupRepo struct {
+	GroupRepository
+	groups map[int64]*Group
+}
+
+func (r detectionGatewayGroupRepo) GetByIDLite(_ context.Context, id int64) (*Group, error) {
+	if group := r.groups[id]; group != nil {
+		return group, nil
+	}
+	return nil, ErrGroupNotFound
+}
+
+type detectionProxyRepo struct {
+	ProxyRepository
+	get func(context.Context, int64) (*Proxy, error)
+}
+
+func (r detectionProxyRepo) GetByID(ctx context.Context, id int64) (*Proxy, error) {
+	return r.get(ctx, id)
+}
+
 func (r *detectionAccountRepo) GetByID(_ context.Context, _ int64) (*Account, error) {
 	return r.fresh, r.err
 }
@@ -129,7 +150,7 @@ func TestChannelDetectionNeverUsesRevokedFallback(t *testing.T) {
 	s := newDetectionFixture(t)
 	original, fallback := s.groupRows[1], s.groupRows[2]
 	original.ClaudeCodeOnly, original.FallbackGroupID = true, &fallback.ID
-	repo := &mockGroupRepoForGateway{groups: s.groupRows}
+	repo := detectionGatewayGroupRepo{groups: s.groupRows}
 	gateway := &GatewayService{groupRepo: repo}
 	ordinary, _, err := gateway.resolveGatewayGroup(context.Background(), &original.ID)
 	require.NoError(t, err)
@@ -202,7 +223,7 @@ func TestChannelDetectionAntigravityRejectsBeforeTokenAndProjectIO(t *testing.T)
 	delete(account.Credentials, "project_id")
 	accountRepo := &detectionAccountRepo{fresh: account}
 	projectLookups := 0
-	oauth := NewAntigravityOAuthService(&mockProxyRepoForOAuth{getByIDFunc: func(context.Context, int64) (*Proxy, error) {
+	oauth := NewAntigravityOAuthService(detectionProxyRepo{get: func(context.Context, int64) (*Proxy, error) {
 		projectLookups++
 		return proxy, nil
 	}})

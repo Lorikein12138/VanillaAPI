@@ -317,8 +317,12 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 			latest = snapshot
 		}
 		guard := latest.guard(current)
-		latest.cancelRuns()
+		if current.Enabled != input.Enabled || current.IntervalMinutes != input.IntervalMinutes ||
+			*current.ConcurrentGroups != *input.ConcurrentGroups {
+			latest.cancelRuns()
+		}
 		latest.Revision = next.Revision
+		maps.DeleteFunc(latest.RunningByGroup, func(id int64, _ channelDetectionRun) bool { return !keep[id] })
 		maps.DeleteFunc(latest.Samples, func(id int64, _ *ChannelDetectionSample) bool { return !keep[id] })
 		maps.DeleteFunc(latest.Proofs, func(id int64, _ ChannelDetectionProof) bool { return !keep[id] })
 		maps.DeleteFunc(latest.AttemptedAt, func(id int64, _ time.Time) bool { return !keep[id] })
@@ -706,21 +710,41 @@ func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run ch
 	id, owner := run.GroupID, run.Owner
 	roundCtx, cancel := context.WithTimeout(ctx, channelDetectionRoundTimeout)
 	defer cancel()
-	current := func(ctx context.Context) bool {
-		feature, config, _, err := s.state(ctx, false)
-		if err != nil || feature != expected.Feature || config.stored != expected.Config {
-			return false
+	currentGuard := func(ctx context.Context) (ChannelDetectionSnapshotGuard, bool, error) {
+		feature, config, latest, err := s.state(ctx, true)
+		if err != nil || feature != expected.Feature || !config.Enabled ||
+			!slices.Contains(config.Groups, selection) || !latest.matchesRun(run) {
+			return ChannelDetectionSnapshotGuard{}, false, err
 		}
 		held, err := s.coordinator.Holds(ctx, id, owner)
 		if err != nil || !held {
-			return false
+			return ChannelDetectionSnapshotGuard{}, false, err
 		}
 		_, err = s.probeGroup(ctx, selection)
-		return err == nil
+		return latest.guard(config), err == nil, err
+	}
+	current := func(ctx context.Context) bool {
+		_, ok, _ := currentGuard(ctx)
+		return ok
 	}
 	go watchDetectionConfiguration(roundCtx, current, cancel)
 	budget := &detectionRoundBudget{reserve: func(ctx context.Context, group *Group) (bool, error) {
-		return s.coordinator.ReserveSend(ctx, owner, expected, group.ID, group.RPMLimit, channelDetectionDailySends)
+		guard, current, err := currentGuard(ctx)
+		if err != nil || !current {
+			return false, err
+		}
+		for range 3 {
+			ok, err := s.coordinator.ReserveSend(ctx, owner, guard, group.ID, group.RPMLimit, channelDetectionDailySends)
+			if ok || err != nil {
+				return ok, err
+			}
+			next, current, err := currentGuard(ctx)
+			if err != nil || !current || next.Config == guard.Config {
+				return false, err
+			}
+			guard = next
+		}
+		return false, nil
 	}}
 	sample := s.runSample(roundCtx, gateway, selection, current, budget)
 
@@ -737,8 +761,7 @@ func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run ch
 	proof, entered := budget.proof(run)
 	noSend := run.Source == "manual" && !entered
 	_, err := s.updateRunSnapshot(writeCtx, run, expected, !noSend, func(_ channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
-		marker := latest.RunningByGroup[id]
-		if marker.Owner != owner || marker.SampleID != run.SampleID {
+		if !latest.matchesRun(run) {
 			return false
 		}
 		delete(latest.RunningByGroup, id)
@@ -765,10 +788,16 @@ func (latest channelDetectionSnapshot) guard(config channelDetectionConfigRecord
 	return ChannelDetectionSnapshotGuard{Feature: latest.Feature, Config: config.stored, Snapshot: latest.stored}
 }
 
+func (latest channelDetectionSnapshot) matchesRun(run channelDetectionRun) bool {
+	marker := latest.RunningByGroup[run.GroupID]
+	return marker.Owner == run.Owner && marker.SampleID == run.SampleID
+}
+
 func (s *ChannelDetection) updateRunSnapshot(ctx context.Context, run channelDetectionRun, expected ChannelDetectionSnapshotGuard, publish bool, update func(channelDetectionConfigRecord, *channelDetectionSnapshot) bool) (bool, error) {
 	for ctx.Err() == nil {
 		feature, config, latest, err := s.state(ctx, true)
-		if err != nil || feature != expected.Feature || config.stored != expected.Config || !config.Enabled {
+		if err != nil || feature != expected.Feature || !config.Enabled ||
+			(config.stored != expected.Config && !latest.matchesRun(run)) {
 			return false, err
 		}
 		if !update(config, &latest) {

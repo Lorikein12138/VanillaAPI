@@ -222,6 +222,9 @@ type dbExec interface {
 }
 
 func setGroupIDsTx(ctx context.Context, exec dbExec, channelID int64, groupIDs []int64) error {
+	if err := lockLiveGroups(ctx, exec, groupIDs); err != nil {
+		return err
+	}
 	if _, err := exec.ExecContext(ctx, `DELETE FROM channel_groups WHERE channel_id = $1`, channelID); err != nil {
 		return fmt.Errorf("delete old group associations: %w", err)
 	}

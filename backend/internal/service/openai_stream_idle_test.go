@@ -45,7 +45,7 @@ func TestOpenAIRawChatIdleAfterUpstreamKeepalive(t *testing.T) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	reader, writer := io.Pipe()
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	go func() { _, _ = io.WriteString(writer, ": upstream keepalive\n\n") }()
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: reader}
 	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}

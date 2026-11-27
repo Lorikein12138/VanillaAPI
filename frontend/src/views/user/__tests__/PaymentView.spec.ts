@@ -321,6 +321,7 @@ describe('PaymentView help text', () => {
       global: {
         stubs: {
           AppLayout: { template: '<div><slot /></div>' },
+          BaseDialog: false,
           Teleport: true,
           Transition: false,
         },
@@ -357,9 +358,14 @@ describe('PaymentView help text', () => {
     const help = wrapper.get('.markdown-body')
     expect(help.get('p').text()).toBe('First line\nSecond line')
     expect(help.find('br').exists()).toBe(false)
-    await wrapper.get('img').trigger('click')
-    expect(wrapper.findAll('img')).toHaveLength(2)
-    expect(wrapper.findAll('img')[1].attributes('src')).toBe('https://example.com/help.png')
+    await wrapper.get('button[aria-label="payment.helpImagePreview"]').trigger('click')
+    const preview = wrapper.get('[role="dialog"]')
+    expect(preview.get('img').attributes()).toMatchObject({
+      src: 'https://example.com/help.png',
+      alt: 'payment.helpImageAlt',
+    })
+    await preview.get('button[aria-label="common.closeDialog"]').trigger('click')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
   it('keeps image-only help without an empty Markdown container', async () => {

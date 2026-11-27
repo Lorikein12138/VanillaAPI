@@ -70,6 +70,62 @@ func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64
 	return c.rdb.Del(ctx, key).Err()
 }
 
+// compareAndBindStickySessionScript writes the served account unless another
+// request rebound the key during the forward. ARGV[1] is the account, ARGV[2]
+// the TTL in milliseconds and ARGV[3..] the accounts this request failed over
+// from, which it may have written itself. A key already holding the account only
+// gets its TTL refreshed; a missing key and one holding a replaceable account
+// are written. The result is 2 for a new value, 1 for a refresh and 0 for a veto.
+var compareAndBindStickySessionScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if current == ARGV[1] then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  return 1
+end
+if current == false then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+  return 2
+end
+for i = 3, #ARGV do
+  if current == ARGV[i] then
+    redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+    return 2
+  end
+end
+return 0
+`)
+
+func (c *gatewayCache) CompareAndBindSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, replaceableAccountIDs []int64, ttl time.Duration) (bool, error) {
+	n, err := c.compareAndBindSessionAccountID(ctx, groupID, sessionHash, accountID, replaceableAccountIDs, ttl)
+	return n > 0, err
+}
+
+func (c *gatewayCache) ClaimSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (bool, error) {
+	n, err := c.compareAndBindSessionAccountID(ctx, groupID, sessionHash, accountID, nil, ttl)
+	return n == 2, err
+}
+
+func (c *gatewayCache) compareAndBindSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, replaceableAccountIDs []int64, ttl time.Duration) (int, error) {
+	if c == nil || c.rdb == nil {
+		return 0, errors.New("gateway cache unavailable")
+	}
+	if strings.TrimSpace(sessionHash) == "" || ttl <= 0 {
+		return 0, errors.New("invalid sticky session bind")
+	}
+	// The bound values are stored as decimal strings (see SetSessionAccountID).
+	args := make([]any, 0, 2+len(replaceableAccountIDs))
+	args = append(args, strconv.FormatInt(accountID, 10), ttl.Milliseconds())
+	for _, replaceableAccountID := range replaceableAccountIDs {
+		args = append(args, strconv.FormatInt(replaceableAccountID, 10))
+	}
+	return compareAndBindStickySessionScript.Run(
+		ctx,
+		c.rdb,
+		[]string{buildSessionKey(groupID, sessionHash)},
+		args...,
+	).Int()
+}
+
 var claimOpenAIResponsesSessionWindowScript = redis.NewScript(`
 local previous = redis.call('GET', KEYS[1])
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
@@ -160,6 +216,7 @@ func (c *gatewayCache) CompareAndDeleteOpenAIResponsesSessionWindow(ctx context.
 }
 
 var _ service.OpenAIWSSessionPreemptionCache = (*gatewayCache)(nil)
+var _ service.GatewayStickySessionCompareCache = (*gatewayCache)(nil)
 
 const (
 	grokVideoPendingBillingPrefix = "grok_video_pending:"

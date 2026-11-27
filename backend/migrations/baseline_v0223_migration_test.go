@@ -16,7 +16,8 @@ const (
 	baselineV0223MigrationCount                 = baselineV0222MigrationCount + 1
 	accountTempUnschedulableProtectionMigration = "253_account_temp_unschedulable_protection.sql"
 	accountTempUnschedulableRevisionMigration   = "254_account_temp_unschedulable_revision.sql"
-	currentMigrationCount                       = baselineV0223MigrationCount + 2
+	groupLifecycleMigration                     = "255_group_lifecycle_cleanup.sql"
+	currentMigrationCount                       = baselineV0223MigrationCount + 3
 )
 
 func isAccountTempUnschedulableMigration(name string) bool {
@@ -31,6 +32,7 @@ func TestBaselineV0223MigrationIdentity(t *testing.T) {
 		baselineV0223UltrafastMultiplierMigration,
 		accountTempUnschedulableProtectionMigration,
 		accountTempUnschedulableRevisionMigration,
+		groupLifecycleMigration,
 	}, names[baselineV0223MigrationCount-1:])
 	data, err := FS.ReadFile(baselineV0223UltrafastMultiplierMigration)
 	require.NoError(t, err)

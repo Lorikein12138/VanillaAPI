@@ -216,7 +216,12 @@ func TestChannelDetectionShutdownRetractsCommittedAdmission(t *testing.T) {
 func TestChannelDetectionEvidenceActualHTTPResponseAndWrite(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/close-after-write" {
-			conn, _, err := w.(http.Hijacker).Hijack()
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("fixture response writer cannot hijack")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
 			if err == nil {
 				_ = conn.Close()
 			}

@@ -11,7 +11,7 @@
         @click.self="handleClose"
       >
         <!-- Modal panel -->
-        <div ref="dialogRef" :class="['modal-content', widthClasses]" @click.stop>
+        <div ref="dialogRef" :class="['modal-content', widthClasses]" tabindex="-1" @click.stop>
           <!-- Header -->
           <div class="modal-header">
             <h3 :id="dialogId" class="modal-title">
@@ -21,7 +21,7 @@
               v-if="showCloseButton"
               @click="emit('close')"
               class="-mr-2 rounded-xl p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/30 focus-visible:ring-offset-2 dark:text-dark-500 dark:hover:bg-dark-700 dark:hover:text-dark-300 dark:focus-visible:ring-offset-dark-900"
-              aria-label="Close modal"
+              :aria-label="t('common.closeDialog')"
             >
               <Icon name="x" size="md" />
             </button>
@@ -44,20 +44,44 @@
 
 <script lang="ts">
 let dialogIdCounter = 0
-const openDialogs = new Set<string>()
+interface OpenDialog {
+  zIndex: () => number
+  panel: () => HTMLElement | null
+  opener: HTMLElement | null
+}
+const openDialogs = new Map<string, OpenDialog>()
+
+function topDialog() {
+  let top: OpenDialog | undefined
+  for (const dialog of openDialogs.values()) {
+    if (!top || dialog.zIndex() > top.zIndex()) {
+      top = dialog
+    } else if (dialog.zIndex() === top.zIndex()) {
+      const previous = top.panel()
+      const current = dialog.panel()
+      // Equal z-index paints in the teleported DOM order.
+      if (!previous || (current && (previous.compareDocumentPosition(current) & Node.DOCUMENT_POSITION_FOLLOWING))) {
+        top = dialog
+      }
+    }
+  }
+  return top
+}
 </script>
 
 <script setup lang="ts">
-import { computed, watch, onMounted, onUnmounted, ref, nextTick } from 'vue'
+import { computed, watch, onMounted, onBeforeUnmount, ref, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
+import { containTab, getTabStops } from '@/utils/tabStops'
 
+const { t } = useI18n()
 // 生成唯一ID以避免多个对话框时ID冲突
 const dialogId = `modal-title-${++dialogIdCounter}`
 
 // 焦点管理
 const dialogRef = ref<HTMLElement | null>(null)
 const modalBodyRef = ref<HTMLElement | null>(null)
-let previousActiveElement: HTMLElement | null = null
 
 type DialogWidth = 'narrow' | 'normal' | 'wide' | 'extra-wide' | 'full'
 
@@ -84,6 +108,7 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits<Emits>()
+const dialog: OpenDialog = { zIndex: () => props.zIndex, panel: () => dialogRef.value, opener: null }
 
 // Custom z-index style (overrides the default z-50 from CSS)
 const zIndexStyle = computed(() => {
@@ -105,22 +130,58 @@ const widthClasses = computed(() => {
 })
 
 const handleClose = () => {
-  if (props.closeOnClickOutside) {
+  if (isTopDialog() && props.closeOnClickOutside) {
     emit('close')
   }
 }
 
-const handleEscape = (event: KeyboardEvent) => {
-  if (props.show && props.closeOnEscape && event.key === 'Escape' && [...openDialogs].pop() === dialogId) {
+const isTopDialog = () => topDialog() === dialog
+
+const handleKeydown = (event: KeyboardEvent) => {
+  const dialog = dialogRef.value
+  if (!dialog || !props.show || !isTopDialog() || event.defaultPrevented) return
+  if (props.closeOnEscape && event.key === 'Escape') {
+    event.preventDefault()
     emit('close')
+    return
   }
+  if (event.key === 'Tab') containTab(event, dialog)
 }
 
 const updateScrollLock = (isOpen: boolean) => {
-  if (isOpen) openDialogs.add(dialogId)
+  if (isOpen) openDialogs.set(dialogId, dialog)
   else openDialogs.delete(dialogId)
   document.body.classList.toggle('modal-open', openDialogs.size > 0)
 }
+
+function closeDialog() {
+  const wasTop = isTopDialog()
+  const opener = dialog.opener
+  const closingPanel = dialog.panel()
+  dialog.opener = null
+  updateScrollLock(false)
+  for (const remaining of openDialogs.values()) {
+    if (closingPanel?.contains(remaining.opener)) remaining.opener = opener
+  }
+  if (!wasTop) return
+  const next = topDialog()?.panel()
+  if (opener?.isConnected && !opener.closest('[inert]') && (!next || next.contains(opener))) {
+    opener.focus()
+  } else if (next) {
+    focusPanel(next)
+  }
+}
+
+function focusPanel(panel: HTMLElement) {
+  const target = getTabStops(panel)[0] ?? panel
+  target.focus()
+}
+
+watch(() => props.zIndex, async () => {
+  await nextTick()
+  const panel = topDialog()?.panel()
+  if (panel && !panel.contains(document.activeElement)) focusPanel(panel)
+})
 
 // Prevent body scroll when modal is open and manage focus
 watch(
@@ -128,40 +189,32 @@ watch(
   async (isOpen) => {
     if (isOpen) {
       // 保存当前焦点元素
-      previousActiveElement = document.activeElement as HTMLElement
+      dialog.opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
       // 使用CSS类而不是直接操作style,更易于管理多个对话框
       updateScrollLock(true)
 
       // 等待DOM更新后设置焦点到对话框
       await nextTick()
+      if (!isTopDialog()) return
       if (modalBodyRef.value) {
         modalBodyRef.value.scrollTop = 0
       }
       if (dialogRef.value) {
-        const firstFocusable = dialogRef.value.querySelector<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-        )
-        firstFocusable?.focus()
+        focusPanel(dialogRef.value)
       }
     } else {
-      updateScrollLock(false)
-      // 恢复之前的焦点
-      if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
-        previousActiveElement.focus()
-      }
-      previousActiveElement = null
+      closeDialog()
     }
   },
   { immediate: true }
 )
 
 onMounted(() => {
-  document.addEventListener('keydown', handleEscape)
+  document.addEventListener('keydown', handleKeydown)
 })
 
-onUnmounted(() => {
-  document.removeEventListener('keydown', handleEscape)
-  // 确保组件卸载时移除滚动锁定
-  updateScrollLock(false)
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', handleKeydown)
+  closeDialog()
 })
 </script>

@@ -2670,7 +2670,7 @@ func (r *accountRepository) ClearTempUnschedulableManually(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if err := r.clearTempUnschedulable(dbent.NewTxContext(ctx, tx), id, true); err != nil {
 		return err
 	}

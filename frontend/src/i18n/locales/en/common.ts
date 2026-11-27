@@ -50,6 +50,7 @@ export default {
     inactive: 'Inactive',
     more: 'More',
     close: 'Close',
+    closeDialog: 'Close modal',
     toggleMenu: 'Toggle menu',
     userMenu: 'User menu',
     pageNotFound: 'Page not found',

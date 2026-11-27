@@ -121,46 +121,46 @@ func (s *OpenAIGatewayService) openAIStickyLegacyTTL(ttl time.Duration) time.Dur
 }
 
 func (s *OpenAIGatewayService) getStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) (int64, error) {
-	id, err, _ := s.readStickySessionAccountID(ctx, groupID, sessionHash)
+	id, _, err := s.readStickySessionAccountID(ctx, groupID, sessionHash)
 	return id, err
 }
 
-func (s *OpenAIGatewayService) readStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) (int64, error, adaptiveBindingState) {
+func (s *OpenAIGatewayService) readStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string) (int64, adaptiveBindingState, error) {
 	primaryKey := s.openAISessionCacheKey(sessionHash)
 	if primaryKey == "" {
-		return 0, nil, adaptiveBindingMiss
+		return 0, adaptiveBindingMiss, nil
 	}
 	if s == nil || s.cache == nil {
-		return 0, nil, adaptiveBindingUnknown
+		return 0, adaptiveBindingUnknown, nil
 	}
 
 	accountID, err := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), primaryKey)
 	if err == nil && accountID > 0 {
-		return accountID, nil, adaptiveBindingHit
+		return accountID, adaptiveBindingHit, nil
 	}
 	state := adaptiveBindingUnknown
 	if errors.Is(err, ErrStickySessionNotFound) {
 		state = adaptiveBindingMiss
 	}
 	if !s.openAISessionHashReadOldFallbackEnabled() {
-		return accountID, err, state
+		return accountID, state, err
 	}
 
 	legacyKey := s.openAILegacySessionCacheKey(ctx, sessionHash)
 	if legacyKey == "" {
-		return accountID, err, state
+		return accountID, state, err
 	}
 
 	openAIStickyLegacyReadFallbackTotal.Add(1)
 	legacyAccountID, legacyErr := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), legacyKey)
 	if legacyErr == nil && legacyAccountID > 0 {
 		openAIStickyLegacyReadFallbackHit.Add(1)
-		return legacyAccountID, nil, adaptiveBindingHit
+		return legacyAccountID, adaptiveBindingHit, nil
 	}
 	if !errors.Is(legacyErr, ErrStickySessionNotFound) {
 		state = adaptiveBindingUnknown
 	}
-	return accountID, err, state
+	return accountID, state, err
 }
 
 func (s *OpenAIGatewayService) setStickySessionAccountID(ctx context.Context, groupID *int64, sessionHash string, accountID int64, ttl time.Duration) error {

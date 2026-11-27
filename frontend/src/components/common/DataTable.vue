@@ -132,36 +132,43 @@
             @click="column.sortable && handleSort(column.key)"
           >
             <div :class="['flex items-center space-x-1', getHeaderContentAlignmentClass(column)]">
-              <slot
-                :name="`header-${column.key}`"
-                :column="column"
-                :sort-key="sortKey"
-                :sort-order="sortOrder"
+              <component
+                :is="column.sortable ? 'button' : 'div'"
+                :type="column.sortable ? 'button' : undefined"
+                class="inline-flex items-center gap-1 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-600"
               >
-                <span>{{ column.label }}</span>
-              </slot>
-              <span
-                v-if="column.sortable"
-                class="inline-flex h-5 w-4 flex-col items-center justify-center"
-                aria-hidden="true"
-              >
-                <svg
-                  class="h-2.5 w-2.5"
-                  :class="getSortIndicatorClass(column.key, 'asc')"
-                  fill="currentColor"
-                  viewBox="0 0 10 10"
+                <slot
+                  :name="`header-${column.key}`"
+                  :column="column"
+                  :sort-key="sortKey"
+                  :sort-order="sortOrder"
                 >
-                  <path d="M5 2L1.5 6.5h7L5 2z" />
-                </svg>
-                <svg
-                  class="-mt-0.5 h-2.5 w-2.5"
-                  :class="getSortIndicatorClass(column.key, 'desc')"
-                  fill="currentColor"
-                  viewBox="0 0 10 10"
+                  <span>{{ column.label }}</span>
+                </slot>
+                <span
+                  v-if="column.sortable"
+                  class="inline-flex h-5 w-4 flex-col items-center justify-center"
+                  aria-hidden="true"
                 >
-                  <path d="M5 8L1.5 3.5h7L5 8z" />
-                </svg>
-              </span>
+                  <svg
+                    class="h-2.5 w-2.5"
+                    :class="getSortIndicatorClass(column.key, 'asc')"
+                    fill="currentColor"
+                    viewBox="0 0 10 10"
+                  >
+                    <path d="M5 2L1.5 6.5h7L5 2z" />
+                  </svg>
+                  <svg
+                    class="-mt-0.5 h-2.5 w-2.5"
+                    :class="getSortIndicatorClass(column.key, 'desc')"
+                    fill="currentColor"
+                    viewBox="0 0 10 10"
+                  >
+                    <path d="M5 8L1.5 3.5h7L5 8z" />
+                  </svg>
+                </span>
+              </component>
+              <slot :name="`header-${column.key}-suffix`" :column="column" />
             </div>
           </th>
         </tr>
@@ -1099,7 +1106,7 @@ tbody tr:hover .sticky-col {
 
 /* 常驻、不透明的滑块，无视鼠标是否 hover 都在那！ */
 .table-wrapper::-webkit-scrollbar-thumb {
-  background-color: rgba(115, 114, 108, 0.75) !important; 
+  background-color: rgba(115, 114, 108, 0.75) !important;
   border-radius: 6px !important;
   border: 2px solid transparent !important;
   background-clip: padding-box !important;

@@ -103,6 +103,7 @@ func TestAccountReadableSnapshot_DenylistTripwire(t *testing.T) {
 		"AutoPauseOnExpired": {}, "CreatedAt": {}, "UpdatedAt": {}, "Schedulable": {},
 		"RateLimitedAt": {}, "RateLimitResetAt": {}, "OverloadUntil": {},
 		"TempUnschedulableUntil": {}, "TempUnschedulableReason": {},
+		"TempUnschedulableProtectedUntil": {}, "TempUnschedulableRevision": {}, // Read-only scheduler metadata.
 		"SessionWindowStart": {}, "SessionWindowEnd": {}, "SessionWindowStatus": {},
 		"ParentAccountID": {}, "QuotaDimension": {}, "GroupIDs": {},
 	}

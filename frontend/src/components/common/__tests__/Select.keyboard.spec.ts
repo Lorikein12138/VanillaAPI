@@ -52,4 +52,11 @@ describe('Select keyboard focus', () => {
     await press('Enter')
     expect(wrapper.emitted('update:modelValue')).toEqual([['beta']])
   })
+
+  it('continues Tab navigation from the trigger when the dropdown is teleported', async () => {
+    await open(false)
+    await press('Tab')
+    expect(wrapper.get('button').attributes('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(wrapper.get('button').element)
+  })
 })

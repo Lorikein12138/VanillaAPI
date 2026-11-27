@@ -1,3 +1,4 @@
+import { createPinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, ref } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
@@ -7,6 +8,10 @@ import enSettings from "@/i18n/locales/en/admin/settings";
 import zhCommon from "@/i18n/locales/zh/common";
 import zhSettings from "@/i18n/locales/zh/admin/settings";
 import SettingsView from "../SettingsView.vue";
+
+vi.mock("@/api/channelDetection", () => ({
+  channelDetectionAPI: { publicEnabled: vi.fn().mockResolvedValue(false) },
+}));
 
 vi.mock("@/api/admin/adminAccessKeys", () => ({
   list: vi.fn().mockResolvedValue({ items: [], permissions: [] }),
@@ -155,6 +160,7 @@ vi.mock("@/stores", () => ({
 vi.mock("@/stores/adminSettings", () => ({
   useAdminSettingsStore: () => ({
     fetch: adminSettingsFetch,
+    setChannelDetectionEnabled: vi.fn(),
     setGatewayAdaptiveSchedulingEnabled,
   }),
 }));
@@ -577,6 +583,7 @@ const baseSettingsResponse = {
 function mountView() {
   return mount(SettingsView, {
     global: {
+      plugins: [createPinia()],
       stubs: {
         AppLayout: AppLayoutStub,
         Select: SelectStub,
@@ -1615,6 +1622,7 @@ describe("admin SettingsView payment visible method controls", () => {
 
     const wrapper = mount(SettingsView, {
       global: {
+        plugins: [createPinia()],
         stubs: {
           AppLayout: AppLayoutStub,
           Select: SelectStub,
@@ -1961,6 +1969,7 @@ describe("admin SettingsView payment visible method controls", () => {
 
     const wrapper = mount(SettingsView, {
       global: {
+        plugins: [createPinia()],
         stubs: {
           AppLayout: AppLayoutStub,
           Select: SelectStub,

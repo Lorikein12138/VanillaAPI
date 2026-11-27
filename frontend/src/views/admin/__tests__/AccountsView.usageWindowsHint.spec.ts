@@ -72,7 +72,8 @@ const DataTableStub = {
           <slot :name="'header-' + column.key" :column="column" />
         </div>
         <div v-if="column.key === 'upstream_billing_rate'" data-test="upstream-billing-header">
-          <slot :name="'header-' + column.key" :column="column" />
+          {{ column.label }}
+          <slot :name="'header-' + column.key + '-suffix'" :column="column" />
         </div>
       </template>
       <div v-for="row in data" :key="row.id" data-test="account-rate">

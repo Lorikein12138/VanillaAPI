@@ -75,7 +75,10 @@ describe('DataTable', () => {
     expect(nameHeader.findAll('svg')[0].classes()).toContain('text-primary-600')
     expect(nameHeader.findAll('svg')[1].classes()).toContain('text-gray-300')
 
-    await nameHeader.trigger('click')
+    const sortButton = nameHeader.get<HTMLButtonElement>('button')
+    expect(sortButton.element.tabIndex).toBe(0)
+    expect(sortButton.attributes('type')).toBe('button')
+    await sortButton.trigger('click')
     await wrapper.vm.$nextTick()
 
     expect(nameHeader.attributes('aria-sort')).toBe('descending')

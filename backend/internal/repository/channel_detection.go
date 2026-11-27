@@ -69,21 +69,21 @@ func (lease channelDetectionLease) prune(now time.Time) {
 	}
 }
 
-func lockDetectionLease(ctx context.Context, tx *sql.Tx) (channelDetectionLease, time.Time, bool, error) {
+func lockDetectionLease(ctx context.Context, tx sqlExecutor) (channelDetectionLease, time.Time, bool, error) {
 	var raw string
 	var expiry, now time.Time
-	if err := tx.QueryRowContext(ctx, `SELECT value, updated_at FROM settings WHERE key = $1 FOR UPDATE`,
-		channelDetectionLeaseSetting).Scan(&raw, &expiry); err != nil {
+	if err := scanDetectionRow(ctx, tx, `SELECT value, updated_at FROM settings WHERE key = $1 FOR UPDATE`,
+		[]any{&raw, &expiry}, channelDetectionLeaseSetting); err != nil {
 		return channelDetectionLease{}, now, false, err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+	if err := scanDetectionRow(ctx, tx, `SELECT clock_timestamp()`, []any{&now}); err != nil {
 		return channelDetectionLease{}, now, false, err
 	}
 	lease, legacy, unknown := decodeDetectionLease(raw, expiry, now)
 	return lease, now, legacy != "" || unknown, nil
 }
 
-func storeDetectionLease(ctx context.Context, tx *sql.Tx, lease channelDetectionLease) error {
+func storeDetectionLease(ctx context.Context, tx sqlExecutor, lease channelDetectionLease) error {
 	if len(lease.Groups) == 0 {
 		_, err := tx.ExecContext(ctx, `UPDATE settings SET value = '', updated_at = clock_timestamp() WHERE key = $1`, channelDetectionLeaseSetting)
 		return err
@@ -112,7 +112,7 @@ func (r *channelDetectionCoordinator) TryAcquire(ctx context.Context, groupID in
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO settings (key,value,updated_at) VALUES ($1,'',clock_timestamp())
 		ON CONFLICT (key) DO NOTHING`, channelDetectionLeaseSetting); err != nil {
@@ -173,7 +173,7 @@ func (r *channelDetectionCoordinator) Release(ctx context.Context, groupID int64
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	lease, now, blocked, err := lockDetectionLease(ctx, tx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -238,7 +238,7 @@ func (r *channelDetectionCoordinator) SavePlan(ctx context.Context, expected ser
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// The first save may predate any worker. Create the released lease row so
 	// all writers can still serialize in lease → config → feature → snapshot order.
 	if _, err := tx.ExecContext(ctx, `
@@ -257,6 +257,9 @@ func (r *channelDetectionCoordinator) SavePlan(ctx context.Context, expected ser
 	if current != expected.Snapshot {
 		return false, nil
 	}
+	if err := reconcileDetectionPlan(ctx, tx, expected.Config, nextConfig); err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO settings (key,value,updated_at) VALUES ($1,$2,clock_timestamp()),($3,$4,clock_timestamp())
 		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
@@ -266,12 +269,85 @@ func (r *channelDetectionCoordinator) SavePlan(ctx context.Context, expected ser
 	return true, tx.Commit()
 }
 
+func reconcileDetectionPlan(ctx context.Context, tx sqlExecutor, previousRaw, nextRaw string) error {
+	var previous, next service.ChannelDetectionConfig
+	if previousRaw != "" {
+		if err := json.Unmarshal([]byte(previousRaw), &previous); err != nil {
+			return err
+		}
+	}
+	if err := json.Unmarshal([]byte(nextRaw), &next); err != nil {
+		return err
+	}
+	previousModels := make(map[int64]string, len(previous.Groups))
+	for _, selection := range previous.Groups {
+		previousModels[selection.GroupID] = selection.Model
+	}
+	nextModels := make(map[int64]string, len(next.Groups))
+	var added []int64
+	for _, selection := range next.Groups {
+		nextModels[selection.GroupID] = selection.Model
+		if _, existed := previousModels[selection.GroupID]; !existed {
+			added = append(added, selection.GroupID)
+		}
+	}
+	// A group deleted after service validation must not re-enter the plan.
+	if err := lockLiveGroups(ctx, tx, added); err != nil {
+		return err
+	}
+	var revoke []int64
+	for id, model := range previousModels {
+		nextModel, kept := nextModels[id]
+		if !kept {
+			if err := deleteDetectionGroupRPM(ctx, tx, id); err != nil {
+				return err
+			}
+		}
+		if !kept || nextModel != model {
+			revoke = append(revoke, id)
+		}
+	}
+	return revokeDetectionLeases(ctx, tx, revoke)
+}
+
+func revokeDetectionLeases(ctx context.Context, tx sqlExecutor, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	lease, now, blocked, err := lockDetectionLease(ctx, tx)
+	if err != nil || blocked {
+		// Legacy or unrecognized leases retain their original expiration semantics.
+		return err
+	}
+	changed := false
+	for _, id := range ids {
+		if _, exists := lease.Groups[id]; exists {
+			delete(lease.Groups, id)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	lease.prune(now)
+	return storeDetectionLease(ctx, tx, lease)
+}
+
+func deleteDetectionGroupRPM(ctx context.Context, tx sqlExecutor, id int64) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = $1`, detectionGroupRPMKey(id))
+	return err
+}
+
+func detectionGroupRPMKey(id int64) string {
+	return "channel_detection_group_rpm:" + strconv.FormatInt(id, 10)
+}
+
 func scanDetectionRow(ctx context.Context, exec sqlExecutor, query string, dest []any, args ...any) error {
 	rows, err := exec.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return err
@@ -331,7 +407,7 @@ func reserveChannelDetectionGroupRPM(ctx context.Context, tx *sql.Tx, groupID in
 	if groupID <= 0 || limit < 0 {
 		return false, nil
 	}
-	key := "channel_detection_group_rpm:" + strconv.FormatInt(groupID, 10)
+	key := detectionGroupRPMKey(groupID)
 	var now time.Time
 	var raw string
 	err := tx.QueryRowContext(ctx, `SELECT clock_timestamp(), COALESCE((SELECT value FROM settings WHERE key = $1), '[]')`, key).Scan(&now, &raw)

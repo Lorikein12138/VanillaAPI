@@ -84,7 +84,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	if err != nil {
 		return receipt, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	ctx = dbent.NewTxContext(ctx, tx)
 	client := tx.Client()
 	_, ok, err := lockChannelDetectionState(ctx, client, 0, "", input.Guard)
@@ -264,7 +264,7 @@ func lockDetectionMembershipGroups(ctx context.Context, client *dbent.Client, ac
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ids []int64
 	for rows.Next() {
 		var id int64
@@ -283,7 +283,7 @@ func lockDetectionMemberships(ctx context.Context, client *dbent.Client, account
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		// Drain the result so the database has acquired all row locks.
 	}

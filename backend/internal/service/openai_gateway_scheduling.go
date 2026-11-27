@@ -1001,7 +1001,7 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	if accountID <= 0 {
 		var err error
 		var state adaptiveBindingState
-		accountID, err, state = s.readStickySessionAccountID(ctx, groupID, sessionHash)
+		accountID, state, err = s.readStickySessionAccountID(ctx, groupID, sessionHash)
 		*binding = state
 		if err != nil || accountID <= 0 {
 			return nil
@@ -1203,7 +1203,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	preferLowUpstreamRate := useUpstreamTokenCost && s.isOpenAILowUpstreamRatePriorityEnabled(ctx)
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	var stickyAccountID int64
-	accountID, stickyErr, binding := s.readStickySessionAccountID(ctx, groupID, sessionHash)
+	accountID, binding, stickyErr := s.readStickySessionAccountID(ctx, groupID, sessionHash)
 	if stickyErr == nil {
 		stickyAccountID = accountID
 	}

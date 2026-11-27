@@ -433,7 +433,9 @@ func (r *channelRepository) GetGroupIDs(ctx context.Context, channelID int64) ([
 }
 
 func (r *channelRepository) SetGroupIDs(ctx context.Context, channelID int64, groupIDs []int64) error {
-	return setGroupIDsTx(ctx, r.db, channelID, groupIDs)
+	return r.runInTx(ctx, func(tx *sql.Tx) error {
+		return setGroupIDsTx(ctx, tx, channelID, groupIDs)
+	})
 }
 
 func (r *channelRepository) GetChannelIDByGroupID(ctx context.Context, groupID int64) (int64, error) {
