@@ -922,6 +922,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		retryStartedAt := time.Now()
 	wsRetryLoop:
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if !ChannelDetectionDispatchAllowed(ctx) {
+				return nil, context.Canceled
+			}
 			wsAttempts = attempt
 			wsResult, wsErr = s.forwardOpenAIWSV2(
 				ctx,

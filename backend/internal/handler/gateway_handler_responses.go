@@ -198,7 +198,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		UserAgent: c.GetHeader("User-Agent"),
 		APIKeyID:  apiKey.ID,
 	}
-	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
+	sessionHash := service.ChannelDetectionSessionID(requestCtx)
+	if sessionHash == "" {
+		sessionHash = h.gatewayService.GenerateSessionHash(parsedReq)
+	}
 
 	// 3. Account selection + failover loop
 	fs := NewFailoverState(h.maxAccountSwitches, false)
@@ -292,6 +295,12 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			}
 		}
 		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
+		if !service.ChannelDetectionDispatchAllowed(requestCtx) {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+			}
+			return
+		}
 
 		// 5. Forward request
 		writerSizeBeforeForward := c.Writer.Size()

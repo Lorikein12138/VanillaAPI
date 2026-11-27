@@ -127,7 +127,7 @@
       </template>
 
       <!-- Regular User View -->
-      <template v-else-if="!appStore.backendModeEnabled">
+      <template v-else-if="authStore.isAuthenticated && !appStore.backendModeEnabled">
         <div class="sidebar-section">
           <router-link
             v-for="item in userNavItems"
@@ -145,6 +145,18 @@
           </router-link>
         </div>
       </template>
+      <div v-if="detectionStore.publicEnabled" class="sidebar-section">
+        <router-link
+          to="/group-detection"
+          class="sidebar-link mb-1"
+          :class="{ 'sidebar-link-active': isActive('/group-detection'), 'sidebar-link-collapsed': sidebarCollapsed }"
+          :title="sidebarCollapsed ? t('channelDetection.publicTitle') : undefined"
+          @click="handleMenuItemClick('/group-detection')"
+        >
+          <SignalIcon class="h-5 w-5 flex-shrink-0" />
+          <span class="sidebar-label" :class="{ 'sidebar-label-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">{{ t('channelDetection.publicTitle') }}</span>
+        </router-link>
+      </div>
     </nav>
 
     <!-- Bottom Section -->
@@ -199,6 +211,7 @@ import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, makeSidebarFlag } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
+import { useChannelDetectionStore } from '@/stores/channelDetection'
 
 interface NavItem {
   path: string
@@ -273,7 +286,8 @@ const isAdmin = computed(() => authStore.isAdmin)
 const sidebarNavRef = ref<HTMLElement | null>(null)
 const isDark = ref(document.documentElement.classList.contains('dark'))
 
-const homePath = computed(() => (isAdmin.value ? '/admin/dashboard' : '/dashboard'))
+const detectionStore = useChannelDetectionStore()
+const homePath = computed(() => isAdmin.value ? '/admin/dashboard' : authStore.isAuthenticated ? '/dashboard' : '/home')
 
 // Per-group expand/collapse overrides. A group with no entry follows the
 // automatic behavior (expanded while the active route is one of its children);
@@ -814,11 +828,12 @@ const adminNavItems = computed((): NavItem[] => {
       weight: 90,
       label: t('nav.channelManagement'),
       icon: ChannelIcon,
-      hideInSimpleMode: true,
+      hideInSimpleMode: !adminSettingsStore.channelDetectionEnabled,
       expandOnly: true,
       children: [
-        { path: '/admin/channels/pricing', label: t('nav.channelPricing'), icon: PriceTagIcon, weight: 90 },
-        { path: '/admin/channels/monitor', label: t('nav.channelMonitor'), icon: SignalIcon, weight: 80, featureFlag: flagChannelMonitor },
+        { path: '/admin/channels/pricing', label: t('nav.channelPricing'), icon: PriceTagIcon, weight: 90, featureFlag: () => !authStore.isSimpleMode },
+        { path: '/admin/channels/monitor', label: t('nav.channelMonitor'), icon: SignalIcon, weight: 80, featureFlag: () => !authStore.isSimpleMode && flagChannelMonitor() },
+        { path: '/admin/channels/detection', label: t('channelDetection.adminTitle'), icon: SignalIcon, weight: 70, featureFlag: () => adminSettingsStore.channelDetectionEnabled },
       ],
     },
     // 「仅充值」站点连管理端的「订阅管理」入口也一并收起（路由本身不拦截）。
@@ -989,6 +1004,7 @@ watch(
 )
 
 onMounted(() => {
+  void detectionStore.refresh()
   void refreshBatchImageAccess()
   if (isAdmin.value) {
     adminSettingsStore.fetch()

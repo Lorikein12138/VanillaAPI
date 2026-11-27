@@ -19,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/google/uuid"
 )
 
 // UpdateSettingsRequest 更新设置请求
@@ -352,6 +353,7 @@ type UpdateSettingsRequest struct {
 
 	// Available Channels feature switch (user-facing)
 	AvailableChannelsEnabled *bool `json:"available_channels_enabled"`
+	ChannelDetectionEnabled  *bool `json:"channel_detection_enabled"`
 
 	// Subscription feature switch (user-facing subscription surface; see SettingKeySubscriptionEnabled)
 	SubscriptionEnabled *bool `json:"subscription_enabled"`
@@ -542,6 +544,14 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+	var channelDetectionFeatureUpdate *string
+	if req.ChannelDetectionEnabled != nil && *req.ChannelDetectionEnabled != (previousSettings.ChannelDetectionFeature != "") {
+		token := ""
+		if *req.ChannelDetectionEnabled {
+			token = uuid.NewString()
+		}
+		channelDetectionFeatureUpdate = &token
 	}
 
 	// 两个安全开关的请求字段为指针：省略字段=保持现值，避免旧客户端/脚本
@@ -2002,6 +2012,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.GrokDefaultBaseURLMode
 		}(),
+		ChannelDetectionFeatureUpdate: channelDetectionFeatureUpdate,
 		AvailableChannelsEnabled: func() bool {
 			if req.AvailableChannelsEnabled != nil {
 				return *req.AvailableChannelsEnabled
@@ -2481,6 +2492,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		GrokDefaultBaseURLMode:         updatedSettings.GrokDefaultBaseURLMode,
 
 		AvailableChannelsEnabled: updatedSettings.AvailableChannelsEnabled,
+		ChannelDetectionEnabled:  updatedSettings.ChannelDetectionFeature != "",
 		SubscriptionEnabled:      updatedSettings.SubscriptionEnabled,
 
 		ModelPlazaEnabled:             updatedSettings.ModelPlazaEnabled,

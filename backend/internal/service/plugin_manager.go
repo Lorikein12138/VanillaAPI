@@ -962,6 +962,9 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 		}
 		return nil, true, runtimeErr
 	}
+	if !ChannelDetectionDispatchAllowed(ctx) {
+		return nil, true, context.Canceled
+	}
 	if !route.runtime.beginRequest() {
 		return nil, true, errors.New("OpenAI OAuth 插件正在停止")
 	}

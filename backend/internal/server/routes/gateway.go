@@ -216,6 +216,7 @@ func RegisterGatewayRoutes(
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
+	gateway.Use(verifyChannelDetectionBinding)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(rejectConflictingFields)
 	gateway.Use(compositeTarget)

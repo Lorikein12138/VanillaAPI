@@ -128,6 +128,7 @@ func newMinimalCleanup(rdb *redis.Client, channelSvc *service.ChannelService, tl
 		channelSvc,
 		tlsSvc,
 		settingSvc,
+		nil, // channelDetection
 	)
 	return cleanupFixture{cleanup: cleanup, moderation: moderationSvc}
 }

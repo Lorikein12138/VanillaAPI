@@ -138,6 +138,7 @@ func provideCleanup(
 	channelService *service.ChannelService,
 	tlsFingerprintProfileService *service.TLSFingerprintProfileService,
 	settingService *service.SettingService,
+	channelDetection *service.ChannelDetection,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -151,6 +152,12 @@ func provideCleanup(
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		// 缓存订阅的 Stop 会等待 pubsub 关闭，因此 ChannelService 与 TLSFingerprintProfileService 必须在并行步骤中完成，之后才关闭 infraSteps 中的 Redis。
 		parallelSteps := []cleanupStep{
+			{"ChannelDetection", func() error {
+				if channelDetection == nil {
+					return nil
+				}
+				return channelDetection.Stop(ctx)
+			}},
 			{"DigestSessionStore", func() error {
 				if digestSessions != nil {
 					digestSessions.Close()
