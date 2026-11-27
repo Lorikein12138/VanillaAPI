@@ -50,10 +50,12 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const opsQueryModeDefault = ref(readCachedString('ops_query_mode_default_cached', 'auto'))
   const paymentEnabled = ref(readCachedBool('payment_enabled_cached', false))
   const gatewayAdaptiveSchedulingEnabled = ref<boolean | null>(null)
+  const channelDetectionEnabled = ref(false)
   const customMenuItems = ref<CustomMenuItem[]>([])
 
   let inFlight: Promise<void> | null = null
   let adaptiveRevision = 0
+  let channelDetectionRevision = 0
 
   function fetch(force = false): Promise<void> {
     if (inFlight) return inFlight
@@ -69,11 +71,15 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   }
 
   async function load(revision: number): Promise<void> {
+    const detectionRevision = channelDetectionRevision
     try {
       const [settingsResult, paymentResult] = await Promise.allSettled([
         adminAPI.settings.getSettings().then((settings) => {
           if (revision === adaptiveRevision) {
             gatewayAdaptiveSchedulingEnabled.value = settings.gateway_adaptive_scheduling_enabled === true
+          }
+          if (detectionRevision === channelDetectionRevision) {
+            channelDetectionEnabled.value = settings.channel_detection_enabled === true
           }
           return settings
         }),
@@ -107,6 +113,11 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   function setGatewayAdaptiveSchedulingEnabled(value: boolean) {
     adaptiveRevision++
     gatewayAdaptiveSchedulingEnabled.value = value
+  }
+
+  function setChannelDetectionEnabled(value: boolean) {
+    channelDetectionRevision++
+    channelDetectionEnabled.value = value
   }
 
   async function refreshGatewayAdaptiveScheduling(): Promise<void> {
@@ -177,6 +188,8 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
     opsQueryModeDefault,
     paymentEnabled,
     gatewayAdaptiveSchedulingEnabled,
+    channelDetectionEnabled,
+    setChannelDetectionEnabled,
     customMenuItems,
     fetch,
     setOpsMonitoringEnabledLocal,

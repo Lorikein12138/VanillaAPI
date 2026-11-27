@@ -305,6 +305,9 @@ func (s *httpUpstreamService) upstreamDrainTimeout() time.Duration {
 // doUpstreamRequest owns cancellation for one attempt, without cancelling the
 // caller's context (which may be detached for billing or reused for retries).
 func doUpstreamRequest(client *http.Client, req *http.Request, drainTimeouts ...time.Duration) (*http.Response, error) {
+	if !service.ChannelDetectionDispatchAllowed(req.Context()) {
+		return nil, context.Canceled
+	}
 	var drainTimeout time.Duration
 	if len(drainTimeouts) > 0 {
 		drainTimeout = drainTimeouts[0]

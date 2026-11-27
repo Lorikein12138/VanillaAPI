@@ -49,6 +49,15 @@
             <Icon name="grid" size="md" />
             <span class="hidden sm:inline">{{ t('nav.modelPlaza') }}</span>
           </router-link>
+          <router-link
+            v-if="detectionStore.publicEnabled"
+            to="/group-detection"
+            class="flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-sm font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-dark-400 dark:hover:bg-dark-800 dark:hover:text-white"
+            :title="t('channelDetection.publicTitle')"
+          >
+            <Icon name="chart" size="md" />
+            <span class="hidden sm:inline">{{ t('channelDetection.publicTitle') }}</span>
+          </router-link>
           <button
             class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 dark:text-dark-400 dark:hover:bg-dark-800"
             :title="isDark ? t('home.switchToLight') : t('home.switchToDark')"
@@ -132,6 +141,15 @@
           >
             <Icon name="grid" size="md" />
             <span class="hidden sm:inline">{{ t('nav.modelPlaza') }}</span>
+          </router-link>
+          <router-link
+            v-if="detectionStore.publicEnabled"
+            to="/group-detection"
+            class="inline-flex items-center gap-1.5 rounded-lg p-2 text-sm text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-dark-400 dark:hover:bg-dark-800 dark:hover:text-white"
+            :title="t('channelDetection.publicTitle')"
+          >
+            <Icon name="chart" size="md" />
+            <span class="hidden sm:inline">{{ t('channelDetection.publicTitle') }}</span>
           </router-link>
 
           <!-- Theme Toggle -->
@@ -477,6 +495,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { useChannelDetectionStore } from '@/stores/channelDetection'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore, useAppStore } from '@/stores'
 import LocaleSwitcher from '@/components/common/LocaleSwitcher.vue'
@@ -500,6 +519,7 @@ const homeContent = computed(() => appStore.cachedPublicSettings?.home_content |
 const hasHomeContent = computed(() => homeContent.value.trim().length > 0)
 const compactHomeEnabled = computed(() => appStore.cachedPublicSettings?.compact_home_enabled === true)
 const modelPlazaEnabled = computed(() => isFeatureFlagEnabled(FeatureFlags.modelPlaza))
+const detectionStore = useChannelDetectionStore()
 
 // Check if homeContent is a URL (for iframe display)
 const isHomeContentUrl = computed(() => {
@@ -575,6 +595,7 @@ function initTheme() {
 }
 
 onMounted(() => {
+  void detectionStore.refresh()
   initTheme()
   window.addEventListener('message', handleHomeThemeMessage)
 

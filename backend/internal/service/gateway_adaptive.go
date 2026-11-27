@@ -67,7 +67,7 @@ type adaptiveIngress struct {
 
 // WithGatewayAdaptiveIngress snapshots the cached setting for the request.
 func WithGatewayAdaptiveIngress(ctx context.Context, settings *SettingService, operation, transport string) context.Context {
-	if settings == nil || !settings.IsGatewayAdaptiveSchedulingEnabled(ctx) || operation == "" {
+	if isChannelDetectionProbe(ctx) || settings == nil || !settings.IsGatewayAdaptiveSchedulingEnabled(ctx) || operation == "" {
 		return ctx
 	}
 	ingress := &adaptiveIngress{operation: operation, transport: transport, settings: settings, telemetry: settings.adaptiveTelemetry}

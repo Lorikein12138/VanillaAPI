@@ -18,6 +18,15 @@ import { resolveRouteDocumentTitle } from './title'
  * Route definitions with lazy loading
  */
 const routes: RouteRecordRaw[] = [
+  {
+    path: '/group-detection',
+    name: 'GroupDetection',
+    component: () => import('@/views/public/GroupDetectionView.vue'),
+    meta: {
+      requiresAuth: false,
+      titleKey: 'channelDetection.publicTitle'
+    }
+  },
   // ==================== Setup Routes ====================
   {
     path: '/setup',
@@ -500,6 +509,16 @@ const routes: RouteRecordRaw[] = [
     redirect: '/admin/channels/pricing'
   },
   {
+    path: '/admin/channels/detection',
+    name: 'AdminChannelDetection',
+    component: () => import('@/views/admin/ChannelDetectionView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      titleKey: 'channelDetection.adminTitle'
+    }
+  },
+  {
     path: '/admin/channels/pricing',
     name: 'AdminChannels',
     component: () => import('@/views/admin/ChannelsView.vue'),
@@ -809,6 +828,7 @@ const BACKEND_MODE_CALLBACK_PATHS = [
 const BACKEND_MODE_PENDING_AUTH_PATHS = ['/register', '/email-verify']
 
 function isBackendModePublicRouteAllowed(path: string, hasPendingAuthSession: boolean): boolean {
+  if (path === '/group-detection') return true
   if (BACKEND_MODE_ALLOWED_PATHS.some((allowedPath) => path === allowedPath || path.startsWith(allowedPath))) {
     return true
   }

@@ -844,7 +844,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if slotResult != openAISlotAcquireOK {
 			return
 		}
-		if !openAIRequestAllowsFailoverReplay(c) {
+		if !openAIRequestAllowsFailoverReplay(c) || !service.ChannelDetectionDispatchAllowed(c.Request.Context()) {
 			if accountReleaseFunc != nil {
 				accountReleaseFunc()
 			}

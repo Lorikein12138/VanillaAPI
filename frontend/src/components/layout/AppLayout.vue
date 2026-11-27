@@ -36,13 +36,13 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 
 const { replayTour } = useOnboardingTour({
   storageKey: isAdmin.value ? 'admin_guide' : 'user_guide',
-  autoStart: true
+  autoStart: authStore.isAuthenticated
 })
 
 const onboardingStore = useOnboardingStore()
 
 onMounted(() => {
-  onboardingStore.setReplayCallback(replayTour)
+  if (authStore.isAuthenticated) onboardingStore.setReplayCallback(replayTour)
 })
 
 defineExpose({ replayTour })

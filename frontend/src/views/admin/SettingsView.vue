@@ -7144,6 +7144,23 @@
 
 	        <!-- Tab: Features (功能开关) -->
 	        <div v-show="activeTab === 'features'" class="space-y-6">
+          <div class="card">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+              <h2 class="font-semibold text-gray-900 dark:text-white">{{ t('channelDetection.adminTitle') }}</h2>
+              <router-link v-if="adminSettingsStore.channelDetectionEnabled" to="/admin/channels/detection" class="btn btn-secondary">
+                {{ t('channelDetection.configure') }}
+              </router-link>
+            </div>
+            <div class="flex items-center justify-between gap-4 p-6">
+              <p id="channel-detection-feature-description" class="text-sm text-gray-500 dark:text-dark-400">{{ t('channelDetection.featureHint') }}</p>
+              <Toggle
+                :model-value="form.channel_detection_enabled === true"
+                :aria-label="t('channelDetection.adminTitle')"
+                aria-describedby="channel-detection-feature-description"
+                @update:model-value="form.channel_detection_enabled = $event"
+              />
+            </div>
+          </div>
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 class="text-lg font-serif font-normal text-gray-950 dark:text-white">
@@ -9054,6 +9071,7 @@ import PaymentProviderDialog from "@/components/payment/PaymentProviderDialog.vu
 import GroupBadge from "@/components/common/GroupBadge.vue";
 import GroupOptionItem from "@/components/common/GroupOptionItem.vue";
 import Toggle from "@/components/common/Toggle.vue";
+import { useChannelDetectionStore } from "@/stores/channelDetection";
 import ProxySelector from "@/components/common/ProxySelector.vue";
 import ImageUpload from "@/components/common/ImageUpload.vue";
 import BackupSettings from "@/views/admin/BackupView.vue";
@@ -9107,6 +9125,7 @@ const appStore = useAppStore();
 // 关闭 step-up 开关是敏感操作：后端返回 STEP_UP_REQUIRED 时弹 TOTP 码重试
 const settingsStepUp = useStepUp();
 const adminSettingsStore = useAdminSettingsStore();
+const channelDetectionStore = useChannelDetectionStore();
 const isZhLocale = computed(() => locale.value.startsWith("zh"));
 
 function localText(zh: string, en: string): string {
@@ -10095,6 +10114,7 @@ const form = reactive<SettingsForm>({
   channel_monitor_hide_user_ranking: false,
   // Available Channels feature switch
   available_channels_enabled: false,
+  channel_detection_enabled: false,
   // Subscription feature switch (user sidebar "My Subscriptions" entry)
   subscription_enabled: true,
   // Model Plaza feature switches + description
@@ -11863,6 +11883,7 @@ async function saveSettings() {
       channel_monitor_hide_user_ranking: Boolean(form.channel_monitor_hide_user_ranking),
       // Available Channels feature switch
       available_channels_enabled: form.available_channels_enabled,
+      channel_detection_enabled: form.channel_detection_enabled,
       // Subscription feature switch
       subscription_enabled: form.subscription_enabled,
       // Model Plaza feature switches + description
@@ -12001,6 +12022,11 @@ async function saveSettings() {
     // Save web search emulation config separately (errors handled internally)
     const wsOk = await saveWebSearchConfig();
     // Refresh cached settings so sidebar/header update immediately
+    if (typeof updated.channel_detection_enabled === "boolean") {
+      adminSettingsStore.setChannelDetectionEnabled(updated.channel_detection_enabled);
+      if (!updated.channel_detection_enabled) channelDetectionStore.setPublicEnabled(false);
+      void channelDetectionStore.refresh(true);
+    }
     await appStore.fetchPublicSettings(true);
     await adminSettingsStore.fetch(true);
     if (wsOk) {

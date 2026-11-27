@@ -212,6 +212,9 @@ type SystemSettings struct {
 
 	// Available Channels feature (user-facing aggregate view)
 	AvailableChannelsEnabled bool `json:"available_channels_enabled"`
+	// Empty means disabled. A new token invalidates samples from an earlier enable cycle.
+	ChannelDetectionFeature       string  `json:"-"`
+	ChannelDetectionFeatureUpdate *string `json:"-"`
 
 	// Subscription feature switch: gates the whole user-facing subscription surface
 	// (sidebar entries, purchase-page subscription tab, header progress badge,
