@@ -33,9 +33,14 @@ const detectionSVGNumber = `[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)
 // sanitizeDetectionSVG rebuilds a small drawing vocabulary. The result is
 // transported as data and rendered only through an img element.
 func sanitizeDetectionSVG(input string) string {
+	svg, _ := parseDetectionSVG(input)
+	return svg
+}
+
+func parseDetectionSVG(input string) (string, string) {
 	input = strings.TrimSpace(input)
 	if len(input) > detectionSVGMaxBytes {
-		return ""
+		return "", "svg_policy"
 	}
 	for _, fence := range []string{"```svg\n", "```xml\n", "```\n", "```svg\r\n", "```xml\r\n", "```\r\n"} {
 		if strings.HasPrefix(input, fence) && strings.HasSuffix(input, "```") {
@@ -53,7 +58,7 @@ func sanitizeDetectionSVG(input string) string {
 			break
 		}
 		if err != nil {
-			return ""
+			return "", "svg_xml"
 		}
 		switch elem := token.(type) {
 		case xml.StartElement:
@@ -61,36 +66,36 @@ func sanitizeDetectionSVG(input string) string {
 			if depth >= 16 || nodes > 500 || (depth == 0 && (nodes != 1 || elem.Name.Local != "svg")) ||
 				(depth != 0 && elem.Name.Local == "svg") || !detectionSVGTags[elem.Name.Local] ||
 				(elem.Name.Space != "" && elem.Name.Space != detectionSVGNamespace) {
-				return ""
+				return "", "svg_policy"
 			}
 			depth++
 			attributes, ok := detectionSVGAttributes(elem.Attr, depth == 1)
 			if !ok || out.EncodeToken(xml.StartElement{Name: xml.Name{Local: elem.Name.Local}, Attr: attributes}) != nil {
-				return ""
+				return "", "svg_policy"
 			}
 		case xml.EndElement:
 			depth--
 			if out.EncodeToken(xml.EndElement{Name: xml.Name{Local: elem.Name.Local}}) != nil {
-				return ""
+				return "", "svg_policy"
 			}
 		case xml.CharData:
 			if strings.TrimSpace(string(elem)) != "" {
-				return ""
+				return "", "svg_policy"
 			}
 		case xml.Comment:
 			// Comments carry no drawing data.
 		case xml.ProcInst:
 			if nodes != 0 || elem.Target != "xml" {
-				return ""
+				return "", "svg_policy"
 			}
 		default:
-			return ""
+			return "", "svg_policy"
 		}
 	}
 	if nodes < 2 || depth != 0 || out.Flush() != nil || output.Len() > detectionSVGMaxBytes {
-		return ""
+		return "", "svg_policy"
 	}
-	return output.String()
+	return output.String(), ""
 }
 
 func detectionSVGAttributes(input []xml.Attr, root bool) ([]xml.Attr, bool) {

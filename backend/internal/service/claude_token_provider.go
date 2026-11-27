@@ -80,6 +80,9 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	// 2) Refresh if needed (pre-expiry skew).
 	expiresAt := account.GetCredentialAsTime("expires_at")
 	needsRefresh := expiresAt == nil || time.Until(*expiresAt) <= claudeTokenRefreshSkew
+	if needsRefresh && IsChannelDetectionProbe(ctx) {
+		return "", rejectChannelDetectionEgress(ctx)
+	}
 	refreshFailed := false
 
 	if needsRefresh && p.refreshAPI != nil && p.executor != nil {

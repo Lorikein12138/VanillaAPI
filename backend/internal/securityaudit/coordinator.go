@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 type LegacyEngine interface {
@@ -40,7 +42,9 @@ func (c *Coordinator) Check(ctx context.Context, req Request) Decision {
 	case ModeAsync:
 		// Enqueue is deliberately best-effort. The implementation owns a bounded
 		// context and copies request memory before it can outlive the Handler.
-		_ = c.prompt.Enqueue(ctx, req)
+		if !service.IsChannelDetectionProbe(ctx) {
+			_ = c.prompt.Enqueue(ctx, req)
+		}
 		legacy, _ := c.checkLegacy(ctx, req)
 		return prioritize(legacy, nil)
 	case ModeBlocking:

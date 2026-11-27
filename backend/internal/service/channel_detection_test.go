@@ -12,16 +12,25 @@ import (
 	"testing"
 	"time"
 
+	"bytes"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/modeltrace/trace"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/requestmodel"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
+	"io"
+	"net/http/httptest"
 )
 
 type detectionMemorySettings struct {
 	mu     sync.Mutex
 	values map[string]string
 	owner  string
+	sends  int
 }
 
 func (m *detectionMemorySettings) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
@@ -66,6 +75,17 @@ func (m *detectionMemorySettings) Release(_ context.Context, owner string) error
 	return nil
 }
 
+func (m *detectionMemorySettings) ReserveSend(_ context.Context, owner string, expected ChannelDetectionSnapshotGuard, _ int64, _, limit int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.owner != owner || m.values[SettingKeyChannelDetectionFeature] != expected.Feature ||
+		m.values[SettingKeyChannelDetectionConfig] != expected.Config || m.sends >= limit {
+		return false, nil
+	}
+	m.sends++
+	return true, nil
+}
+
 func (m *detectionMemorySettings) CompareAndSetSnapshot(_ context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -86,30 +106,22 @@ func (g detectionTestGroups) GetGroup(_ context.Context, id int64) (*Group, erro
 	return nil, ErrGroupNotFound
 }
 
-type detectionTestKeys struct {
-	rows        map[int64]*APIKey
-	secretReads int
+func (g detectionTestGroups) List(_ context.Context, _ pagination.PaginationParams) ([]Group, *pagination.PaginationResult, error) {
+	groups := make([]Group, 0, len(g))
+	for _, group := range g {
+		groups = append(groups, *group)
+	}
+	return groups, &pagination.PaginationResult{Total: int64(len(groups))}, nil
 }
 
-func (k *detectionTestKeys) GetChannelDetectionKey(_ context.Context, id int64, includeSecret bool) (*APIKey, error) {
-	if key := k.rows[id]; key != nil {
-		copy := *key
-		if includeSecret {
-			k.secretReads++
-		} else {
-			copy.Key = ""
-		}
-		return &copy, nil
-	}
-	return nil, ErrAPIKeyNotFound
-}
+func (detectionTestGroups) resolveAdminGroupModelAllowlist(context.Context, *Group) error { return nil }
+func (detectionTestGroups) validateSimpleModeGroupAccess(*Group) error                    { return nil }
 
 type detectionFixture struct {
 	*ChannelDetection
 	cfg       ChannelDetectionConfig
 	storage   *detectionMemorySettings
 	groupRows detectionTestGroups
-	keyRepo   *detectionTestKeys
 }
 
 func newDetectionFixture(t *testing.T) *detectionFixture {
@@ -119,19 +131,14 @@ func newDetectionFixture(t *testing.T) *detectionFixture {
 		1: {ID: 1, Name: "First", Status: StatusActive, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6.2-sol"}}},
 		2: {ID: 2, Name: "Second", Status: StatusActive, ModelAllowlist: GroupModelAllowlist{Models: []string{"claude-sonnet-5", "*"}}},
 	}
-	group1, group2 := int64(1), int64(2)
-	keys := &detectionTestKeys{rows: map[int64]*APIKey{
-		11: {ID: 11, Key: "test-only-first", Status: StatusActive, GroupID: &group1, Group: groups[1], Quota: 1, User: &User{Status: StatusActive}},
-		22: {ID: 22, Key: "test-only-second", Status: StatusActive, GroupID: &group2, Group: groups[2], RateLimit1d: 1, User: &User{Status: StatusActive}},
-	}}
 	cfg := ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, Groups: []ChannelDetectionSelection{
-		{GroupID: group1, Model: "gpt-6.2-sol", APIKeyID: 11},
-		{GroupID: group2, Model: "claude-sonnet-5", APIKeyID: 22},
+		{GroupID: 1, Model: "gpt-6.2-sol"},
+		{GroupID: 2, Model: "claude-sonnet-5"},
 	}}
 	svc := &ChannelDetection{
-		settings: settings, groups: groups, keys: keys, coordinator: settings, runtime: &config.Config{RunMode: config.RunModeStandard},
+		settings: settings, groups: groups, directory: groups, coordinator: settings,
 	}
-	return &detectionFixture{ChannelDetection: svc, cfg: cfg, storage: settings, groupRows: groups, keyRepo: keys}
+	return &detectionFixture{ChannelDetection: svc, cfg: cfg, storage: settings, groupRows: groups}
 }
 
 func TestChannelDetectionValidationAndPause(t *testing.T) {
@@ -148,26 +155,24 @@ func TestChannelDetectionValidationAndPause(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"claude-sonnet-5"}, models)
 	for _, invalid := range []ChannelDetectionSelection{
-		{GroupID: 2, Model: "*", APIKeyID: 22},
-		{GroupID: 1, Model: "claude-sonnet-5", APIKeyID: 11},
+		{GroupID: 2, Model: "*"},
+		{GroupID: 1, Model: "claude-sonnet-5"},
 	} {
 		require.ErrorIs(t, s.Save(ctx, ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, Groups: []ChannelDetectionSelection{invalid}}), errDetectionModel)
 	}
-	wrongBinding := ChannelDetectionSelection{GroupID: 1, Model: "gpt-6.2-sol", APIKeyID: 22}
-	require.ErrorIs(t, s.Save(ctx, ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, Groups: []ChannelDetectionSelection{wrongBinding}}), errDetectionKey)
 	require.NoError(t, s.Save(ctx, config))
 
 	s.groupRows[1].ModelAllowlist.Models = nil
-	delete(s.keyRepo.rows, 22)
 	config.Enabled = false
 	require.NoError(t, s.Save(ctx, config))
 	saved, err := s.Config(ctx)
 	require.NoError(t, err)
 	require.Equal(t, config, saved)
 	config.Enabled = true
-	require.ErrorIs(t, s.Save(ctx, config), errDetectionModel)
-	s.groupRows[1].ModelAllowlist.Models = []string{"gpt-6.2-sol"}
-	require.ErrorIs(t, s.Save(ctx, config), errDetectionKey)
+	require.NoError(t, s.Save(ctx, config))
+	config.Groups = nil
+	config.Enabled = false
+	require.NoError(t, s.Save(ctx, config))
 }
 
 func detectionGoldenReply(t *testing.T) trace.Reply {
@@ -196,8 +201,12 @@ func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	sessions := make(map[string]bool)
 	r := gin.New()
 	r.POST("/v1/responses", func(c *gin.Context) {
-		require.Equal(t, "Bearer test-only-first", c.GetHeader("Authorization"))
-		require.True(t, ChannelDetectionBindingMatches(c.Request.Context(), s.keyRepo.rows[11]))
+		require.Empty(t, c.GetHeader("Authorization"))
+		routing, ok := ChannelDetectionIngress(c.Request)
+		require.True(t, ok)
+		require.Zero(t, routing.ID)
+		require.Zero(t, routing.UserID)
+		require.Equal(t, int64(1), *routing.GroupID)
 		session := c.GetHeader("Session_Id")
 		require.NotEmpty(t, session)
 		require.Equal(t, session, ChannelDetectionSessionID(c.Request.Context()))
@@ -240,7 +249,6 @@ func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	s.tick(ctx, r)
 	require.Len(t, sessions, 7)
 	require.Empty(t, s.storage.owner)
-	secretReads := s.keyRepo.secretReads
 	groups, err := s.PublicGroups(ctx)
 	require.NoError(t, err)
 	require.Len(t, groups, 2)
@@ -250,7 +258,6 @@ func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	require.Equal(t, "generated", groups[0].Sample.Pelican)
 	require.Contains(t, groups[0].Sample.SVG, "<circle")
 	require.Nil(t, groups[1].Sample)
-	require.Equal(t, secretReads, s.keyRepo.secretReads)
 	public, err := json.Marshal(groups)
 	require.NoError(t, err)
 	for _, hidden := range []string{"api_key", "test-only", "raw-internal-error", "claimed-name", "attempted_at", "enable-one"} {
@@ -263,21 +270,6 @@ func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, groups)
 	s.groupRows[1].ModelAllowlist.Models = []string{"gpt-6.2-sol"}
-	key := s.keyRepo.rows[11]
-	originalBinding := key.GroupID
-	for _, binding := range []*int64{nil, &s.groupRows[2].ID} {
-		key.GroupID = binding
-		groups, err = s.PublicGroups(ctx)
-		require.NoError(t, err)
-		require.Equal(t, []ChannelDetectionPublicGroup{{Name: "First", Model: "gpt-6.2-sol"}}, groups)
-	}
-	key.GroupID = originalBinding
-	expiredAt := time.Now().Add(-time.Hour)
-	key.ExpiresAt = &expiredAt
-	groups, err = s.PublicGroups(ctx)
-	require.NoError(t, err)
-	require.Equal(t, []ChannelDetectionPublicGroup{{Name: "First", Model: "gpt-6.2-sol"}}, groups)
-	key.ExpiresAt = nil
 	require.NoError(t, s.settings.Set(ctx, SettingKeyChannelDetectionFeature, ""))
 	_, err = s.PublicGroups(ctx)
 	require.ErrorIs(t, err, errDetectionDisabled)
@@ -287,35 +279,80 @@ func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	require.Equal(t, []ChannelDetectionPublicGroup{{Name: "First", Model: "gpt-6.2-sol"}}, groups)
 }
 
-func TestChannelDetectionBindingRechecksDatabaseAfterAuth(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		change func(*APIKey, *APIKey)
-	}{
-		{"auth binding changed", func(auth, _ *APIKey) { id := int64(2); auth.GroupID = &id }},
-		{"cached auth and database binding changed", func(_, stored *APIKey) { id := int64(2); stored.GroupID = &id }},
-		{"cached auth and database key rotated", func(_, stored *APIKey) { stored.Key = "rotated" }},
-		{"cached auth uses unlimited metadata", func(auth, _ *APIKey) { auth.Quota = 0 }},
-		{"limit changed while authenticating", func(_, stored *APIKey) { stored.Quota = 2 }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := newDetectionFixture(t)
-			keys := s.keyRepo.rows
-			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				auth := *keys[11]
-				stored := *keys[11]
-				tc.change(&auth, &stored)
-				keys[11] = &stored
-				require.False(t, ChannelDetectionBindingMatches(r.Context(), &auth))
-				// A public caller's headers never create an internal marker.
-				r.Header.Set("X-Expected-Group-ID", "1")
-				require.True(t, ChannelDetectionBindingMatches(context.Background(), &auth))
-				w.WriteHeader(http.StatusForbidden)
-			})
-			_, err := s.probe(context.Background(), h, s.cfg.Groups[0], "test", 128, detectionTestCurrent)
-			require.ErrorIs(t, err, errDetectionResponse)
-		})
+func TestChannelDetectionPrivateScopeAndWireBudget(t *testing.T) {
+	s := newDetectionFixture(t)
+	ctx := context.Background()
+	budget := &detectionRoundBudget{reserve: func(context.Context, *Group) (bool, error) { return true, nil }}
+	forged := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6.2-sol"}`))
+	forged.Header.Set("Authorization", "Bearer forged")
+	forged.Header.Set("X-Expected-Group-ID", "1")
+	_, ok := ChannelDetectionIngress(forged)
+	require.False(t, ok)
+
+	current := true
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		invalid := r.Clone(r.Context())
+		invalid.URL.RawQuery = "internal=1"
+		_, ok := ChannelDetectionIngress(invalid)
+		require.False(t, ok)
+		routing, ok := ChannelDetectionIngress(r)
+		require.True(t, ok)
+		require.Empty(t, routing.Key)
+		_, ok = ChannelDetectionIngress(r)
+		require.False(t, ok)
+
+		account := detectionTestAccount(PlatformAnthropic)
+		ctx := withDetectionAccountScope(r.Context(), &detectionAccountRepo{fresh: account}, account)
+		out := func(path, body string) *http.Request {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://test.invalid"+path, bytes.NewBufferString(body))
+			require.NoError(t, err)
+			return req
+		}
+		require.ErrorIs(t, ReserveChannelDetectionSend(out("/v1/responses", `{ "input": "no cap" }`), account.ID), errDetectionOutputLimit)
+		require.ErrorIs(t, ReserveChannelDetectionSend(out("/v1/messages", `{ "max_tokens":129 }`), account.ID), errDetectionOutputLimit)
+		require.Zero(t, budget.sends)
+		require.NoError(t, ReserveChannelDetectionSend(out("/v1/messages", `{ "max_tokens":128 }`), account.ID))
+		require.NoError(t, ReserveChannelDetectionSend(out("/v1/responses", `{ "max_output_tokens":128, "store":false }`), account.ID))
+		require.ErrorIs(t, ReserveChannelDetectionSend(out("/v1/responses", `{ "max_output_tokens":128 }`), account.ID), errDetectionBudget)
+		require.Equal(t, 2, budget.sends)
+		current = false
+		require.False(t, ChannelDetectionDispatchAllowed(r.Context()))
+		require.ErrorIs(t, ReserveChannelDetectionSend(out("/v1/responses", `{ "max_output_tokens":128 }`), account.ID), errDetectionDispatch)
+		w.WriteHeader(http.StatusForbidden)
+	})
+	_, err := s.probe(ctx, handler, s.cfg.Groups[0], "scope test", 128, func(context.Context) bool { return current }, budget)
+	require.ErrorIs(t, err, errDetectionDispatch)
+	require.True(t, ChannelDetectionDispatchAllowed(ctx))
+}
+
+func TestChannelDetectionReadsLegacyConfigurationWithoutPublishingLegacySample(t *testing.T) {
+	ctx := context.Background()
+	s := newDetectionFixture(t)
+	const oldConfig = `{"enabled":true,"interval_minutes":60,"revision":"legacy","groups":[{"group_id":1,"model":"gpt-6.2-sol","api_key_id":999}]}`
+	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionConfig, oldConfig))
+	legacy := channelDetectionSnapshot{
+		Feature: "enable-one", Revision: "legacy",
+		Samples:     map[int64]*ChannelDetectionSample{1: {Pelican: "generated", SVG: testDetectionSVG}},
+		AttemptedAt: map[int64]time.Time{1: time.Now().UTC()},
 	}
+	raw, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(raw)))
+
+	_, config, snapshot, err := s.state(ctx, true)
+	require.NoError(t, err)
+	require.Equal(t, oldConfig, config.stored)
+	require.Contains(t, snapshot.AttemptedAt, int64(1))
+	require.Equal(t, s.cfg.Groups[:1], config.Groups)
+	public, err := s.PublicGroups(ctx)
+	require.NoError(t, err)
+	require.Len(t, public, 1)
+	require.Nil(t, public[0].Sample)
+
+	input := config.ChannelDetectionConfig
+	input.IntervalMinutes++
+	require.NoError(t, s.Save(ctx, input))
+	require.NotContains(t, s.storage.values[SettingKeyChannelDetectionConfig], "api_key_id")
 }
 
 func TestChannelDetectionLeaseAndConfigurationChange(t *testing.T) {
@@ -369,7 +406,7 @@ func TestChannelDetectionCaptureAndSVG(t *testing.T) {
 		require.ErrorIs(t, err, errDetectionResponse)
 		require.ErrorIs(t, r.Context().Err(), context.Canceled)
 	})
-	_, err := s.probe(context.Background(), h, s.cfg.Groups[0], "capture test", 128, detectionTestCurrent)
+	_, err := s.probe(context.Background(), h, s.cfg.Groups[0], "capture test", 128, detectionTestCurrent, &detectionRoundBudget{})
 	require.ErrorIs(t, err, errDetectionResponse)
 	require.Contains(t, sanitizeDetectionSVG("```svg\n"+testDetectionSVG+"\n```"), "<circle")
 	require.Contains(t, sanitizeDetectionSVG(`<svg><circle cx="25%" cy="7e1" r=".5"/><polyline points="0,0 10,10 0,20"/></svg>`), "<polyline")
@@ -396,54 +433,8 @@ func TestChannelDetectionCaptureAndSVG(t *testing.T) {
 
 func detectionTestCurrent(context.Context) bool { return true }
 
-func TestChannelDetectionUsesOnlyLimitsBilledInCurrentMode(t *testing.T) {
-	for _, tc := range []struct {
-		name, mode     string
-		windowsEnabled bool
-		windows        bool
-		quota          float64
-		quotaUsed      float64
-		windowUsed     float64
-		want           bool
-	}{
-		{name: "simple total quota only", mode: config.RunModeSimple, windowsEnabled: true, quota: 1},
-		{name: "simple monetary windows disabled", mode: config.RunModeSimple, windows: true, quota: 1},
-		{name: "simple billed window", mode: config.RunModeSimple, windowsEnabled: true, windows: true, want: true},
-		{name: "simple window ignores lifetime quota", mode: config.RunModeSimple, windowsEnabled: true, windows: true, quota: 1, quotaUsed: 1, want: true},
-		{name: "simple window reached", mode: config.RunModeSimple, windowsEnabled: true, windows: true, windowUsed: 1},
-		{name: "standard only quota", mode: config.RunModeStandard, quota: 1, want: true},
-		{name: "standard only window", mode: config.RunModeStandard, windows: true, want: true},
-		{name: "standard quota exhausted", mode: config.RunModeStandard, windows: true, quota: 1, quotaUsed: 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			s := newDetectionFixture(t)
-			s.runtime = &config.Config{RunMode: tc.mode, SimpleModeKeyRateLimitEnabled: tc.windowsEnabled}
-			key := s.keyRepo.rows[11]
-			key.Quota, key.QuotaUsed = tc.quota, tc.quotaUsed
-			if tc.windows {
-				now := time.Now()
-				key.RateLimit5h, key.Usage5h, key.Window5hStart = 1, tc.windowUsed, &now
-			}
-			s.cfg.Groups = s.cfg.Groups[:1]
-			err := s.Save(ctx, s.cfg)
-			if tc.want {
-				require.NoError(t, err)
-			} else {
-				require.ErrorIs(t, err, errDetectionKey)
-			}
-			_, err = s.probeKey(ctx, s.cfg.Groups[0], true)
-			if tc.want {
-				require.NoError(t, err)
-			} else {
-				require.ErrorIs(t, err, errDetectionKey)
-			}
-		})
-	}
-}
-
 func TestChannelDetectionRevalidatesBeforeEveryDispatch(t *testing.T) {
-	for _, kind := range []string{"manual allowlist", "automatic allowlist", "key", "lease"} {
+	for _, kind := range []string{"manual allowlist", "automatic allowlist", "disabled group", "lease"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := context.Background()
 			s := newDetectionFixture(t)
@@ -453,13 +444,12 @@ func TestChannelDetectionRevalidatesBeforeEveryDispatch(t *testing.T) {
 			gateway := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				attempts++
 				require.Equal(t, 1, attempts, "a second billable dispatch was made")
-				require.True(t, ChannelDetectionBindingMatches(r.Context(), s.keyRepo.rows[11]))
 				w.WriteHeader(http.StatusBadGateway)
 				switch kind {
 				case "manual allowlist", "automatic allowlist":
 					s.groupRows[1].ModelAllowlist.Models = nil
-				case "key":
-					s.keyRepo.rows[11].GroupID = nil
+				case "disabled group":
+					s.groupRows[1].Status = StatusDisabled
 				case "lease":
 					s.storage.mu.Lock()
 					s.storage.owner = "successor"
@@ -470,13 +460,8 @@ func TestChannelDetectionRevalidatesBeforeEveryDispatch(t *testing.T) {
 			require.Equal(t, 1, attempts)
 			_, _, latest, err := s.state(ctx, true)
 			require.NoError(t, err)
-			if kind == "lease" {
-				require.Empty(t, latest.Samples)
-				require.Contains(t, latest.AttemptedAt, int64(1))
-				return
-			}
-			require.NotNil(t, latest.Samples[1])
-			require.Equal(t, ChannelDetectionCounts{Errors: 1, Untested: 2}, latest.Samples[1].Reasoning)
+			require.Empty(t, latest.Samples)
+			require.Contains(t, latest.AttemptedAt, int64(1))
 		})
 	}
 }
@@ -487,13 +472,134 @@ func TestChannelDetectionRevalidatesAfterGatewayAuth(t *testing.T) {
 	require.NoError(t, s.Save(ctx, s.cfg))
 	s.groupRows[1].ModelAllowlist.Enabled = false
 	gateway := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.True(t, ChannelDetectionBindingMatches(r.Context(), s.keyRepo.rows[11]))
 		s.groupRows[1].ModelAllowlist.Models = nil
 		require.False(t, ChannelDetectionDispatchAllowed(r.Context()))
 		require.ErrorIs(t, r.Context().Err(), context.Canceled)
 		w.WriteHeader(http.StatusForbidden)
 	})
-	_, err := s.probe(ctx, gateway, s.cfg.Groups[0], "queued", 128, detectionTestCurrent)
-	require.ErrorIs(t, err, errDetectionResponse)
+	_, err := s.probe(ctx, gateway, s.cfg.Groups[0], "queued", 128, func(ctx context.Context) bool {
+		_, err := s.probeGroup(ctx, s.cfg.Groups[0])
+		return err == nil
+	}, &detectionRoundBudget{})
+	require.ErrorIs(t, err, errDetectionDispatch)
 	require.True(t, ChannelDetectionDispatchAllowed(ctx), "ordinary requests have no internal marker")
+}
+
+// detectionLoopbackUpstream runs the real request builder and converter, and
+// verifies the wire cap at the same interface used by the production transport.
+type detectionLoopbackUpstream struct {
+	client *http.Client
+	url    string
+}
+
+func (u *detectionLoopbackUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	if err := ReserveChannelDetectionSend(req, accountID); err != nil {
+		return nil, err
+	}
+	req = req.Clone(req.Context())
+	parsed, err := http.NewRequest(req.Method, u.url+req.URL.Path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.URL = parsed.URL
+	return u.client.Do(req)
+}
+
+func (u *detectionLoopbackUpstream) DoWithTLS(req *http.Request, proxy string, id int64, concurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxy, id, concurrency)
+}
+
+func TestChannelDetectionOpenAIAndAnthropicWireForwarding(t *testing.T) {
+	for _, platform := range []string{PlatformOpenAI, PlatformAnthropic, PlatformGemini} {
+		t.Run(platform, func(t *testing.T) {
+			s := newDetectionFixture(t)
+			group := s.groupRows[1]
+			group.Platform = platform
+			model := s.cfg.Groups[0].Model
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if got := gjson.GetBytes(body, "model").String(); got != "upstream-model" {
+					t.Errorf("mapped model = %q", got)
+				}
+				if platform == PlatformOpenAI {
+					if r.URL.Path != "/v1/responses" || gjson.GetBytes(body, "max_output_tokens").Int() != 768 {
+						t.Errorf("unexpected native wire request: %s %s", r.URL.Path, body)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"resp_probe","status":"completed","model":"upstream-model","usage":{"input_tokens":10,"output_tokens":5},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`)
+					return
+				}
+				if r.URL.Path != "/v1/messages" || gjson.GetBytes(body, "max_tokens").Int() != 768 {
+					t.Errorf("unexpected Anthropic wire request: %s %s", r.URL.Path, body)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				events := []string{
+					`{"type":"message_start","message":{"id":"msg_probe","model":"upstream-model","content":[],"usage":{"input_tokens":10}}}`,
+					`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+					`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+					`{"type":"content_block_stop","index":0}`,
+					`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`,
+					`{"type":"message_stop"}`,
+				}
+				for _, event := range events {
+					_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", gjson.Get(event, "type").String(), event)
+				}
+			}))
+			defer server.Close()
+
+			upstream := &detectionLoopbackUpstream{client: server.Client(), url: server.URL}
+			account := detectionTestAccount(platform)
+			account.Credentials = map[string]any{
+				"api_key": "fixture-upstream-key", "model_mapping": map[string]any{model: "upstream-model"},
+			}
+			repo := &detectionAccountRepo{fresh: account}
+			if platform == PlatformOpenAI {
+				account.Extra = map[string]any{
+					openai_compat.ExtraKeyResponsesMode:      string(openai_compat.ResponsesSupportModeAuto),
+					openai_compat.ExtraKeyResponsesSupported: true,
+				}
+			}
+			gateway := gin.New()
+			gateway.POST("/v1/responses", func(c *gin.Context) {
+				key, ok := ChannelDetectionIngress(c.Request)
+				require.True(t, ok)
+				require.Empty(t, key.Key)
+				require.Zero(t, key.ID)
+				body, err := io.ReadAll(c.Request.Body)
+				require.NoError(t, err)
+				requestmodel.ResetRequestBody(c.Request, body)
+				ctx := c.Request.Context()
+				if platform == PlatformOpenAI {
+					svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream, accountRepo: repo}
+					_, err = svc.Forward(ctx, c, account, body)
+				} else {
+					svc := &GatewayService{cfg: &config.Config{}, httpUpstream: upstream, accountRepo: repo}
+					_, err = svc.ForwardAsResponses(ctx, c, account, body, nil)
+				}
+				if err != nil {
+					c.Status(http.StatusBadGateway)
+					if platform != PlatformGemini {
+						t.Errorf("forwarding error: %v", err)
+					}
+				}
+			})
+			budget := &detectionRoundBudget{reserve: func(context.Context, *Group) (bool, error) { return true, nil }}
+			answer, err := s.probe(context.Background(), gateway, s.cfg.Groups[0], "hello", 768, detectionTestCurrent, budget)
+			if platform == PlatformGemini {
+				require.ErrorIs(t, err, errDetectionOutputLimit)
+				require.Zero(t, calls)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, "ok", answer)
+			require.Equal(t, 1, calls)
+			require.Equal(t, 1, budget.sends)
+		})
+	}
 }

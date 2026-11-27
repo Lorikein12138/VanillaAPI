@@ -7,12 +7,14 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
+	"strings"
 )
 
 type detectionRouteSettings struct{ service.SettingRepository }
@@ -30,7 +32,7 @@ func TestChannelDetectionAnonymousRoutesNoStoreAndRateLimit(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close() })
 	repo := detectionRouteSettings{}
 	settings := service.NewSettingService(repo, &config.Config{})
-	detection := service.NewChannelDetection(repo, nil, nil, nil, nil, &config.Config{})
+	detection := service.NewChannelDetection(repo, nil, nil, nil)
 	router := gin.New()
 	require.NoError(t, router.SetTrustedProxies(nil))
 	v1 := router.Group("/api/v1")
@@ -54,4 +56,29 @@ func TestChannelDetectionAnonymousRoutesNoStoreAndRateLimit(t *testing.T) {
 	limited := request("/channel-detection", http.StatusTooManyRequests)
 	require.Equal(t, "no-store", limited.Header().Get("Cache-Control"))
 	request("/admin/channel-detection", http.StatusUnauthorized)
+}
+
+func TestChannelDetectionDoesNotAuthenticatePublicOrUnmarkedRequests(t *testing.T) {
+	public := gin.New()
+	cfg := &config.Config{}
+	auth := middleware.NewAPIKeyAuthMiddleware(nil, nil, cfg)
+	private := RegisterGatewayRoutes(public, &handler.Handlers{}, auth, nil, nil, nil, nil, nil, cfg)
+	for _, test := range []struct {
+		handler http.Handler
+		path    string
+		status  int
+	}{
+		{public, "/v1/responses?internal=true&group_id=1", http.StatusUnauthorized},
+		{private, "/v1/responses", http.StatusForbidden},
+		{private, "/v1/responses/compact", http.StatusNotFound},
+	} {
+		request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(`{"model":"fixture","stream":false}`))
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set("X-Group-ID", "1")
+		request.Header.Set("X-Channel-Detection", "true")
+		request.Header.Set("User-Agent", "VanillaAPI-ChannelDetection/1")
+		response := httptest.NewRecorder()
+		test.handler.ServeHTTP(response, request)
+		require.Equal(t, test.status, response.Code, response.Body.String())
+	}
 }

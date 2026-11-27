@@ -10,14 +10,9 @@ import (
 	"testing"
 	"time"
 
-	dbent "github.com/Wei-Shaw/sub2api/ent"
-	_ "github.com/Wei-Shaw/sub2api/ent/runtime"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
-
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 )
 
 func openDetectionTestDatabases(t *testing.T) (*sql.DB, *sql.DB) {
@@ -120,39 +115,137 @@ func TestChannelDetectionPostgresFencesExpiredWriter(t *testing.T) {
 	require.NoError(t, second.Release(ctx, "instance-B"))
 }
 
-func TestChannelDetectionPostgresKeyMetadataProjection(t *testing.T) {
-	db, _ := openDetectionTestDatabases(t)
+func TestChannelDetectionPostgresSendBudgetSurvivesLeaseAndConfig(t *testing.T) {
+	firstDB, secondDB := openDetectionTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := firstDB.ExecContext(ctx, `
+		CREATE TABLE settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','old-config');
+	`)
+	require.NoError(t, err)
+	first := NewChannelDetectionCoordinator(firstDB)
+	second := NewChannelDetectionCoordinator(secondDB)
+	old := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "old-config"}
+	reserve := func(coordinator service.ChannelDetectionCoordinator, owner string, guard service.ChannelDetectionSnapshotGuard, want bool) {
+		t.Helper()
+		ok, err := coordinator.ReserveSend(ctx, owner, guard, 1, 0, 2)
+		require.NoError(t, err)
+		require.Equal(t, want, ok)
+	}
+	acquire := func(coordinator service.ChannelDetectionCoordinator, owner string) {
+		t.Helper()
+		ok, err := coordinator.TryAcquire(ctx, owner, time.Minute)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	acquire(first, "worker-one")
+	reserve(second, "worker-two", old, false)
+	reserve(first, "worker-one", old, true)
+	require.NoError(t, first.Release(ctx, "worker-one"))
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value='new-config' WHERE key='channel_detection_config'`)
+	require.NoError(t, err)
+	next := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "new-config"}
+	acquire(second, "worker-two")
+	reserve(first, "worker-one", old, false)
+	reserve(second, "worker-two", old, false)
+	reserve(second, "worker-two", next, true)
+	reserve(second, "worker-two", next, false)
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET updated_at = updated_at - interval '1 day' WHERE key='channel_detection_daily_sends'`)
+	require.NoError(t, err)
+	reserve(second, "worker-two", next, true)
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET updated_at = clock_timestamp() - interval '1 minute' WHERE key = 'channel_detection_lease'`)
+	require.NoError(t, err)
+	reserve(second, "worker-two", next, false)
+}
+
+func TestChannelDetectionPostgresGroupRPMSharedAcrossLeases(t *testing.T) {
+	firstDB, secondDB := openDetectionTestDatabases(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := firstDB.ExecContext(ctx, `
+		CREATE TABLE settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+		INSERT INTO settings (key, value) VALUES ('channel_detection_enabled','on'), ('channel_detection_config','old-config');
+	`)
+	require.NoError(t, err)
+	guard := service.ChannelDetectionSnapshotGuard{Feature: "on", Config: "old-config"}
+	first := NewChannelDetectionCoordinator(firstDB)
+	second := NewChannelDetectionCoordinator(secondDB)
+	acquired, err := first.TryAcquire(ctx, "first", time.Minute)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	ok, err := first.ReserveSend(ctx, "first", guard, 7, 0, 3)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, first.Release(ctx, "first"))
+
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value='new-config' WHERE key='channel_detection_config'`)
+	require.NoError(t, err)
+	guard.Config = "new-config"
+	acquired, err = second.TryAcquire(ctx, "second", time.Minute)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	ok, err = second.ReserveSend(ctx, "second", guard, 7, 1, 3)
+	require.NoError(t, err)
+	require.False(t, ok, "the previous lease's send counts after enabling the limit")
+	ok, err = second.ReserveSend(ctx, "second", guard, 8, 1, 3)
+	require.NoError(t, err)
+	require.True(t, ok, "a different group has its own window")
+	_, err = secondDB.ExecContext(ctx, `UPDATE settings SET value = jsonb_build_array(clock_timestamp() - interval '61 seconds')::text WHERE key='channel_detection_group_rpm:7'`)
+	require.NoError(t, err)
+	ok, err = second.ReserveSend(ctx, "second", guard, 7, 1, 3)
+	require.NoError(t, err)
+	require.True(t, ok, "denial rolled back its daily debit")
+	ok, err = second.ReserveSend(ctx, "second", guard, 8, 0, 3)
+	require.NoError(t, err)
+	require.False(t, ok, "three successful reservations exhausted the daily budget")
+}
+
+func TestChannelDetectionPostgresQuotaCrossingsPublishOutbox(t *testing.T) {
+	db, observer := openDetectionTestDatabases(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, err := db.ExecContext(ctx, `
-		CREATE TABLE users (id BIGINT PRIMARY KEY, status TEXT NOT NULL, deleted_at TIMESTAMPTZ);
-		CREATE TABLE groups (id BIGINT PRIMARY KEY, status TEXT NOT NULL, deleted_at TIMESTAMPTZ);
-		CREATE TABLE api_keys (
-			id BIGINT PRIMARY KEY, key TEXT NOT NULL, status TEXT NOT NULL, user_id BIGINT NOT NULL,
-			group_id BIGINT, deleted_at TIMESTAMPTZ, quota FLOAT8, quota_used FLOAT8, expires_at TIMESTAMPTZ,
-			rate_limit_5h FLOAT8, rate_limit_1d FLOAT8, rate_limit_7d FLOAT8,
-			usage_5h FLOAT8, usage_1d FLOAT8, usage_7d FLOAT8,
-			window_5h_start TIMESTAMPTZ, window_1d_start TIMESTAMPTZ, window_7d_start TIMESTAMPTZ
+		CREATE TABLE accounts (id BIGINT PRIMARY KEY, extra JSONB, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ);
+		CREATE TABLE scheduler_outbox (
+			id BIGSERIAL PRIMARY KEY, event_type TEXT NOT NULL, account_id BIGINT,
+			group_id BIGINT, payload JSONB, dedup_key TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
-		INSERT INTO users (id, status) VALUES (11, 'active');
-		INSERT INTO groups (id, status) VALUES (12, 'active');
-		INSERT INTO api_keys (id, key, status, user_id, group_id, quota, quota_used, rate_limit_5h, usage_5h, window_5h_start)
-		VALUES (13, 'local-fixture-key', 'active', 11, 12, 2, 0.25, 1, 0.1, now())`)
+		CREATE UNIQUE INDEX scheduler_outbox_pending_dedup_key ON scheduler_outbox (dedup_key) WHERE dedup_key IS NOT NULL;
+		INSERT INTO accounts (id, extra) VALUES
+			(1, '{"quota_limit":2}'),
+			(2, '{"quota_daily_limit":2}'),
+			(3, '{"quota_weekly_limit":2}');
+	`)
 	require.NoError(t, err)
-	repo := NewChannelDetectionKeyRepository(dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db))))
-	key, err := repo.GetChannelDetectionKey(ctx, 13, false)
+	repo := &accountRepository{sql: db}
+	for id, dimension := range []string{"total", "daily", "weekly"} {
+		t.Run(dimension, func(t *testing.T) {
+			accountID := int64(id + 1)
+			count := func() int {
+				t.Helper()
+				var outbox int
+				require.NoError(t, observer.QueryRowContext(ctx,
+					`SELECT count(*) FROM scheduler_outbox WHERE account_id = $1 AND event_type = $2`,
+					accountID, service.SchedulerOutboxEventAccountChanged).Scan(&outbox))
+				return outbox
+			}
+			require.NoError(t, repo.IncrementDetectionQuotaUsed(ctx, accountID, 1))
+			require.Zero(t, count())
+			require.NoError(t, repo.IncrementDetectionQuotaUsed(ctx, accountID, 1))
+			require.Equal(t, 1, count())
+			// Simulate the consumer releasing the pending dedup key.
+			_, err := db.ExecContext(ctx, `UPDATE scheduler_outbox SET dedup_key = NULL WHERE account_id = $1`, accountID)
+			require.NoError(t, err)
+			require.NoError(t, repo.IncrementDetectionQuotaUsed(ctx, accountID, 1))
+			require.Equal(t, 1, count(), "staying over the quota does not trigger another crossing")
+		})
+	}
+	// Outbox write failure must roll back the account debit.
+	_, err = db.ExecContext(ctx, `INSERT INTO accounts (id, extra) VALUES (4, '{"quota_daily_limit":1}'); DROP TABLE scheduler_outbox;`)
 	require.NoError(t, err)
-	require.Empty(t, key.Key)
-	require.Equal(t, int64(12), *key.GroupID)
-	require.True(t, key.Group.IsActive())
-	require.True(t, key.User.IsActive())
-	require.Equal(t, float64(0.1), key.EffectiveUsage5h())
-
-	key, err = repo.GetChannelDetectionKey(ctx, 13, true)
-	require.NoError(t, err)
-	require.Equal(t, "local-fixture-key", key.Key)
-	_, err = db.ExecContext(ctx, `UPDATE api_keys SET deleted_at = now() WHERE id = 13`)
-	require.NoError(t, err)
-	_, err = repo.GetChannelDetectionKey(ctx, 13, false)
-	require.ErrorIs(t, err, service.ErrAPIKeyNotFound)
+	require.Error(t, repo.IncrementDetectionQuotaUsed(ctx, 4, 1))
+	var used float64
+	require.NoError(t, observer.QueryRowContext(ctx, `SELECT COALESCE((extra->>'quota_daily_used')::numeric, 0) FROM accounts WHERE id=4`).Scan(&used))
+	require.Zero(t, used)
 }

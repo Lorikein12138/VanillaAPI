@@ -35,7 +35,7 @@
       <template v-if="isAdmin">
         <!-- Admin Section -->
         <div class="sidebar-section">
-          <template v-for="item in adminNavItems" :key="item.path">
+          <template v-for="item in adminSidebarItems" :key="item.path">
             <!-- Collapsible group (has children) -->
             <template v-if="item.children?.length">
               <button
@@ -127,7 +127,7 @@
       </template>
 
       <!-- Regular User View -->
-      <template v-else-if="authStore.isAuthenticated && !appStore.backendModeEnabled">
+      <template v-else-if="userNavItems.length">
         <div class="sidebar-section">
           <router-link
             v-for="item in userNavItems"
@@ -145,18 +145,6 @@
           </router-link>
         </div>
       </template>
-      <div v-if="detectionStore.publicEnabled" class="sidebar-section">
-        <router-link
-          to="/group-detection"
-          class="sidebar-link mb-1"
-          :class="{ 'sidebar-link-active': isActive('/group-detection'), 'sidebar-link-collapsed': sidebarCollapsed }"
-          :title="sidebarCollapsed ? t('channelDetection.publicTitle') : undefined"
-          @click="handleMenuItemClick('/group-detection')"
-        >
-          <SignalIcon class="h-5 w-5 flex-shrink-0" />
-          <span class="sidebar-label" :class="{ 'sidebar-label-collapsed': sidebarCollapsed }" :aria-hidden="sidebarCollapsed ? 'true' : 'false'">{{ t('channelDetection.publicTitle') }}</span>
-        </router-link>
-      </div>
     </nav>
 
     <!-- Bottom Section -->
@@ -757,8 +745,11 @@ const flagBatchImageAccess = () => canUseBatchImage.value
 // withDashboard=true 时包含仪表盘（用户端），false 时不含（管理员的个人区已经有独立仪表盘入口）。
 //
 // 显示顺序由 finalizeNav 按字数与 weight 决定，自定义菜单固定排在末尾。
-function buildSelfNavItems(withDashboard: boolean): NavItem[] {
-  const items: NavItem[] = []
+function buildSelfNavItems(withDashboard: boolean, publicOnly = false): NavItem[] {
+  const items: NavItem[] = [
+    { path: '/group-detection', label: t('channelDetection.publicTitle'), icon: SignalIcon, weight: 64, featureFlag: () => detectionStore.publicEnabled },
+  ]
+  if (publicOnly) return items
   if (withDashboard) {
     items.push({ path: '/dashboard', label: t('nav.dashboard'), icon: DashboardIcon, weight: 100 })
   }
@@ -795,7 +786,10 @@ function finalizeNav(items: NavItem[]): NavItem[] {
 }
 
 // User navigation items (for regular users)
-const userNavItems = computed((): NavItem[] => finalizeNav(buildSelfNavItems(true)))
+const publicNavItems = computed(() => applyFeatureFlags(buildSelfNavItems(false, true)))
+const userNavItems = computed(() =>
+  authStore.isAuthenticated && !appStore.backendModeEnabled ? finalizeNav(buildSelfNavItems(true)) : publicNavItems.value
+)
 
 // Personal navigation items (for admin's "My Account" section, without Dashboard).
 // Admins access 可用渠道 from this section just like regular users — there is no
@@ -809,6 +803,10 @@ const customMenuItemsForUser = computed(() => {
     .filter((item) => item.visibility === 'user')
     .sort((a, b) => a.sort_order - b.sort_order)
 })
+
+const adminSidebarItems = computed(() =>
+  authStore.isSimpleMode ? [...adminNavItems.value, ...publicNavItems.value] : adminNavItems.value
+)
 
 const customMenuItemsForAdmin = computed(() => {
   return adminSettingsStore.customMenuItems

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/google/uuid"
 )
 
@@ -22,19 +22,20 @@ const (
 	channelDetectionMinInterval       = 15
 	channelDetectionMaxInterval       = 1440
 	channelDetectionRoundTimeout      = 5 * time.Minute
+	channelDetectionIdentityVersion   = 1
+	channelDetectionDailySends        = 672
+	channelDetectionRoundSends        = 14
 )
 
 var (
 	errDetectionDisabled = infraerrors.NotFound("CHANNEL_DETECTION_DISABLED", "Channel detection is disabled")
 	errDetectionConfig   = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_CONFIG", "Invalid detection interval or group selection")
 	errDetectionModel    = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_MODEL", "Select an effective allowlist model in an active group")
-	errDetectionKey      = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_KEY", "Select an active limited API key assigned to this group")
 )
 
 type ChannelDetectionSelection struct {
-	GroupID  int64  `json:"group_id"`
-	Model    string `json:"model"`
-	APIKeyID int64  `json:"api_key_id"`
+	GroupID int64  `json:"group_id"`
+	Model   string `json:"model"`
 }
 
 type ChannelDetectionConfig struct {
@@ -44,8 +45,12 @@ type ChannelDetectionConfig struct {
 }
 
 type ChannelDetectionGroup struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	Active         bool   `json:"active"`
+	HasModels      bool   `json:"has_models"`
+	ModeRestricted bool   `json:"mode_restricted"`
+	ClaudeCodeOnly bool   `json:"claude_code_only"`
 }
 
 type ChannelDetectionCounts struct {
@@ -77,11 +82,12 @@ type channelDetectionConfigRecord struct {
 }
 
 type channelDetectionSnapshot struct {
-	Feature     string                            `json:"feature"`
-	Revision    string                            `json:"revision"`
-	Samples     map[int64]*ChannelDetectionSample `json:"samples"`
-	AttemptedAt map[int64]time.Time               `json:"attempted_at"`
-	stored      string
+	IdentityVersion int                               `json:"identity_version"`
+	Feature         string                            `json:"feature"`
+	Revision        string                            `json:"revision"`
+	Samples         map[int64]*ChannelDetectionSample `json:"samples"`
+	AttemptedAt     map[int64]time.Time               `json:"attempted_at"`
+	stored          string
 }
 
 type channelDetectionGroups interface {
@@ -89,11 +95,12 @@ type channelDetectionGroups interface {
 }
 
 type channelDetectionGroupDirectory interface {
-	ListActive(context.Context) ([]Group, error)
+	List(context.Context, pagination.PaginationParams) ([]Group, *pagination.PaginationResult, error)
 }
 
-type ChannelDetectionKeyRepository interface {
-	GetChannelDetectionKey(ctx context.Context, id int64, includeSecret bool) (*APIKey, error)
+type channelDetectionDirectoryModels interface {
+	resolveAdminGroupModelAllowlist(context.Context, *Group) error
+	validateSimpleModeGroupAccess(*Group) error
 }
 
 type channelDetectionSettings interface {
@@ -114,6 +121,7 @@ type ChannelDetectionCoordinator interface {
 	TryAcquire(ctx context.Context, owner string, ttl time.Duration) (bool, error)
 	Holds(ctx context.Context, owner string) (bool, error)
 	Release(ctx context.Context, owner string) error
+	ReserveSend(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, groupID int64, groupRPM, dailyLimit int) (bool, error)
 	CompareAndSetSnapshot(ctx context.Context, owner string, expected ChannelDetectionSnapshotGuard, next string) (bool, error)
 }
 
@@ -121,15 +129,13 @@ type ChannelDetection struct {
 	settings    channelDetectionSettings
 	groups      channelDetectionGroups
 	directory   channelDetectionGroupDirectory
-	keys        ChannelDetectionKeyRepository
 	coordinator ChannelDetectionCoordinator
-	runtime     *config.Config
 	cancel      context.CancelFunc
 	done        chan struct{}
 }
 
-func NewChannelDetection(settings SettingRepository, groups AdminService, directory GroupRepository, keys ChannelDetectionKeyRepository, coordinator ChannelDetectionCoordinator, runtime *config.Config) *ChannelDetection {
-	return &ChannelDetection{settings: settings, groups: groups, directory: directory, keys: keys, coordinator: coordinator, runtime: runtime}
+func NewChannelDetection(settings SettingRepository, groups AdminService, directory GroupRepository, coordinator ChannelDetectionCoordinator) *ChannelDetection {
+	return &ChannelDetection{settings: settings, groups: groups, directory: directory, coordinator: coordinator}
 }
 
 func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string, channelDetectionConfigRecord, channelDetectionSnapshot, error) {
@@ -163,7 +169,8 @@ func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string,
 		latest = channelDetectionSnapshot{Feature: feature, Revision: config.Revision}
 	}
 	latest.stored = storedSnapshot
-	if latest.Samples == nil {
+	if latest.IdentityVersion != channelDetectionIdentityVersion || latest.Samples == nil {
+		latest.IdentityVersion = channelDetectionIdentityVersion
 		latest.Samples = make(map[int64]*ChannelDetectionSample)
 	}
 	if latest.AttemptedAt == nil {
@@ -198,20 +205,16 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 		return errDetectionConfig
 	}
 	seen := make(map[int64]bool, len(input.Groups))
-	parkedSelections := !input.Enabled && slices.Equal(current.Groups, input.Groups)
 	for _, selection := range input.Groups {
 		if selection.GroupID <= 0 || seen[selection.GroupID] {
 			return errDetectionConfig
 		}
 		seen[selection.GroupID] = true
-		// Pausing must remain possible after a group, model, or key has changed.
-		if parkedSelections {
+		// Preserve existing selections even after their eligibility changes.
+		if slices.Contains(current.Groups, selection) {
 			continue
 		}
 		if _, err := s.probeGroup(ctx, selection); err != nil {
-			return err
-		}
-		if _, err := s.probeKey(ctx, selection, false); err != nil {
 			return err
 		}
 	}
@@ -235,19 +238,39 @@ func (s *ChannelDetection) GroupOptions(ctx context.Context) ([]ChannelDetection
 	if _, err := s.Config(ctx); err != nil {
 		return nil, err
 	}
-	groups, err := s.directory.ListActive(ctx)
-	if err != nil {
-		return nil, err
+	resolver, ok := s.groups.(channelDetectionDirectoryModels)
+	if !ok {
+		return nil, errors.New("detection group directory resolver unavailable")
 	}
-	options := make([]ChannelDetectionGroup, 0, len(groups))
-	for i := range groups {
-		group := &groups[i]
-		if !group.IsActive() {
-			continue
+	options := make([]ChannelDetectionGroup, 0)
+	for page := 1; ; page++ {
+		groups, result, err := s.directory.List(ctx, pagination.PaginationParams{
+			Page: page, PageSize: 100, SortBy: "id", SortOrder: "asc",
+		})
+		if err != nil {
+			return nil, err
 		}
-		options = append(options, ChannelDetectionGroup{ID: group.ID, Name: group.Name})
+		for i := range groups {
+			group := &groups[i]
+			if strings.EqualFold(group.Status, "deleted") {
+				continue
+			}
+			if !group.ClaudeCodeOnly {
+				if err := resolver.resolveAdminGroupModelAllowlist(ctx, group); err != nil {
+					return nil, err
+				}
+			}
+			options = append(options, ChannelDetectionGroup{
+				ID: group.ID, Name: group.Name, Active: group.IsActive(),
+				HasModels:      !group.ClaudeCodeOnly && slices.ContainsFunc(group.ModelAllowlist.Models, concreteDetectionModel),
+				ClaudeCodeOnly: group.ClaudeCodeOnly,
+				ModeRestricted: resolver.validateSimpleModeGroupAccess(group) != nil,
+			})
+		}
+		if len(groups) == 0 || int64(page*100) >= result.Total {
+			return options, nil
+		}
 	}
-	return options, nil
 }
 
 func (s *ChannelDetection) ModelOptions(ctx context.Context, groupID int64) ([]string, error) {
@@ -258,7 +281,7 @@ func (s *ChannelDetection) ModelOptions(ctx context.Context, groupID int64) ([]s
 	if err != nil {
 		return nil, err
 	}
-	if group == nil || !group.IsActive() {
+	if !detectionGroupEligible(group) {
 		return nil, errDetectionModel
 	}
 	models := make([]string, 0, len(group.ModelAllowlist.Models))
@@ -288,18 +311,12 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 			return nil, err
 		}
 		result := ChannelDetectionPublicGroup{Name: group.Name, Model: selection.Model}
-		// Public reads need key eligibility only. The credential is excluded
-		// from the repository query even when a sample exists.
-		if _, err := s.probeKey(ctx, selection, false); err == nil {
-			result.Sample = latest.Samples[selection.GroupID]
-			if result.Sample != nil && result.Sample.SVG != "" {
-				result.Sample.SVG = sanitizeDetectionSVG(result.Sample.SVG)
-				if result.Sample.SVG == "" {
-					result.Sample.Pelican = "error"
-				}
+		result.Sample = latest.Samples[selection.GroupID]
+		if result.Sample != nil && result.Sample.SVG != "" {
+			result.Sample.SVG = sanitizeDetectionSVG(result.Sample.SVG)
+			if result.Sample.SVG == "" {
+				result.Sample.Pelican = "error"
 			}
-		} else if !errors.Is(err, errDetectionKey) {
-			return nil, err
 		}
 		results = append(results, result)
 	}
@@ -318,8 +335,12 @@ func concreteDetectionModel(model string) bool {
 	return model != "" && !strings.Contains(model, "*")
 }
 
+func detectionGroupEligible(group *Group) bool {
+	return group != nil && group.IsActive() && !group.ClaudeCodeOnly
+}
+
 func validDetectionModel(group *Group, model string) bool {
-	return group != nil && group.IsActive() && concreteDetectionModel(model) &&
+	return detectionGroupEligible(group) && concreteDetectionModel(model) &&
 		slices.Contains(group.ModelAllowlist.Models, model)
 }
 
@@ -335,47 +356,6 @@ func (s *ChannelDetection) probeGroup(ctx context.Context, selection ChannelDete
 		return nil, errDetectionModel
 	}
 	return group, nil
-}
-
-func (s *ChannelDetection) probeKey(ctx context.Context, selection ChannelDetectionSelection, includeSecret bool) (*APIKey, error) {
-	if selection.APIKeyID <= 0 {
-		return nil, errDetectionKey
-	}
-	key, err := s.keys.GetChannelDetectionKey(ctx, selection.APIKeyID, includeSecret)
-	if errors.Is(err, ErrAPIKeyNotFound) {
-		return nil, errDetectionKey
-	}
-	if err != nil {
-		return nil, err
-	}
-	if key == nil || key.ID != selection.APIKeyID || !key.IsActive() || key.IsExpired() || (includeSecret && key.Key == "") ||
-		key.User == nil || !key.User.IsActive() || key.GroupID == nil || *key.GroupID != selection.GroupID ||
-		key.Group == nil || key.Group.ID != selection.GroupID || !key.Group.IsActive() ||
-		!s.probeKeyLimitsAvailable(key) {
-		return nil, errDetectionKey
-	}
-	return key, nil
-}
-
-func (s *ChannelDetection) probeKeyLimitsAvailable(key *APIKey) bool {
-	if s.runtime != nil && s.runtime.RunMode == config.RunModeSimple {
-		if !simpleModeKeyRateLimitBillingEnabled(s.runtime, key) {
-			return false
-		}
-	} else if key.IsQuotaExhausted() || !(key.Quota > 0 || key.HasRateLimits()) {
-		return false
-	}
-	return (key.RateLimit5h <= 0 || key.EffectiveUsage5h() < key.RateLimit5h) &&
-		(key.RateLimit1d <= 0 || key.EffectiveUsage1d() < key.RateLimit1d) &&
-		(key.RateLimit7d <= 0 || key.EffectiveUsage7d() < key.RateLimit7d)
-}
-
-// Reject a stale authenticated snapshot when its limits differ from the ones
-// that made the key eligible. The gateway bills using the authenticated key.
-func (s *ChannelDetection) sameProbeKeyLimits(a, b *APIKey) bool {
-	simple := s.runtime != nil && s.runtime.RunMode == config.RunModeSimple
-	return a.UserID == b.UserID && (simple || a.Quota == b.Quota) &&
-		a.RateLimit5h == b.RateLimit5h && a.RateLimit1d == b.RateLimit1d && a.RateLimit7d == b.RateLimit7d
 }
 
 func (s *ChannelDetection) current(ctx context.Context, feature, revision string) (bool, error) {
@@ -420,7 +400,7 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 	enabled, err := s.PublicEnabled(checkCtx)
 	token := uuid.NewString()
 	var locked bool
-	if err == nil && enabled {
+	if err == nil && enabled && s.coordinator != nil {
 		locked, err = s.coordinator.TryAcquire(checkCtx, token, channelDetectionRoundTimeout+time.Minute)
 	}
 	stopCheck()
@@ -435,11 +415,22 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 
 	loadCtx, stopLoad := context.WithTimeout(ctx, 5*time.Second)
 	feature, config, latest, err := s.state(loadCtx, true)
-	stopLoad()
 	if err != nil || feature == "" || !config.Enabled {
+		stopLoad()
 		return
 	}
-	selection, due := dueDetectionGroup(config, latest, time.Now())
+	eligible := config
+	eligible.Groups = make([]ChannelDetectionSelection, 0, len(config.Groups))
+	for _, selection := range config.Groups {
+		if _, err := s.probeGroup(loadCtx, selection); err == nil {
+			eligible.Groups = append(eligible.Groups, selection)
+		} else if !errors.Is(err, errDetectionModel) {
+			stopLoad()
+			return
+		}
+	}
+	stopLoad()
+	selection, due := dueDetectionGroup(eligible, latest, time.Now())
 	if !due {
 		return
 	}
@@ -460,10 +451,19 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 			return false
 		}
 		held, err := s.coordinator.Holds(ctx, token)
-		return err == nil && held
+		if err != nil || !held {
+			return false
+		}
+		_, err = s.probeGroup(ctx, selection)
+		return err == nil
 	}
 	go watchDetectionConfiguration(roundCtx, current, cancel)
-	latest.Samples[selection.GroupID] = s.runSample(roundCtx, gateway, selection, current)
+	budget := &detectionRoundBudget{reserve: func(ctx context.Context, group *Group) (bool, error) {
+		return s.coordinator.ReserveSend(ctx, token, ChannelDetectionSnapshotGuard{
+			Feature: feature, Config: config.stored,
+		}, group.ID, group.RPMLimit, channelDetectionDailySends)
+	}}
+	sample := s.runSample(roundCtx, gateway, selection, current, budget)
 
 	// A timed-out sample can record partial results. A canceled or superseded
 	// sample cannot write, even if an upstream ignores request cancellation.
@@ -472,6 +472,10 @@ func (s *ChannelDetection) tick(ctx context.Context, gateway http.Handler) {
 	}
 	writeCtx, stopWrite := context.WithTimeout(ctx, 4*time.Second)
 	defer stopWrite()
+	if !current(writeCtx) {
+		return
+	}
+	latest.Samples[selection.GroupID] = sample
 	s.writeSnapshot(writeCtx, token, config, &latest)
 }
 

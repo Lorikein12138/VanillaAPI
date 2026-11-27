@@ -557,7 +557,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 	}
-	service.SetOpenAIHTTPResponseOwner(c, subject.UserID, apiKey.ID)
+	if !service.IsChannelDetectionProbe(c.Request.Context()) {
+		service.SetOpenAIHTTPResponseOwner(c, subject.UserID, apiKey.ID)
+	}
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
@@ -618,42 +620,50 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
 
-	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
-	if !acquired {
-		return
-	}
-	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
-	if userReleaseFunc != nil {
-		defer userReleaseFunc()
-	}
-
-	// 2. Re-check billing eligibility after wait
-	if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	probe := service.IsChannelDetectionProbe(c.Request.Context())
+	if probe {
+		if !service.ChannelDetectionDispatchAllowed(c.Request.Context()) {
+			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "service_unavailable", "Detection is unavailable", streamStarted)
+			return
 		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
-		return
-	}
-
-	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
-	if err != nil {
-		reqLog.Info("openai.inflight_reservation_rejected", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
+	} else {
+		userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog)
+		if !acquired {
+			return
 		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
-		return
+		// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
+		if userReleaseFunc != nil {
+			defer userReleaseFunc()
+		}
+
+		// 2. Re-check billing eligibility after wait
+		if err := h.billingCacheService.CheckBillingEligibility(c.Request.Context(), apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+			reqLog.Info("openai.billing_eligibility_check_failed", zap.Error(err))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.handleStreamingAwareError(c, status, code, message, streamStarted)
+			return
+		}
+
+		// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
+		inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
+		if err != nil {
+			reqLog.Info("openai.inflight_reservation_rejected", zap.Error(err))
+			status, code, message, retryAfter := billingErrorDetails(err)
+			if retryAfter > 0 {
+				c.Header("Retry-After", strconv.Itoa(retryAfter))
+			}
+			h.handleStreamingAwareError(c, status, code, message, streamStarted)
+			return
+		}
+		defer inflightRelease()
 	}
-	defer inflightRelease()
 
 	// Generate session hash (header first; fallback to prompt_cache_key)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
-	if h.rejectIfCyberSessionBlocked(c, apiKey, sessionHashBody, reqModel, cyberBlockFormatResponses) {
+	if !probe && h.rejectIfCyberSessionBlocked(c, apiKey, sessionHashBody, reqModel, cyberBlockFormatResponses) {
 		return
 	}
 	c.Request = c.Request.WithContext(service.WithOpenAIGuardianParentAffinity(
@@ -891,11 +901,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if h.handleForwardRequestBodyMemoryOverload(c, err, streamStarted) {
 			return
 		}
-		var cyberBlockBodyHTTP []byte
-		if service.GetOpsCyberPolicy(c) != nil {
-			cyberBlockBodyHTTP = sessionHashBody
+		if !probe {
+			var cyberBlockBodyHTTP []byte
+			if service.GetOpsCyberPolicy(c) != nil {
+				cyberBlockBodyHTTP = sessionHashBody
+			}
+			h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), service.HashUsageRequestPayload(body))
 		}
-		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), service.HashUsageRequestPayload(body))
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)
 		responseLatencyMs := forwardDurationMs
@@ -910,6 +922,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 入账。允许重放的失败不携带可计费结果。
 		submitResponsesUsage := func(res *service.OpenAIForwardResult) {
 			if res == nil {
+				return
+			}
+			if probe {
+				h.gatewayService.RecordDetectionAccountUsage(c.Request.Context(), account, apiKey, res, clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel), pricingAt)
 				return
 			}
 			stampOpenAIRequestedReasoningEffort(res, c)
@@ -952,6 +968,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					).Error("openai.record_usage_failed", zap.Error(err))
 				}
 			})
+		}
+		if probe && service.IsChannelDetectionGuardError(err) {
+			h.ensureForwardErrorResponse(c, streamStarted)
+			return
 		}
 		if err != nil {
 			if errors.Is(err, service.ErrAdaptiveOpenAIResponsesClientDisconnected) || (result != nil && result.ClientDisconnect) {

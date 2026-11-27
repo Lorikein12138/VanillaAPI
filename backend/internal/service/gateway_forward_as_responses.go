@@ -43,6 +43,9 @@ func (s *GatewayService) ForwardAsResponses(
 		}()
 	}
 	startTime := time.Now()
+	if IsChannelDetectionProbe(ctx) && (account.Platform != PlatformAnthropic || account.Type == AccountTypeServiceAccount || account.Type == AccountTypeBedrock) {
+		return nil, rejectChannelDetectionEgress(ctx)
+	}
 
 	normalizedBody, normalized, err := normalizeOpenAIResponsesLegacyIngressWithConfig(s.cfg, body)
 	if err != nil {
@@ -127,6 +130,8 @@ func (s *GatewayService) ForwardAsResponses(
 
 	// 7. Enforce cache_control block limit
 	anthropicBody = enforceCacheControlLimit(anthropicBody)
+
+	ctx = withDetectionAccountScope(ctx, s.accountRepo, account)
 
 	// 8. Get access token
 	token, tokenType, err := s.GetAccessToken(ctx, account)

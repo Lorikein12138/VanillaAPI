@@ -3,46 +3,15 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
-	dbent "github.com/Wei-Shaw/sub2api/ent"
-	"github.com/Wei-Shaw/sub2api/ent/apikey"
-	"github.com/Wei-Shaw/sub2api/ent/group"
-	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 const channelDetectionLeaseSetting = "channel_detection_lease"
-
-func NewChannelDetectionKeyRepository(client *dbent.Client) service.ChannelDetectionKeyRepository {
-	return &apiKeyRepository{client: client}
-}
-
-func (r *apiKeyRepository) GetChannelDetectionKey(ctx context.Context, id int64, includeSecret bool) (*service.APIKey, error) {
-	fields := []string{
-		apikey.FieldID, apikey.FieldUserID, apikey.FieldGroupID, apikey.FieldStatus,
-		apikey.FieldQuota, apikey.FieldQuotaUsed, apikey.FieldExpiresAt,
-		apikey.FieldRateLimit5h, apikey.FieldRateLimit1d, apikey.FieldRateLimit7d,
-		apikey.FieldUsage5h, apikey.FieldUsage1d, apikey.FieldUsage7d,
-		apikey.FieldWindow5hStart, apikey.FieldWindow1dStart, apikey.FieldWindow7dStart,
-	}
-	if includeSecret {
-		fields = append(fields, apikey.FieldKey)
-	}
-	query := r.activeQuery().Where(apikey.IDEQ(id)).
-		WithUser(func(q *dbent.UserQuery) { q.Select(user.FieldID, user.FieldStatus) }).
-		WithGroup(func(q *dbent.GroupQuery) { q.Select(group.FieldID, group.FieldStatus) })
-	query.Select(fields...)
-	key, err := query.Only(ctx)
-	if dbent.IsNotFound(err) {
-		return nil, service.ErrAPIKeyNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return apiKeyEntityToService(key), nil
-}
 
 // The lease and the snapshot live in the same PostgreSQL settings store.
 // Acquiring/releasing a lease competes for the same row lock as publishing.
@@ -88,17 +57,12 @@ func (r *channelDetectionCoordinator) Release(ctx context.Context, owner string)
 	return err
 }
 
-func (r *channelDetectionCoordinator) CompareAndSetSnapshot(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string) (bool, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
+// lockChannelDetectionState serializes operations with lease transfer and settings writes.
+func lockChannelDetectionState(ctx context.Context, tx *sql.Tx, owner string, expected service.ChannelDetectionSnapshotGuard) (bool, error) {
 	// Hold the lease row first. A successor cannot reserve until this
 	// transaction either commits its snapshot or rolls back.
 	var leaseOwner string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR UPDATE`, channelDetectionLeaseSetting).Scan(&leaseOwner)
+	err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR UPDATE`, channelDetectionLeaseSetting).Scan(&leaseOwner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -119,6 +83,127 @@ func (r *channelDetectionCoordinator) CompareAndSetSnapshot(ctx context.Context,
 		if err != nil || actual != setting.value {
 			return false, err
 		}
+	}
+	return true, nil
+}
+
+func (r *channelDetectionCoordinator) ReserveSend(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, groupID int64, groupRPM, dailyLimit int) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if ok, err := lockChannelDetectionState(ctx, tx, owner, expected); err != nil || !ok {
+		return false, err
+	}
+	// A fixed settings row survives restarts and config changes. Use the
+	// database clock for the lease and UTC day, and debit before sending.
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO settings (key, value, updated_at)
+		SELECT 'channel_detection_daily_sends', '1', statement_timestamp()
+		WHERE $2::int > 0 AND EXISTS (
+			SELECT 1 FROM settings WHERE key = $1 AND updated_at > clock_timestamp()
+		)
+		ON CONFLICT (key) DO UPDATE SET
+			value = CASE WHEN (settings.updated_at AT TIME ZONE 'UTC')::date <
+				(EXCLUDED.updated_at AT TIME ZONE 'UTC')::date THEN '1'
+				ELSE (settings.value::int + 1)::text END,
+			updated_at = EXCLUDED.updated_at
+		WHERE (settings.updated_at AT TIME ZONE 'UTC')::date <
+			(EXCLUDED.updated_at AT TIME ZONE 'UTC')::date OR (
+			(settings.updated_at AT TIME ZONE 'UTC')::date =
+			(EXCLUDED.updated_at AT TIME ZONE 'UTC')::date AND settings.value::int < $2::int
+		)`, channelDetectionLeaseSetting, dailyLimit)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 1 {
+		return false, err
+	}
+	if ok, err := reserveChannelDetectionGroupRPM(ctx, tx, groupID, groupRPM); err != nil || !ok {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// The active lease row already serializes writers. Store a rolling window
+// per group under the same transaction as the daily debit, including sends
+// while RPM is unlimited in case the administrator enables the limit mid-window.
+func reserveChannelDetectionGroupRPM(ctx context.Context, tx *sql.Tx, groupID int64, limit int) (bool, error) {
+	if groupID <= 0 || limit < 0 {
+		return false, nil
+	}
+	key := "channel_detection_group_rpm:" + strconv.FormatInt(groupID, 10)
+	var now time.Time
+	var raw string
+	err := tx.QueryRowContext(ctx, `SELECT clock_timestamp(), COALESCE((SELECT value FROM settings WHERE key = $1), '[]')`, key).Scan(&now, &raw)
+	if err != nil {
+		return false, err
+	}
+	var previous []time.Time
+	if err := json.Unmarshal([]byte(raw), &previous); err != nil {
+		return false, err
+	}
+	cutoff := now.Add(-time.Minute)
+	recent := previous[:0]
+	for _, sentAt := range previous {
+		if sentAt.After(cutoff) {
+			recent = append(recent, sentAt)
+		}
+	}
+	if limit > 0 && len(recent) >= limit {
+		return false, nil
+	}
+	encoded, err := json.Marshal(append(recent, now.UTC()))
+	if err != nil {
+		return false, err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+	`, key, string(encoded), now)
+	return err == nil, err
+}
+
+// IncrementDetectionQuotaUsed shares the normal quota update and transactional
+// outbox without claiming an ordinary request or writing a user billing row.
+func (r *accountRepository) IncrementDetectionQuotaUsed(ctx context.Context, id int64, amount float64) error {
+	db, ok := r.sql.(*sql.DB)
+	if !ok {
+		return errors.New("detection account quota requires a database transaction")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	state, err := incrementUsageBillingAccountQuota(ctx, tx, id, amount, true, true)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if accountQuotaCrossed(state, amount) {
+		r.syncSchedulerAccountSnapshot(ctx, id)
+	}
+	return nil
+}
+
+func (r *channelDetectionCoordinator) CompareAndSetSnapshot(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if ok, err := lockChannelDetectionState(ctx, tx, owner, expected); err != nil || !ok {
+		return false, err
 	}
 
 	result, err := tx.ExecContext(ctx, `

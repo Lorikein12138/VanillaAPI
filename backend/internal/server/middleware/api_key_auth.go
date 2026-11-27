@@ -390,6 +390,13 @@ func GetSubscriptionFromContext(c *gin.Context) (*service.UserSubscription, bool
 	return subscription, ok
 }
 
+// SetPrivateDetectionRoutingContext projects a verified request-local group.
+func SetPrivateDetectionRoutingContext(c *gin.Context, key *service.APIKey) {
+	c.Set(string(ContextKeyAPIKey), key)
+	c.Set(string(ContextKeyUser), AuthSubject{})
+	setGroupContext(c, key.Group)
+}
+
 func setGroupContext(c *gin.Context, group *service.Group) {
 	if !service.IsGroupContextValid(group) {
 		return

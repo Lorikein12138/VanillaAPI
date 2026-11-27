@@ -956,7 +956,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"protocol", input.Protocol)
 		return allow, nil
 	}
+	probe := IsChannelDetectionProbe(ctx)
 	_, input.riskControlLogOnly = runtimeSnapshot.allowlistedUsers[input.UserID]
+	input.riskControlLogOnly = input.riskControlLogOnly && !probe
 	// Keep audit evidence while ensuring all local rejection paths allow trusted users.
 	defer func() {
 		if input.riskControlLogOnly && decision != nil {
@@ -1052,7 +1054,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 				scores := map[string]float64{contentModerationKeywordCategory: 1.0}
 				log := s.buildLog(input, cfg, ContentModerationActionKeywordBlock, true, contentModerationKeywordCategory, 1.0, scores, keywordText, nil, nil, "")
 				log.MatchedKeyword = keyword
-				s.enqueueRecord(input, cfg, log, (ContentModerationInput{Text: keywordText}).Hash(), false, true)
+				if !probe {
+					s.enqueueRecord(input, cfg, log, (ContentModerationInput{Text: keywordText}).Hash(), false, true)
+				}
 				return &ContentModerationDecision{
 					Allowed:         false,
 					Blocked:         true,
@@ -1086,6 +1090,12 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"endpoint", input.Endpoint,
 			"protocol", input.Protocol,
 			"body_bytes", len(input.Body))
+		return allow, nil
+	}
+	if probe {
+		if cfg.Mode == ContentModerationModePreBlock {
+			return &ContentModerationDecision{Blocked: true, Message: cfg.BlockMessage, StatusCode: http.StatusServiceUnavailable}, nil
+		}
 		return allow, nil
 	}
 	content.Normalize()

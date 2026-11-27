@@ -218,7 +218,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	// 执行请求
 	client := s.httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := doUpstreamRequest(client, req, s.upstreamDrainTimeout())
+	resp, err := doUpstreamRequest(client, req, accountID, s.upstreamDrainTimeout())
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
@@ -279,7 +279,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 
 	client := s.httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := doUpstreamRequest(client, req, s.upstreamDrainTimeout())
+	resp, err := doUpstreamRequest(client, req, accountID, s.upstreamDrainTimeout())
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
@@ -304,13 +304,25 @@ func (s *httpUpstreamService) upstreamDrainTimeout() time.Duration {
 
 // doUpstreamRequest owns cancellation for one attempt, without cancelling the
 // caller's context (which may be detached for billing or reused for retries).
-func doUpstreamRequest(client *http.Client, req *http.Request, drainTimeouts ...time.Duration) (*http.Response, error) {
-	if !service.ChannelDetectionDispatchAllowed(req.Context()) {
-		return nil, context.Canceled
-	}
-	var drainTimeout time.Duration
-	if len(drainTimeouts) > 0 {
-		drainTimeout = drainTimeouts[0]
+func doUpstreamRequest(client *http.Client, req *http.Request, accountID int64, drainTimeout time.Duration) (*http.Response, error) {
+	probe := service.IsChannelDetectionProbe(req.Context())
+	if probe {
+		if err := service.ReserveChannelDetectionSend(req, accountID); err != nil {
+			return nil, err
+		}
+		bounded := *client
+		bounded.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		if transport, ok := bounded.Transport.(*grokAccessDeniedFallbackTransport); ok {
+			bounded.Transport = transport.base
+		}
+		client = &bounded
+		req = req.Clone(req.Context())
+		req.GetBody = nil
+		req.Close = true
+		req.Header.Del("Idempotency-Key")
+		req.Header.Del("X-Idempotency-Key")
 	}
 	ctx, cancel := pkghttputil.NewUpstreamAttemptContext(req.Context(), drainTimeout)
 	resp, err := servertiming.Do(client, req.WithContext(ctx))
@@ -319,6 +331,9 @@ func doUpstreamRequest(client *http.Client, req *http.Request, drainTimeouts ...
 		return resp, err
 	}
 	decompressResponseBody(resp)
+	if probe {
+		resp.Body = http.MaxBytesReader(nil, resp.Body, 256<<10)
+	}
 	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil
 }

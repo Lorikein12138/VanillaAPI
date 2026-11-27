@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
 type PromptService struct {
@@ -178,6 +180,9 @@ func (s *PromptService) Evaluate(ctx context.Context, req Request) (*PromptDecis
 	}
 	if err != nil {
 		return nil, &GuardError{Code: ErrorCodeInvalidResponse, Cause: err}
+	}
+	if service.IsChannelDetectionProbe(ctx) {
+		return nil, &GuardError{Code: ErrorCodeUnavailable}
 	}
 	return s.evaluator.Evaluate(ctx, cfg, snapshot)
 }

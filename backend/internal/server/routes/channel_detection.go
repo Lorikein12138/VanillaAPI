@@ -67,15 +67,12 @@ func detectionNoStore(c *gin.Context) {
 	c.Next()
 }
 
-func verifyChannelDetectionBinding(c *gin.Context) {
-	if c.FullPath() == "/v1/responses" {
-		key, _ := middleware.GetAPIKeyFromContext(c)
-		if !service.ChannelDetectionBindingMatches(c.Request.Context(), key) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{
-				"type": "permission_error", "message": "Detection key binding changed",
-			}})
-			return
-		}
+func authenticateChannelDetection(c *gin.Context) {
+	key, ok := service.ChannelDetectionIngress(c.Request)
+	if !ok {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
 	}
+	middleware.SetPrivateDetectionRoutingContext(c, key)
 	c.Next()
 }
