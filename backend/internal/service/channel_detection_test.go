@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"bytes"
@@ -185,6 +186,65 @@ func detectionGoldenReply(t *testing.T) trace.Reply {
 }
 
 const testDetectionSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360"><circle cx="50" cy="70" r="12" fill="#123456"/></svg>`
+
+func TestChannelDetectionRoundAllowsFullPelicanDeadlineAfterSlowQuestions(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		s := newDetectionFixture(t)
+		require.NoError(t, s.Save(ctx, s.cfg))
+		wantTimeouts := []time.Duration{30, 30, 30, 60, 60, 60, 110}
+		calls := 0
+		gateway := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Less(t, calls, len(wantTimeouts))
+			deadline, ok := r.Context().Deadline()
+			require.True(t, ok)
+			require.Equal(t, wantTimeouts[calls]*time.Second, time.Until(deadline))
+			calls++
+			if calls < len(wantTimeouts) {
+				<-r.Context().Done()
+				return
+			}
+			time.Sleep(109 * time.Second)
+			require.NoError(t, r.Context().Err())
+			require.NoError(t, json.NewEncoder(w).Encode(gin.H{
+				"status": "completed",
+				"output": []gin.H{{"type": "message", "role": "assistant",
+					"content": []gin.H{{"type": "output_text", "text": testDetectionSVG}}}},
+			}))
+		})
+		s.tick(ctx, gateway)
+
+		require.Equal(t, len(wantTimeouts), calls)
+		groups, err := s.PublicGroups(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, groups[0].Sample)
+		require.Equal(t, ChannelDetectionCounts{Errors: 3}, groups[0].Sample.Reasoning)
+		require.Equal(t, ChannelDetectionCounts{Errors: 3}, groups[0].Sample.Fingerprint)
+		require.Equal(t, "generated", groups[0].Sample.Pelican)
+	})
+}
+
+func TestChannelDetectionPublicGroupsSortByBaseRateStably(t *testing.T) {
+	ctx := context.Background()
+	s := newDetectionFixture(t)
+	s.groupRows[1].RateMultiplier = 2
+	s.groupRows[2].RateMultiplier = 0.5
+	s.groupRows[3] = &Group{ID: 3, Name: "Third", Status: StatusActive, RateMultiplier: 0.5,
+		ModelAllowlist: GroupModelAllowlist{Models: []string{"claude-sonnet-5"}}}
+	s.cfg.Groups = append(s.cfg.Groups, ChannelDetectionSelection{GroupID: 3, Model: "claude-sonnet-5"})
+	require.NoError(t, s.Save(ctx, s.cfg))
+
+	groups, err := s.PublicGroups(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []ChannelDetectionPublicGroup{
+		{Name: "Second", Model: "claude-sonnet-5"},
+		{Name: "Third", Model: "claude-sonnet-5"},
+		{Name: "First", Model: "gpt-6.2-sol"},
+	}, groups)
+	config, err := s.Config(ctx)
+	require.NoError(t, err)
+	require.Equal(t, s.cfg.Groups, config.Groups)
+}
 
 func TestChannelDetectionTickPersistsOnlyPublicEvidence(t *testing.T) {
 	ctx := context.Background()

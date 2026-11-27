@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,10 +22,11 @@ const (
 	channelDetectionMaxGroups         = 16
 	channelDetectionMinInterval       = 15
 	channelDetectionMaxInterval       = 1440
-	channelDetectionRoundTimeout      = 5 * time.Minute
-	channelDetectionIdentityVersion   = 1
-	channelDetectionDailySends        = 672
-	channelDetectionRoundSends        = 14
+	// Three 30s reasoning questions, three 60s fingerprints and one 110s SVG leave 40s of headroom.
+	channelDetectionRoundTimeout    = 7 * time.Minute
+	channelDetectionIdentityVersion = 1
+	channelDetectionDailySends      = 672
+	channelDetectionRoundSends      = 14
 )
 
 var (
@@ -301,7 +303,11 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 	if feature == "" || !config.Enabled {
 		return nil, errDetectionDisabled
 	}
-	results := make([]ChannelDetectionPublicGroup, 0, len(config.Groups))
+	type rankedGroup struct {
+		result         ChannelDetectionPublicGroup
+		rateMultiplier float64
+	}
+	ranked := make([]rankedGroup, 0, len(config.Groups))
 	for _, selection := range config.Groups {
 		group, err := s.probeGroup(ctx, selection)
 		if errors.Is(err, errDetectionModel) {
@@ -318,7 +324,7 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 				result.Sample.Pelican = "error"
 			}
 		}
-		results = append(results, result)
+		ranked = append(ranked, rankedGroup{result: result, rateMultiplier: group.RateMultiplier})
 	}
 	// Group resolution can outlive a switch/config update on another instance.
 	matches, err := s.current(ctx, feature, config.Revision)
@@ -327,6 +333,13 @@ func (s *ChannelDetection) PublicGroups(ctx context.Context) ([]ChannelDetection
 	}
 	if !matches {
 		return nil, errDetectionDisabled
+	}
+	slices.SortStableFunc(ranked, func(a, b rankedGroup) int {
+		return cmp.Compare(a.rateMultiplier, b.rateMultiplier)
+	})
+	results := make([]ChannelDetectionPublicGroup, 0, len(ranked))
+	for _, group := range ranked {
+		results = append(results, group.result)
 	}
 	return results, nil
 }
