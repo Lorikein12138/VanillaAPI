@@ -73,7 +73,7 @@ func removeGroupFromDetection(ctx context.Context, tx sqlExecutor, id int64) err
 		changed = true
 	}
 	groupKey := strconv.FormatInt(id, 10)
-	for _, field := range []string{"samples", "attempted_at", "running_by_group", "proofs", "no_send"} {
+	for _, field := range []string{"samples", "attempted_at", "running_by_group", "proofs", "no_send", "images", "schedule_since", "last_slot"} {
 		var groups map[string]json.RawMessage
 		if json.Unmarshal(snapshot[field], &groups) != nil || groups[groupKey] == nil {
 			continue

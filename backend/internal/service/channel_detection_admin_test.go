@@ -3,9 +3,11 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -40,7 +42,7 @@ func TestChannelDetectionManualRoundUsesLeaseAndWorkerContext(t *testing.T) {
 		for _, group := range config.Groups {
 			latest.AttemptedAt[group.GroupID] = time.Now()
 		}
-		latest.Samples[1] = &ChannelDetectionSample{CheckedAt: time.Now(), Pelican: "error"}
+		latest.Samples[1] = &ChannelDetectionSample{CheckedAt: time.Now(), Pelican: "generated", SVG: testDetectionSVG}
 		oldSample := *latest.Samples[1]
 		latest.Proofs = map[int64]ChannelDetectionProof{1: {SampleID: "previous-sample"}}
 		data, err := json.Marshal(latest)
@@ -81,7 +83,8 @@ func TestChannelDetectionManualRoundUsesLeaseAndWorkerContext(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "no_send", cards[0].TriggerState)
 		require.True(t, oldSample.CheckedAt.Equal(cards[0].Sample.CheckedAt))
-		require.Equal(t, "previous-sample", cards[0].SampleID)
+		require.Equal(t, sampleID, cards[0].SampleID)
+		require.Equal(t, "untested", cards[0].Latest.Pelican)
 		require.Nil(t, cards[0].Confirmation)
 		require.NoError(t, s.Stop(context.Background()))
 	})
@@ -342,4 +345,203 @@ func TestChannelDetectionEvidenceRequiresActualWireCredentials(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer fixture-db")
 	addHeaderRaw(req.Header, "authorization", "Bearer fixture-cache")
 	require.False(t, detectionWireCredentialMatches(req, account), "two differently cased auth headers remain ambiguous")
+}
+
+func TestChannelDetectionAutomaticCandidateNeedsCompletedSettledEgress(t *testing.T) {
+	completed := `{"status":"completed","output":[]}`
+	invalidDrawing := `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"no drawing"}]}]}`
+	validOutput := `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(mustDetectionJSON(t, testDetectionSVG)) + `}]}]}`
+	normalStream := "data: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n"
+	messagesStream := "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\nevent: message_stop\ndata: {}\n\n"
+	chatStream := "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	cases := []struct {
+		name, raw, rendered, path                                          string
+		transport, settleUsage, secondAccount, priorTransportError, expect bool
+		closeBeforeEOF                                                     bool
+	}{
+		{name: "empty completed", raw: completed, rendered: completed, transport: true, settleUsage: true, expect: true},
+		{name: "completed stream", raw: normalStream, rendered: completed, transport: true, settleUsage: true, expect: true},
+		{name: "completed before EOF", raw: normalStream, rendered: completed, transport: true, settleUsage: true, closeBeforeEOF: true, expect: true},
+		{name: "terminal with trailing comment", raw: normalStream + ": keepalive", rendered: completed, transport: true, settleUsage: true, expect: true},
+		{name: "completed responses event header", raw: "event: response.completed\r\ndata: {\"response\":" + completed + "}\r\n\r\n", rendered: completed, transport: true, settleUsage: true, expect: true},
+		{name: "completed messages event headers", raw: messagesStream, rendered: completed, path: "/v1/messages", transport: true, settleUsage: true, expect: true},
+		{name: "completed then incomplete", raw: normalStream + "data: {\"type\":\"response.incomplete\"}\n\n", rendered: completed, transport: true, settleUsage: true},
+		{name: "completed then cancelled", raw: normalStream + "event: response.cancelled\ndata: {}\n\n", rendered: completed, transport: true, settleUsage: true, closeBeforeEOF: true},
+		{name: "completed then canceled", raw: normalStream + "data: {\"type\":\"response.canceled\"}\n\n", rendered: completed, transport: true, settleUsage: true},
+		{name: "completed then failed", raw: normalStream + "event: response.failed\ndata: {}\n\n", rendered: completed, transport: true, settleUsage: true},
+		{name: "conflicting event header", raw: "event: response.failed\n" + normalStream, rendered: completed, transport: true, settleUsage: true},
+		{name: "completed then partial frame", raw: normalStream + "data: {\"type\":\"response.in", rendered: completed, transport: true, settleUsage: true},
+		{name: "completed then missing blank line", raw: normalStream + "event: response.cancelled\ndata: {}\n", rendered: completed, transport: true, settleUsage: true, closeBeforeEOF: true},
+		{name: "messages stop then error", raw: messagesStream + "event: error\ndata: {}\n\n", rendered: completed, path: "/v1/messages", transport: true, settleUsage: true},
+		{name: "chat stop with error object", raw: `{"error":{"message":"upstream failed"},"choices":[{"finish_reason":"stop"}]}`, rendered: completed, path: "/v1/chat/completions", transport: true, settleUsage: true},
+		{name: "chat stop with false error", raw: `{"error":false,"choices":[{"finish_reason":"stop"}]}`, rendered: completed, path: "/v1/chat/completions", transport: true, settleUsage: true},
+		{name: "chat stop with null error", raw: `{"error":null,"choices":[{"finish_reason":"stop"}]}`, rendered: completed, path: "/v1/chat/completions", transport: true, settleUsage: true, expect: true},
+		{name: "chat stop with no error", raw: `{"choices":[{"finish_reason":"stop"}]}`, rendered: completed, path: "/v1/chat/completions", transport: true, settleUsage: true, expect: true},
+		{name: "chat done then error", raw: chatStream + "data: {\"error\":{\"message\":\"upstream failed\"}}\n\n", rendered: completed, path: "/v1/chat/completions", transport: true, settleUsage: true},
+		{name: "chat token limit then normal stop", raw: "data: {\"choices\":[{\"finish_reason\":\"length\"}]}\n\n" + chatStream, rendered: completed, path: "/v1/chat/completions", transport: true, settleUsage: true},
+		{name: "invalid SVG", raw: invalidDrawing, rendered: invalidDrawing, transport: true, settleUsage: true, expect: true},
+		{name: "generated", raw: completed, rendered: validOutput, transport: true, settleUsage: true},
+		{name: "truncated json", raw: `{"status":"completed"`, rendered: completed, transport: true, settleUsage: true},
+		{name: "truncated stream", raw: strings.TrimSuffix(normalStream, "\n"), rendered: completed, transport: true, settleUsage: true},
+		{name: "incomplete item", raw: `{"status":"completed","output":[{"status":"incomplete"}]}`, rendered: completed, transport: true, settleUsage: true},
+		{name: "token limit", raw: `{"status":"incomplete"}`, rendered: completed, transport: true, settleUsage: true},
+		{name: "not sent", rendered: completed, settleUsage: true},
+		{name: "account usage unsettled", raw: completed, rendered: completed, transport: true},
+		{name: "different accounts", raw: completed, rendered: completed, transport: true, settleUsage: true, secondAccount: true},
+		{name: "transport failure on prior attempt", raw: completed, rendered: completed, transport: true, settleUsage: true, priorTransportError: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDetectionFixture(t)
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "fixture"}}
+			budget := &detectionRoundBudget{trackCompletion: true}
+			gateway := http.HandlerFunc(func(w http.ResponseWriter, incoming *http.Request) {
+				send := func(outboundAccount *Account, transportError bool) {
+					budget.sends++
+					path := tc.path
+					if path == "" {
+						path = "/v1/responses"
+					}
+					req, err := http.NewRequestWithContext(incoming.Context(), http.MethodPost, "http://fixture.test"+path, nil)
+					require.NoError(t, err)
+					req.Header.Set("Authorization", "Bearer fixture")
+					observed, settle := observeDetectionAttempt(req, budget, outboundAccount)
+					if transportError {
+						httptrace.ContextClientTrace(observed.Context()).WroteRequest(httptrace.WroteRequestInfo{})
+						settle(nil)
+						return
+					}
+					resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.raw))}
+					settle(resp)
+					ObserveChannelDetectionResponse(req, resp)
+					if tc.closeBeforeEOF {
+						_, err = io.ReadFull(resp.Body, make([]byte, len(tc.raw)))
+					} else {
+						_, err = io.ReadAll(resp.Body)
+					}
+					require.NoError(t, err)
+					require.NoError(t, resp.Body.Close())
+					if tc.settleUsage {
+						settleDetectionUsage(incoming.Context())
+					}
+				}
+				if tc.priorTransportError {
+					send(account, true)
+				}
+				if tc.transport {
+					send(account, false)
+				}
+				if tc.secondAccount {
+					other := *account
+					other.ID = 2
+					send(&other, false)
+				}
+				_, _ = io.WriteString(w, tc.rendered)
+			})
+			sample := s.runSample(context.Background(), gateway, s.cfg.Groups[0], detectionTestCurrent, budget)
+			if tc.rendered == completed {
+				require.True(t, sample.completedMissingSVG, "wire evidence does not change gateway sample classification")
+			}
+			require.Equal(t, tc.expect, sample.completedMissingSVG && budget.autoConfirmable())
+		})
+	}
+}
+
+func TestChannelDetectionLegacyNoSendWithoutSample(t *testing.T) {
+	ctx := context.Background()
+	s := newDetectionFixture(t)
+	require.NoError(t, s.Save(ctx, s.cfg))
+	_, _, latest, err := s.state(ctx, true)
+	require.NoError(t, err)
+	attempted := time.Now().UTC()
+	latest.AttemptedAt[1] = attempted
+	latest.NoSend = map[int64]bool{1: true, 2: true}
+	latest.Proofs = map[int64]ChannelDetectionProof{1: {SampleID: "old"}}
+	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(mustDetectionJSON(t, latest))))
+
+	admin, err := s.AdminGroups(ctx)
+	require.NoError(t, err)
+	require.Len(t, admin, 2)
+	for _, card := range admin {
+		require.Equal(t, "no_send", card.TriggerState)
+		require.NotNil(t, card.Latest)
+		require.Equal(t, "untested", card.Latest.Pelican)
+		require.Nil(t, card.Sample)
+		require.Nil(t, card.Confirmation)
+		require.Empty(t, card.SampleID)
+	}
+	require.Equal(t, attempted, admin[0].Latest.CheckedAt)
+	require.NotContains(t, string(mustDetectionJSON(t, admin[1].Latest)), "checked_at")
+	public, err := s.PublicGroups(ctx)
+	require.NoError(t, err)
+	require.Len(t, public, 2)
+	for _, card := range public {
+		require.Nil(t, card.Sample)
+	}
+	require.NotContains(t, string(mustDetectionJSON(t, public)), "latest")
+}
+
+func mustDetectionJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestChannelDetectionKeepsPublicImageAcrossFailedRound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		s := newDetectionFixture(t)
+		replacementSVG := "<svg><circle r='7'/></svg>"
+		replacement := `{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + string(mustDetectionJSON(t, replacementSVG)) + `}]}]}`
+		response := `{"status":"completed","output":[]}`
+		s.Start(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			binding := detectionBindingFromContext(req.Context())
+			account := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "fixture"}}
+			req.Header.Set("Authorization", "Bearer fixture")
+			_, settle := observeDetectionAttempt(req, binding.budget, account)
+			settle(&http.Response{StatusCode: http.StatusOK})
+			_, _ = io.WriteString(w, response)
+		}))
+		defer func() { require.NoError(t, s.Stop(ctx)) }()
+		synctest.Wait()
+		plan := s.cfg
+		plan.Groups = plan.Groups[:1]
+		require.NoError(t, s.Save(ctx, plan))
+		_, _, latest, err := s.state(ctx, true)
+		require.NoError(t, err)
+		originalTime := time.Now().UTC().Add(-time.Hour)
+		latest.Samples[1] = &ChannelDetectionSample{CheckedAt: originalTime, Pelican: "generated", SVG: testDetectionSVG}
+		latest.Proofs = map[int64]ChannelDetectionProof{1: {SampleID: "original"}}
+		require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(mustDetectionJSON(t, latest))))
+
+		failedID, err := s.Trigger(ctx, 1)
+		require.NoError(t, err)
+		synctest.Wait()
+		public, err := s.PublicGroups(ctx)
+		require.NoError(t, err)
+		require.Equal(t, originalTime, public[0].Sample.CheckedAt)
+		require.Equal(t, sanitizeDetectionSVG(testDetectionSVG), public[0].Sample.SVG)
+		admin, err := s.AdminGroups(ctx)
+		require.NoError(t, err)
+		require.Equal(t, failedID, admin[0].SampleID)
+		require.Equal(t, "error", admin[0].Latest.Pelican)
+		require.True(t, admin[0].Latest.CheckedAt.After(originalTime))
+		require.Equal(t, public[0].Sample, admin[0].Sample)
+		_, _, latest, err = s.state(ctx, true)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, latest.Proofs[1].AccountID)
+		require.Empty(t, latest.Samples[1].SVG)
+
+		response = replacement
+		nextID, err := s.Trigger(ctx, 1)
+		require.NoError(t, err)
+		synctest.Wait()
+		admin, err = s.AdminGroups(ctx)
+		require.NoError(t, err)
+		require.Equal(t, nextID, admin[0].SampleID)
+		require.Equal(t, "generated", admin[0].Latest.Pelican)
+		require.Contains(t, admin[0].Sample.SVG, `<circle r="7"`)
+		require.True(t, admin[0].Sample.CheckedAt.After(originalTime))
+	})
 }

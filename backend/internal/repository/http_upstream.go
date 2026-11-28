@@ -341,6 +341,9 @@ func doUpstreamRequest(client *http.Client, req *http.Request, accountID int64, 
 		resp.Body = http.MaxBytesReader(nil, resp.Body, 256<<10)
 	}
 	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	if probe {
+		service.ObserveChannelDetectionResponse(req, resp)
+	}
 	return resp, nil
 }
 

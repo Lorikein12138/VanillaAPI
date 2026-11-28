@@ -37,25 +37,12 @@ func RegisterChannelDetectionRoutes(v1, admin *gin.RouterGroup, detection *servi
 	})
 	settings.PUT("", func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
-		var input struct {
-			service.ChannelDetectionConfig
-			ConcurrentGroupsJSON json.RawMessage `json:"concurrent_groups"`
-		}
+		var input service.ChannelDetectionConfig
 		if err := c.ShouldBindJSON(&input); err != nil {
 			response.BadRequest(c, "Invalid detection configuration")
 			return
 		}
-		if input.ConcurrentGroupsJSON != nil {
-			// Decode into an int so explicit null goes through zero-value
-			// validation. Only an omitted field leaves the config pointer nil.
-			var limit int
-			if err := json.Unmarshal(input.ConcurrentGroupsJSON, &limit); err != nil {
-				response.BadRequest(c, "Invalid detection configuration")
-				return
-			}
-			input.ConcurrentGroups = &limit
-		}
-		if !response.ErrorFrom(c, detection.Save(c.Request.Context(), input.ChannelDetectionConfig)) {
+		if !response.ErrorFrom(c, detection.Save(c.Request.Context(), input)) {
 			response.Success(c, nil)
 		}
 	})

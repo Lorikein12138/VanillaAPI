@@ -54,9 +54,8 @@ func (m *detectionMemorySettings) Set(_ context.Context, key, value string) erro
 func (m *detectionMemorySettings) TryAcquire(_ context.Context, id int64, owner string, _ time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	limit, err := ChannelDetectionConcurrency(m.values[SettingKeyChannelDetectionConfig])
-	if err != nil || len(m.owners) >= limit || m.owners[id] != "" {
-		return false, err
+	if m.owners[id] != "" {
+		return false, nil
 	}
 	if m.owners == nil {
 		m.owners = make(map[int64]string)
@@ -68,7 +67,7 @@ func (m *detectionMemorySettings) TryAcquire(_ context.Context, id int64, owner 
 func (m *detectionMemorySettings) ActiveLeases(_ context.Context) (ChannelDetectionActiveLeases, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return ChannelDetectionActiveLeases{Groups: maps.Clone(m.owners)}, nil
+	return ChannelDetectionActiveLeases{Groups: maps.Clone(m.owners), Now: time.Now()}, nil
 }
 
 func (m *detectionMemorySettings) Holds(_ context.Context, id int64, owner string) (bool, error) {
@@ -116,8 +115,21 @@ func (m *detectionMemorySettings) SavePlan(_ context.Context, expected ChannelDe
 		m.values[SettingKeyChannelDetectionLatest] != expected.Snapshot {
 		return false, nil
 	}
+	var snapshot channelDetectionSnapshot
+	if err := json.Unmarshal([]byte(nextSnapshot), &snapshot); err != nil {
+		return false, err
+	}
+	for id, since := range snapshot.ScheduleSince {
+		if since.IsZero() {
+			snapshot.ScheduleSince[id] = time.Now().UTC()
+		}
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return false, err
+	}
 	m.values[SettingKeyChannelDetectionConfig] = nextConfig
-	m.values[SettingKeyChannelDetectionLatest] = nextSnapshot
+	m.values[SettingKeyChannelDetectionLatest] = string(encoded)
 	return true, nil
 }
 
@@ -171,7 +183,7 @@ func newDetectionFixture(t *testing.T) *detectionFixture {
 		1: {ID: 1, Name: "First", Status: StatusActive, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6.2-sol"}}},
 		2: {ID: 2, Name: "Second", Status: StatusActive, ModelAllowlist: GroupModelAllowlist{Models: []string{"claude-sonnet-5", "*"}}},
 	}
-	cfg := ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, ConcurrentGroups: new(3), Groups: []ChannelDetectionSelection{
+	cfg := ChannelDetectionConfig{Enabled: true, IntervalMinutes: 60, SuspendMinutes: new(1440), AutoConfirmMissingSVG: new(false), DailyAnchorTime: new(""), Groups: []ChannelDetectionSelection{
 		{GroupID: 1, Model: "gpt-6.2-sol"},
 		{GroupID: 2, Model: "claude-sonnet-5"},
 	}}
@@ -187,7 +199,7 @@ func TestChannelDetectionValidationAndPause(t *testing.T) {
 	config := s.cfg
 	current, err := s.Config(ctx)
 	require.NoError(t, err)
-	require.Equal(t, ChannelDetectionConfig{IntervalMinutes: 60, ConcurrentGroups: new(3), Groups: []ChannelDetectionSelection{}}, current)
+	require.Equal(t, ChannelDetectionConfig{IntervalMinutes: 60, SuspendMinutes: new(1440), AutoConfirmMissingSVG: new(false), DailyAnchorTime: new(""), Groups: []ChannelDetectionSelection{}}, current)
 	_, err = s.PublicGroups(ctx)
 	require.ErrorIs(t, err, errDetectionDisabled)
 
@@ -772,8 +784,7 @@ func TestChannelDetectionReadsLegacySVGWithoutChangingStoredSnapshot(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, "generated", groups[0].Sample.Pelican)
 	require.Contains(t, groups[0].Sample.SVG, "<circle")
-	require.Equal(t, "error", groups[1].Sample.Pelican)
-	require.Empty(t, groups[1].Sample.SVG)
+	require.Nil(t, groups[1].Sample)
 	values, err := s.storage.GetMultiple(ctx, []string{SettingKeyChannelDetectionLatest})
 	require.NoError(t, err)
 	require.Equal(t, raw, values[SettingKeyChannelDetectionLatest])

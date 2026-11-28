@@ -21,16 +21,35 @@
             <input id="detection-interval" v-model.number="config.interval_minutes" class="input" type="number" min="15" max="1440" step="1" required :disabled="saving" />
           </div>
           <div>
-            <label for="detection-concurrency" class="input-label">{{ t('channelDetection.concurrentGroups') }}</label>
-            <Select
-              id="detection-concurrency"
-              :aria-label="t('channelDetection.concurrentGroups')"
-              :model-value="config.concurrent_groups"
-              :options="concurrencyOptions"
+            <label for="detection-anchor" class="input-label">{{ t('channelDetection.dailyAnchorTime') }}</label>
+            <input
+              id="detection-anchor"
+              v-model="config.daily_anchor_time"
+              class="input"
+              type="text"
+              placeholder="08:00"
+              pattern="([01][0-9]|2[0-3]):[0-5][0-9]"
+              maxlength="5"
+              aria-describedby="detection-anchor-hint"
               :disabled="saving"
-              @update:model-value="config.concurrent_groups = Number($event)"
             />
+            <p id="detection-anchor-hint" class="mt-1 text-sm text-gray-500 dark:text-dark-400">{{ t('channelDetection.dailyAnchorHint') }}</p>
           </div>
+        </div>
+      </section>
+
+      <section class="card space-y-4 p-5" aria-labelledby="detection-suspension">
+        <h2 id="detection-suspension" class="font-serif text-lg text-gray-950 dark:text-dark-50">{{ t('channelDetection.suspension') }}</h2>
+        <div class="max-w-xs">
+          <label for="detection-suspend-minutes" class="input-label">{{ t('channelDetection.suspendMinutes') }}</label>
+          <input id="detection-suspend-minutes" v-model.number="config.suspend_minutes" class="input" type="number" min="1" max="10080" step="1" required :disabled="saving" />
+        </div>
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p id="detection-auto-suspend" class="text-sm font-medium text-gray-950 dark:text-dark-50">{{ t('channelDetection.autoSuspend') }}</p>
+            <p id="detection-auto-suspend-hint" class="mt-1 text-sm text-gray-500 dark:text-dark-400">{{ t('channelDetection.autoSuspendHint') }}</p>
+          </div>
+          <Toggle v-model="config.auto_confirm_missing_svg" :disabled="saving" aria-labelledby="detection-auto-suspend" aria-describedby="detection-auto-suspend-hint" />
         </div>
       </section>
 
@@ -119,11 +138,6 @@ const directoryLoading = ref(false)
 const saving = ref(false)
 const saved = ref(false)
 const saveError = ref('')
-const concurrencyOptions = Array.from({ length: 10 }, (_, index) => ({
-  value: index + 1,
-  label: String(index + 1),
-}))
-
 const rows = computed(() => {
   const selected = new Map(config.value?.groups.map(group => [group.group_id, group]))
   const known = new Set(groups.value.map(group => group.id))

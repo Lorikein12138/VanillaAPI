@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -19,16 +20,18 @@ import (
 
 const channelDetectionReceiptsSetting = "channel_detection_confirmation_receipts"
 const channelDetectionSuspensionReason = "channel_detection_admin_confirmation"
+const automaticDetectionSuspensionReason = "channel_detection_missing_svg"
 
 type channelDetectionReceipt struct {
 	SampleID  string    `json:"sample_id"`
 	ActorID   int64     `json:"actor_id"`
+	Automatic bool      `json:"automatic,omitempty"`
 	AccountID int64     `json:"account_id"`
 	At        time.Time `json:"at"`
 	Until     time.Time `json:"until"`
 }
 
-func (r *channelDetectionCoordinator) ConfirmationScope(ctx context.Context, selection service.ChannelDetectionSelection, proof service.ChannelDetectionProof) (*service.ChannelDetectionScope, error) {
+func (r *channelDetectionCoordinator) ConfirmationScope(ctx context.Context, selection service.ChannelDetectionSelection, proof service.ChannelDetectionProof, config string) (*service.ChannelDetectionScope, error) {
 	var now time.Time
 	var receiptsJSON string
 	var protected bool
@@ -50,7 +53,63 @@ func (r *channelDetectionCoordinator) ConfirmationScope(ctx context.Context, sel
 	if errors.Is(err, service.ErrDetectionChanged) {
 		return nil, nil
 	}
-	return scope, err
+	if err != nil {
+		return nil, err
+	}
+	plan, err := readDetectionConfirmationPlan(config)
+	if err != nil {
+		return nil, err
+	}
+	scope.SuspendMinutes = plan.minutes()
+	scope.Version = detectionScopeVersion(scope.Version, plan)
+	return scope, nil
+}
+
+type detectionConfirmationPlan struct {
+	service.ChannelDetectionConfig
+	Revision           string `json:"revision"`
+	SuspensionRevision string `json:"suspension_revision"`
+}
+
+func readDetectionConfirmationPlan(raw string) (detectionConfirmationPlan, error) {
+	var plan detectionConfirmationPlan
+	if raw == "" {
+		return plan, nil
+	}
+	err := json.Unmarshal([]byte(raw), &plan)
+	if err == nil && (plan.minutes() < 1 || plan.minutes() > service.ChannelDetectionMaxSuspendMinutes) {
+		err = service.ErrDetectionChanged
+	}
+	return plan, err
+}
+
+func (p detectionConfirmationPlan) minutes() int {
+	if p.SuspendMinutes == nil {
+		return service.ChannelDetectionDefaultSuspendMinutes
+	}
+	return *p.SuspendMinutes
+}
+
+func detectionScopeVersion(scope string, plan detectionConfirmationPlan) string {
+	if plan.SuspensionRevision == "" && plan.minutes() == service.ChannelDetectionDefaultSuspendMinutes {
+		return scope
+	}
+	digest := sha256.Sum256([]byte(scope + ":" + plan.SuspensionRevision + ":" + strconv.Itoa(plan.minutes())))
+	return hex.EncodeToString(digest[:])
+}
+
+type detectionConfirmationSnapshot struct {
+	Feature  string                                    `json:"feature"`
+	Revision string                                    `json:"revision"`
+	Proofs   map[int64]service.ChannelDetectionProof   `json:"proofs"`
+	Samples  map[int64]*service.ChannelDetectionSample `json:"samples"`
+	NoSend   map[int64]bool                            `json:"no_send"`
+	Running  map[int64]struct {
+		Owner              string `json:"owner"`
+		SampleID           string `json:"sample_id"`
+		SuspensionRevision string `json:"suspension_revision"`
+		GroupPlatform      string `json:"group_platform"`
+	} `json:"running_by_group"`
 }
 
 func (r *channelDetectionCoordinator) Confirm(ctx context.Context, input service.ChannelDetectionConfirmationRequest) (service.ChannelDetectionConfirmation, error) {
@@ -68,6 +127,10 @@ func (r *channelDetectionCoordinator) Confirm(ctx context.Context, input service
 	if err != nil {
 		return service.ChannelDetectionConfirmation{}, err
 	}
+	return r.syncDetectionConfirmation(ctx, receipt), nil
+}
+
+func (r *channelDetectionCoordinator) syncDetectionConfirmation(ctx context.Context, receipt channelDetectionReceipt) service.ChannelDetectionConfirmation {
 	accountSynced := r.accounts.syncSchedulerAccountSnapshotDetached(ctx, receipt.AccountID)
 	cacheSynced := true
 	if r.tempCache != nil {
@@ -75,7 +138,7 @@ func (r *channelDetectionCoordinator) Confirm(ctx context.Context, input service
 		defer cancel()
 		cacheSynced = r.tempCache.DeleteTempUnsched(cacheCtx, receipt.AccountID) == nil
 	}
-	return service.ChannelDetectionConfirmation{Until: receipt.Until, SyncPending: !accountSynced || !cacheSynced}, nil
+	return service.ChannelDetectionConfirmation{Until: receipt.Until, SyncPending: !accountSynced || !cacheSynced}
 }
 
 func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, input service.ChannelDetectionConfirmationRequest) (channelDetectionReceipt, error) {
@@ -102,9 +165,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 		}
 		return receipt, err
 	}
-	var latest struct {
-		Proofs map[int64]service.ChannelDetectionProof `json:"proofs"`
-	}
+	var latest detectionConfirmationSnapshot
 	if err := json.Unmarshal([]byte(latestJSON), &latest); err != nil {
 		return receipt, err
 	}
@@ -112,12 +173,27 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	stored := latest.Proofs[groupID]
 	// A different group can reserve or publish without replacing this sample.
 	// The versioned proof of the selected group must still match in full.
-	if !proof.Attributable() || !stored.Attributable() || proof.SampleID != stored.SampleID ||
+	if latest.NoSend[groupID] || latest.Samples[groupID] == nil || !proof.Attributable() || !stored.Attributable() || proof.SampleID != stored.SampleID ||
 		proof.Version != stored.Version || proof.AccountID != stored.AccountID || proof.Sends != stored.Sends ||
 		proof.RouteFingerprint != stored.RouteFingerprint || !proof.CompletedAt.Equal(*stored.CompletedAt) {
 		return receipt, service.ErrDetectionChanged
 	}
 
+	plan, err := readDetectionConfirmationPlan(input.Guard.Config)
+	if err != nil {
+		return receipt, err
+	}
+	receipt, err = r.applyDetectionConfirmation(ctx, client, input, latest, plan, time.Time{})
+	if err != nil {
+		return receipt, err
+	}
+	return receipt, tx.Commit()
+}
+
+func (r *channelDetectionCoordinator) applyDetectionConfirmation(ctx context.Context, client *dbent.Client, input service.ChannelDetectionConfirmationRequest, latest detectionConfirmationSnapshot, plan detectionConfirmationPlan, leaseDeadline time.Time) (channelDetectionReceipt, error) {
+	automatic := !leaseDeadline.IsZero()
+	var receipt channelDetectionReceipt
+	groupID, proof := input.Selection.GroupID, input.Proof
 	if _, err := client.ExecContext(ctx, `INSERT INTO settings (key, value, updated_at) VALUES ($1, '{}', now()) ON CONFLICT (key) DO NOTHING`, channelDetectionReceiptsSetting); err != nil {
 		return receipt, err
 	}
@@ -134,7 +210,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 		return receipt, err
 	}
 	if existing := receipts[groupID]; existing.SampleID == proof.SampleID {
-		return existing, tx.Commit()
+		return existing, nil
 	}
 
 	lockedGroups, err := lockDetectionMembershipGroups(ctx, client, proof.AccountID)
@@ -176,7 +252,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	if err != nil {
 		return receipt, err
 	}
-	if scope.Version != input.ScopeVersion || len(scope.Groups) != len(lockedGroups) {
+	if (!automatic && detectionScopeVersion(scope.Version, plan) != input.ScopeVersion) || len(scope.Groups) != len(lockedGroups) {
 		return receipt, service.ErrDetectionScopeChanged
 	}
 	for i, group := range scope.Groups {
@@ -186,6 +262,9 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	}
 	groups := &groupRepository{client: client, sql: client}
 	group, err := groups.GetByIDLite(ctx, groupID)
+	if errors.Is(err, service.ErrGroupNotFound) {
+		return receipt, service.ErrDetectionChanged
+	}
 	if err != nil {
 		return receipt, err
 	}
@@ -205,12 +284,25 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	if !freshDetectionProof(proof, now) {
 		return receipt, service.ErrDetectionChanged
 	}
+	if automatic && !leaseDeadline.After(now) {
+		return receipt, service.ErrDetectionChanged
+	}
 	if protection.Valid && protection.Time.After(now) {
 		return receipt, service.ErrDetectionProtected
 	}
 
-	until := now.Add(24 * time.Hour)
-	_, err = setTempUnschedulable(ctx, client, proof.AccountID, until, channelDetectionSuspensionReason)
+	until := now.Add(time.Duration(plan.minutes()) * time.Minute)
+	reason := channelDetectionSuspensionReason
+	if automatic {
+		reason = automaticDetectionSuspensionReason
+	}
+	if currentUntil.Valid && currentUntil.Time.After(until) {
+		if automatic {
+			return receipt, service.ErrDetectionProtected
+		}
+		until = currentUntil.Time
+	}
+	_, err = setTempUnschedulable(ctx, client, proof.AccountID, until, reason)
 	if err != nil {
 		return receipt, err
 	}
@@ -226,10 +318,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	if err := enqueueTempUnschedulable(ctx, client, proof.AccountID); err != nil {
 		return receipt, err
 	}
-	if currentUntil.Valid && currentUntil.Time.After(until) {
-		until = currentUntil.Time
-	}
-	receipt = channelDetectionReceipt{SampleID: proof.SampleID, ActorID: input.ActorID, AccountID: proof.AccountID, At: now, Until: until}
+	receipt = channelDetectionReceipt{SampleID: proof.SampleID, ActorID: input.ActorID, Automatic: automatic, AccountID: proof.AccountID, At: now, Until: until}
 	for id, old := range receipts {
 		if latest.Proofs[id].SampleID != old.SampleID {
 			delete(receipts, id)
@@ -243,7 +332,7 @@ func (r *channelDetectionCoordinator) confirmInTransaction(ctx context.Context, 
 	if _, err := client.ExecContext(ctx, `UPDATE settings SET value = $1, updated_at = clock_timestamp() WHERE key = $2`, string(encoded), channelDetectionReceiptsSetting); err != nil {
 		return receipt, err
 	}
-	return receipt, tx.Commit()
+	return receipt, nil
 }
 
 func freshDetectionProof(proof service.ChannelDetectionProof, now time.Time) bool {

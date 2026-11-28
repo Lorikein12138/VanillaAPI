@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -68,6 +69,7 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	// Known serialized route identity for this synthetic API-key account.
 	digest := sha256.Sum256([]byte(`{"Platform":"openai","Type":"apikey","ParentAccountID":null,"QuotaDimension":"global","Credentials":{"api_key":"fixture"},"CustomBaseURL":"","ProxyID":null,"ProxyURL":"","OpenAIPassthrough":false,"OpenAIModelFiltering":false}`))
 	proofs := make(map[int64]service.ChannelDetectionProof)
+	samples := make(map[int64]*service.ChannelDetectionSample)
 	var snapshot struct {
 		Proofs map[int64]service.ChannelDetectionProof `json:"proofs"`
 	}
@@ -77,7 +79,8 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 			Version: 2, SampleID: uuid.NewString(), Source: "manual", AccountID: accountID,
 			RouteFingerprint: hex.EncodeToString(digest[:]), Sends: 14, // Legacy seven-question v2 proof.
 		}
-		next, err := json.Marshal(map[string]any{"proofs": proofs})
+		samples[groupID] = &service.ChannelDetectionSample{Pelican: "error"}
+		next, err := json.Marshal(map[string]any{"proofs": proofs, "samples": samples})
 		require.NoError(t, err)
 		ok, err := first.PublishSnapshot(ctx, "scheduled-worker", guard, string(next), groupID)
 		require.NoError(t, err)
@@ -90,7 +93,7 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	}
 	selection := service.ChannelDetectionSelection{GroupID: groupID, Model: "fixture-model"}
 	input := service.ChannelDetectionConfirmationRequest{Selection: selection, ActorID: 1, Proof: publish(groupID), Guard: guard, GroupPlatform: service.PlatformOpenAI}
-	scope, err := first.ConfirmationScope(ctx, selection, input.Proof)
+	scope, err := first.ConfirmationScope(ctx, selection, input.Proof, guard.Config)
 	require.NoError(t, err)
 	require.NotNil(t, scope)
 	require.Len(t, scope.Groups, 1)
@@ -98,7 +101,7 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	bind(otherGroupID)
 	_, err = first.Confirm(ctx, input)
 	require.ErrorIs(t, err, service.ErrDetectionScopeChanged)
-	scope, err = first.ConfirmationScope(ctx, selection, input.Proof)
+	scope, err = first.ConfirmationScope(ctx, selection, input.Proof, guard.Config)
 	require.NoError(t, err)
 	require.NotNil(t, scope)
 	require.Len(t, scope.Groups, 2)
@@ -249,7 +252,7 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	}
 
 	// Retrying the same proof returns its receipt without recreating a block.
-	scope, err = first.ConfirmationScope(ctx, selection, input.Proof)
+	scope, err = first.ConfirmationScope(ctx, selection, input.Proof, guard.Config)
 	require.NoError(t, err)
 	require.Nil(t, scope)
 	replayed, err := first.Confirm(ctx, input)
@@ -294,6 +297,143 @@ func TestChannelDetectionPostgresConfirmation(t *testing.T) {
 	input.Proof = snapshot.Proofs[groupID]
 	_, err = first.Confirm(ctx, input)
 	require.ErrorIs(t, err, service.ErrDetectionChanged)
+
+	t.Run("automatic publication and configurable manual confirmation", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		setPolicy := func(enabled bool, minutes int, version string) {
+			t.Helper()
+			guard.Config = fmt.Sprintf(`{"revision":"fixture","enabled":true,"suspend_minutes":%d,"auto_confirm_missing_svg":%t,"suspension_revision":%q,"groups":[{"group_id":%d,"model":"fixture-model"}]}`, minutes, enabled, version, groupID)
+			_, err := firstDB.ExecContext(ctx, `UPDATE settings SET value=$2 WHERE key=$1`, service.SettingKeyChannelDetectionConfig, guard.Config)
+			require.NoError(t, err)
+		}
+		stage := func(runVersion, proofVersion string, attributable bool) (string, string) {
+			t.Helper()
+			sampleID := uuid.NewString()
+			proof := service.ChannelDetectionProof{Version: 2, SampleID: sampleID, Source: "manual", SuspensionRevision: proofVersion}
+			if attributable {
+				proof.AccountID, proof.Sends, proof.RouteFingerprint = accountID, 1, hex.EncodeToString(digest[:])
+			}
+			before := fmt.Sprintf(`{"feature":"on","revision":"fixture","running_by_group":{"%d":{"owner":"scheduled-worker","sample_id":%q,"suspension_revision":%q,"group_platform":"openai"}}}`, groupID, sampleID, runVersion)
+			_, err := firstDB.ExecContext(ctx, `UPDATE settings SET value=$2 WHERE key=$1`, service.SettingKeyChannelDetectionLatest, before)
+			require.NoError(t, err)
+			guard.Snapshot = before
+			next, err := json.Marshal(map[string]any{
+				"feature": "on", "revision": "fixture",
+				"proofs":  map[int64]service.ChannelDetectionProof{groupID: proof},
+				"samples": map[int64]service.ChannelDetectionSample{groupID: {Pelican: "error"}},
+			})
+			require.NoError(t, err)
+			return sampleID, string(next)
+		}
+		publish := func(next string) {
+			t.Helper()
+			ok, err := first.PublishSnapshot(ctx, "scheduled-worker", guard, next, groupID)
+			require.NoError(t, err)
+			require.True(t, ok)
+		}
+		readLatest := func() string {
+			t.Helper()
+			var raw string
+			require.NoError(t, firstDB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=$1`, service.SettingKeyChannelDetectionLatest).Scan(&raw))
+			return raw
+		}
+		for _, tc := range []struct {
+			name, runVersion, proofVersion string
+			enabled, attributable          bool
+		}{
+			{"disabled", "policy", "policy", false, true},
+			{"old policy", "old", "old", true, true},
+			{"old admission", "old", "policy", true, true},
+			{"no attribution", "policy", "policy", true, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				setPolicy(tc.enabled, 35, "policy")
+				id, next := stage(tc.runVersion, tc.proofVersion, tc.attributable)
+				publish(next)
+				require.Contains(t, readLatest(), id)
+				require.Nil(t, firstClient.Account.GetX(ctx, accountID).TempUnschedulableUntil)
+			})
+		}
+		setPolicy(true, 35, "policy")
+		longer := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+		require.NoError(t, first.accounts.SetTempUnschedulable(ctx, accountID, longer, "existing"))
+		prior := firstClient.Account.GetX(ctx, accountID)
+		_, next := stage("policy", "policy", true)
+		publish(next)
+		retained := firstClient.Account.GetX(ctx, accountID)
+		require.True(t, longer.Equal(*retained.TempUnschedulableUntil))
+		require.Equal(t, "existing", *retained.TempUnschedulableReason)
+		require.Equal(t, prior.TempUnschedulableRevision, retained.TempUnschedulableRevision)
+		require.NoError(t, first.accounts.ClearTempUnschedulableManually(ctx, accountID))
+
+		id, next := stage("policy", "policy", true)
+		_, err := firstDB.ExecContext(ctx, `DELETE FROM scheduler_outbox WHERE account_id=$1`, accountID)
+		require.NoError(t, err)
+		_, err = firstDB.ExecContext(ctx, `ALTER TABLE scheduler_outbox ADD CONSTRAINT fail_auto_confirmation CHECK (false)`)
+		require.NoError(t, err)
+		ok, err := first.PublishSnapshot(ctx, "scheduled-worker", guard, next, groupID)
+		require.False(t, ok)
+		require.ErrorContains(t, err, "fail_auto_confirmation")
+		require.Equal(t, guard.Snapshot, readLatest(), "a failed suspension rolls back the published sample too")
+		require.Nil(t, firstClient.Account.GetX(ctx, accountID).TempUnschedulableUntil)
+		_, err = firstDB.ExecContext(ctx, `ALTER TABLE scheduler_outbox DROP CONSTRAINT fail_auto_confirmation`)
+		require.NoError(t, err)
+		staged := guard
+		publish(next)
+		suspended := firstClient.Account.GetX(ctx, accountID)
+		require.WithinDuration(t, time.Now().Add(35*time.Minute), *suspended.TempUnschedulableUntil, 5*time.Second)
+		require.Equal(t, *suspended.TempUnschedulableUntil, *suspended.TempUnschedulableProtectedUntil)
+		require.Equal(t, automaticDetectionSuspensionReason, *suspended.TempUnschedulableReason)
+		var receiptsJSON string
+		require.NoError(t, firstDB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=$1`, channelDetectionReceiptsSetting).Scan(&receiptsJSON))
+		receipts, err := decodeDetectionReceipts(receiptsJSON)
+		require.NoError(t, err)
+		require.True(t, receipts[groupID].Automatic)
+		require.Equal(t, id, receipts[groupID].SampleID)
+		require.Zero(t, receipts[groupID].ActorID)
+		require.NoError(t, firstDB.QueryRowContext(ctx, `SELECT count(*) FROM scheduler_outbox WHERE account_id=$1`, accountID).Scan(&outboxEvents))
+		require.Equal(t, 1, outboxEvents)
+		guard.Snapshot = readLatest()
+		require.NoError(t, json.Unmarshal([]byte(guard.Snapshot), &snapshot))
+		input.Guard, input.Proof = guard, snapshot.Proofs[groupID]
+		require.NoError(t, first.accounts.ClearTempUnschedulableManually(ctx, accountID))
+		ok, err = second.PublishSnapshot(ctx, "scheduled-worker", staged, next, groupID)
+		require.NoError(t, err)
+		require.False(t, ok, "an automatic publish cannot replay after recovery")
+		replay, err := second.Confirm(ctx, input)
+		require.NoError(t, err)
+		require.Equal(t, *suspended.TempUnschedulableUntil, replay.Until)
+		require.Nil(t, firstClient.Account.GetX(ctx, accountID).TempUnschedulableUntil)
+
+		_, next = stage("policy", "", true)
+		publish(next)
+		guard.Snapshot = readLatest()
+		require.NoError(t, json.Unmarshal([]byte(guard.Snapshot), &snapshot))
+		input.Proof = snapshot.Proofs[groupID]
+		scope, err := first.ConfirmationScope(ctx, selection, input.Proof, guard.Config)
+		require.NoError(t, err)
+		require.Equal(t, 35, scope.SuspendMinutes)
+		setPolicy(true, 12, "revised-policy")
+		input.Guard = guard
+		input.ScopeVersion = scope.Version
+		_, err = second.Confirm(ctx, input)
+		require.ErrorIs(t, err, service.ErrDetectionScopeChanged)
+		scope, err = first.ConfirmationScope(ctx, selection, input.Proof, guard.Config)
+		require.NoError(t, err)
+		require.Equal(t, 12, scope.SuspendMinutes)
+		input.ScopeVersion = scope.Version
+		confirmed, err := second.Confirm(ctx, input)
+		require.NoError(t, err)
+		require.WithinDuration(t, time.Now().Add(12*time.Minute), confirmed.Until, 5*time.Second)
+		protected := firstClient.Account.GetX(ctx, accountID)
+		_, next = stage("revised-policy", "revised-policy", true)
+		publish(next)
+		stillProtected := firstClient.Account.GetX(ctx, accountID)
+		require.Equal(t, protected.TempUnschedulableRevision, stillProtected.TempUnschedulableRevision)
+		require.Equal(t, protected.TempUnschedulableUntil, stillProtected.TempUnschedulableUntil)
+		require.Equal(t, channelDetectionSuspensionReason, *stillProtected.TempUnschedulableReason)
+	})
 }
 
 func TestTempUnschedulablePostgresOrdersWritesAfterRecovery(t *testing.T) {

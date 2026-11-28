@@ -19,24 +19,24 @@ import (
 )
 
 const (
-	SettingKeyChannelDetectionFeature  = "channel_detection_enabled"
-	SettingKeyChannelDetectionConfig   = "channel_detection_config"
-	SettingKeyChannelDetectionLatest   = "channel_detection_latest"
-	channelDetectionMaxGroups          = 16
-	channelDetectionMinInterval        = 15
-	channelDetectionMaxInterval        = 1440
-	channelDetectionRoundTimeout       = 130 * time.Second
-	channelDetectionLeaseTimeout       = 190 * time.Second
-	channelDetectionDefaultConcurrency = 3
-	channelDetectionMaxConcurrency     = 10
-	channelDetectionIdentityVersion    = 1
-	channelDetectionDailySends         = 672
-	channelDetectionRoundSends         = 2
+	SettingKeyChannelDetectionFeature     = "channel_detection_enabled"
+	SettingKeyChannelDetectionConfig      = "channel_detection_config"
+	SettingKeyChannelDetectionLatest      = "channel_detection_latest"
+	channelDetectionMaxGroups             = 16
+	channelDetectionMinInterval           = 15
+	channelDetectionMaxInterval           = 1440
+	channelDetectionRoundTimeout          = 130 * time.Second
+	channelDetectionLeaseTimeout          = 190 * time.Second
+	ChannelDetectionDefaultSuspendMinutes = 1440
+	ChannelDetectionMaxSuspendMinutes     = 10080
+	channelDetectionIdentityVersion       = 1
+	channelDetectionDailySends            = 672
+	channelDetectionRoundSends            = 2
 )
 
 var (
 	errDetectionDisabled = infraerrors.NotFound("CHANNEL_DETECTION_DISABLED", "Channel detection is disabled")
-	errDetectionConfig   = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_CONFIG", "Invalid detection interval, concurrency, or group selection")
+	errDetectionConfig   = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_CONFIG", "Invalid detection schedule, suspension duration, or group selection")
 	errDetectionModel    = infraerrors.BadRequest("CHANNEL_DETECTION_INVALID_MODEL", "Select an effective allowlist model in an active group")
 )
 
@@ -46,10 +46,12 @@ type ChannelDetectionSelection struct {
 }
 
 type ChannelDetectionConfig struct {
-	Enabled          bool                        `json:"enabled"`
-	IntervalMinutes  int                         `json:"interval_minutes"`
-	ConcurrentGroups *int                        `json:"concurrent_groups"`
-	Groups           []ChannelDetectionSelection `json:"groups"`
+	Enabled               bool                        `json:"enabled"`
+	IntervalMinutes       int                         `json:"interval_minutes"`
+	SuspendMinutes        *int                        `json:"suspend_minutes"`
+	AutoConfirmMissingSVG *bool                       `json:"auto_confirm_missing_svg"`
+	DailyAnchorTime       *string                     `json:"daily_anchor_time"`
+	Groups                []ChannelDetectionSelection `json:"groups"`
 }
 
 type ChannelDetectionGroup struct {
@@ -62,9 +64,10 @@ type ChannelDetectionGroup struct {
 }
 
 type ChannelDetectionSample struct {
-	CheckedAt time.Time `json:"checked_at"`
-	Pelican   string    `json:"pelican_status"`
-	SVG       string    `json:"svg,omitempty"`
+	CheckedAt           time.Time `json:"checked_at"`
+	Pelican             string    `json:"pelican_status"`
+	SVG                 string    `json:"svg,omitempty"`
+	completedMissingSVG bool
 }
 
 type ChannelDetectionPublicGroup struct {
@@ -75,8 +78,14 @@ type ChannelDetectionPublicGroup struct {
 
 type channelDetectionConfigRecord struct {
 	ChannelDetectionConfig
-	Revision string `json:"revision"`
-	stored   string
+	Revision           string `json:"revision"`
+	SuspensionRevision string `json:"suspension_revision,omitempty"`
+	stored             string
+}
+
+type channelDetectionImage struct {
+	Model string `json:"model"`
+	ChannelDetectionSample
 }
 
 type channelDetectionSnapshot struct {
@@ -89,6 +98,9 @@ type channelDetectionSnapshot struct {
 	RunningByGroup  map[int64]channelDetectionRun     `json:"running_by_group,omitempty"`
 	Proofs          map[int64]ChannelDetectionProof   `json:"proofs,omitempty"`
 	NoSend          map[int64]bool                    `json:"no_send,omitempty"`
+	Images          map[int64]channelDetectionImage   `json:"images,omitempty"`
+	ScheduleSince   map[int64]time.Time               `json:"schedule_since,omitempty"`
+	LastSlot        map[int64]time.Time               `json:"last_slot,omitempty"`
 	stored          string
 }
 
@@ -117,13 +129,15 @@ type ChannelDetectionSnapshotGuard struct {
 }
 
 type ChannelDetectionActiveLeases struct {
-	Groups      map[int64]string
-	LegacyOwner string
-	Blocked     bool
+	Groups       map[int64]string
+	LegacyOwner  string
+	Blocked      bool
+	Now          time.Time
+	FeatureSince time.Time
 }
 
-func (a ChannelDetectionActiveLeases) Full(limit int) bool {
-	return len(a.Groups) >= limit || a.LegacyOwner != "" || a.Blocked
+func (a ChannelDetectionActiveLeases) GloballyBlocked() bool {
+	return a.LegacyOwner != "" || a.Blocked
 }
 
 // ChannelDetectionCoordinator serializes probe runs and fences snapshot writes
@@ -167,26 +181,39 @@ func decodeChannelDetectionConfig(raw string) (channelDetectionConfigRecord, err
 			return config, err
 		}
 	}
-	if config.ConcurrentGroups == nil {
-		config.ConcurrentGroups = new(channelDetectionDefaultConcurrency)
-	}
-	if !validChannelDetectionConcurrency(*config.ConcurrentGroups) {
-		return config, errors.New("invalid stored channel detection concurrency")
+	config.applyDefaults(ChannelDetectionConfig{
+		SuspendMinutes:        new(ChannelDetectionDefaultSuspendMinutes),
+		AutoConfirmMissingSVG: new(false),
+		DailyAnchorTime:       new(""),
+	})
+	if !config.validPolicy() || (config.Enabled && (config.IntervalMinutes < channelDetectionMinInterval || config.IntervalMinutes > channelDetectionMaxInterval)) {
+		return config, errDetectionConfig
 	}
 	return config, nil
 }
 
-func validChannelDetectionConcurrency(limit int) bool {
-	return limit >= 1 && limit <= channelDetectionMaxConcurrency
+func (c *ChannelDetectionConfig) applyDefaults(previous ChannelDetectionConfig) {
+	if c.SuspendMinutes == nil {
+		c.SuspendMinutes = previous.SuspendMinutes
+	}
+	if c.AutoConfirmMissingSVG == nil {
+		c.AutoConfirmMissingSVG = previous.AutoConfirmMissingSVG
+	}
+	if c.DailyAnchorTime == nil {
+		c.DailyAnchorTime = previous.DailyAnchorTime
+	}
 }
 
-// ChannelDetectionConcurrency reads the effective limit from a settings value.
-func ChannelDetectionConcurrency(raw string) (int, error) {
-	config, err := decodeChannelDetectionConfig(raw)
-	if err != nil {
-		return 0, err
+func (c ChannelDetectionConfig) validPolicy() bool {
+	if *c.SuspendMinutes < 1 || *c.SuspendMinutes > ChannelDetectionMaxSuspendMinutes {
+		return false
 	}
-	return *config.ConcurrentGroups, nil
+	value := *c.DailyAnchorTime
+	if value == "" {
+		return true
+	}
+	parsed, err := time.Parse("15:04", value)
+	return err == nil && parsed.Format("15:04") == value
 }
 
 func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string, channelDetectionConfigRecord, channelDetectionSnapshot, error) {
@@ -231,6 +258,14 @@ func (s *ChannelDetection) state(ctx context.Context, withSamples bool) (string,
 		}
 		latest.LegacyRunning = nil
 	}
+	if latest.Images == nil {
+		// Upgrade the previous public image while the matching plan still
+		// identifies the model. Its original check time survives later failures.
+		latest.Images = make(map[int64]channelDetectionImage)
+		for _, selection := range config.Groups {
+			latest.rememberImage(selection, latest.Samples[selection.GroupID])
+		}
+	}
 	if latest.Feature != feature {
 		latest.cancelRuns()
 		latest.Feature = feature
@@ -259,11 +294,9 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 	if feature == "" {
 		return errDetectionDisabled
 	}
-	if input.ConcurrentGroups == nil {
-		input.ConcurrentGroups = current.ConcurrentGroups
-	}
+	input.applyDefaults(current.ChannelDetectionConfig)
 	if input.IntervalMinutes < channelDetectionMinInterval || input.IntervalMinutes > channelDetectionMaxInterval ||
-		!validChannelDetectionConcurrency(*input.ConcurrentGroups) ||
+		!input.validPolicy() ||
 		len(input.Groups) > channelDetectionMaxGroups || (input.Enabled && len(input.Groups) == 0) {
 		return errDetectionConfig
 	}
@@ -284,13 +317,19 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 	if input.Groups == nil {
 		input.Groups = []ChannelDetectionSelection{}
 	}
-	if current.Enabled == input.Enabled && current.IntervalMinutes == input.IntervalMinutes &&
-		*current.ConcurrentGroups == *input.ConcurrentGroups && slices.Equal(current.Groups, input.Groups) {
+	scheduleChanged := current.Enabled != input.Enabled || current.IntervalMinutes != input.IntervalMinutes ||
+		*current.DailyAnchorTime != *input.DailyAnchorTime
+	policyChanged := *current.SuspendMinutes != *input.SuspendMinutes || *current.AutoConfirmMissingSVG != *input.AutoConfirmMissingSVG
+	if !scheduleChanged && !policyChanged && slices.Equal(current.Groups, input.Groups) {
 		return nil
 	}
 	next := channelDetectionConfigRecord{
 		ChannelDetectionConfig: input,
 		Revision:               uuid.NewString(),
+		SuspensionRevision:     current.SuspensionRevision,
+	}
+	if policyChanged {
+		next.SuspensionRevision = uuid.NewString()
 	}
 	data, err := json.Marshal(next)
 	if err != nil {
@@ -317,8 +356,7 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 			latest = snapshot
 		}
 		guard := latest.guard(current)
-		if current.Enabled != input.Enabled || current.IntervalMinutes != input.IntervalMinutes ||
-			*current.ConcurrentGroups != *input.ConcurrentGroups {
+		if scheduleChanged {
 			latest.cancelRuns()
 		}
 		latest.Revision = next.Revision
@@ -327,6 +365,20 @@ func (s *ChannelDetection) Save(ctx context.Context, input ChannelDetectionConfi
 		maps.DeleteFunc(latest.Proofs, func(id int64, _ ChannelDetectionProof) bool { return !keep[id] })
 		maps.DeleteFunc(latest.AttemptedAt, func(id int64, _ time.Time) bool { return !keep[id] })
 		maps.DeleteFunc(latest.NoSend, func(id int64, _ bool) bool { return !keep[id] })
+		maps.DeleteFunc(latest.Images, func(id int64, _ channelDetectionImage) bool { return !keep[id] })
+		maps.DeleteFunc(latest.ScheduleSince, func(id int64, _ time.Time) bool { return !keep[id] || scheduleChanged })
+		maps.DeleteFunc(latest.LastSlot, func(id int64, _ time.Time) bool { return !keep[id] || scheduleChanged })
+		if *next.DailyAnchorTime != "" && next.Enabled {
+			if latest.ScheduleSince == nil {
+				latest.ScheduleSince = make(map[int64]time.Time)
+			}
+			for _, selection := range next.Groups {
+				if scheduleChanged || !keep[selection.GroupID] {
+					// SavePlan replaces this sentinel with the database activation time.
+					latest.ScheduleSince[selection.GroupID] = time.Time{}
+				}
+			}
+		}
 		snapshot, err := json.Marshal(latest)
 		if err != nil {
 			return err
@@ -449,13 +501,11 @@ func (s *ChannelDetection) resultGroups(ctx context.Context, feature string, con
 			return nil, err
 		}
 		result := ChannelDetectionPublicGroup{Name: group.Name, Model: selection.Model}
-		result.Sample = latest.Samples[selection.GroupID]
-		if result.Sample != nil && result.Sample.SVG != "" {
-			sample := *result.Sample
-			result.Sample = &sample
-			result.Sample.SVG = sanitizeDetectionSVG(result.Sample.SVG)
-			if result.Sample.SVG == "" {
-				result.Sample.Pelican = "error"
+		if image := latest.Images[selection.GroupID]; image.Model == selection.Model {
+			if svg := sanitizeDetectionSVG(image.SVG); svg != "" {
+				sample := image.ChannelDetectionSample
+				sample.SVG = svg
+				result.Sample = &sample
 			}
 		}
 		ranked = append(ranked, channelDetectionResultGroup{id: group.ID, result: result, rateMultiplier: group.RateMultiplier})
@@ -564,25 +614,21 @@ func (s *ChannelDetection) tick(ctx context.Context) {
 		return
 	}
 	active, err := s.coordinator.ActiveLeases(checkCtx)
-	limit := *config.ConcurrentGroups
-	if err != nil || active.Full(limit) {
+	if err != nil || active.GloballyBlocked() {
 		return
 	}
 	groups := slices.Clone(config.Groups)
 	slices.SortStableFunc(groups, func(a, b ChannelDetectionSelection) int {
 		return latest.AttemptedAt[a.GroupID].Compare(latest.AttemptedAt[b.GroupID])
 	})
-	available := limit - len(active.Groups)
-	now := time.Now()
 	for _, selection := range groups {
-		if checkCtx.Err() != nil || available == 0 || !detectionGroupDue(config, latest, selection.GroupID, now) {
+		if checkCtx.Err() != nil {
 			return
 		}
-		if active.Groups[selection.GroupID] == "" {
-			if _, err := s.admit(checkCtx, selection, latest.guard(config), "automatic"); err == nil {
-				available--
-			}
+		if active.Groups[selection.GroupID] != "" || !detectionGroupDue(config, latest, selection.GroupID, active.Now, active.FeatureSince) {
+			continue
 		}
+		_, _ = s.admit(checkCtx, selection, latest.guard(config), "automatic")
 	}
 }
 
@@ -622,27 +668,39 @@ func (s *ChannelDetection) admit(ctx context.Context, selection ChannelDetection
 		}
 	}()
 
-	if _, err := s.probeGroup(ctx, selection); err != nil {
+	group, err := s.probeGroup(ctx, selection)
+	if err != nil {
 		if errors.Is(err, errDetectionModel) {
 			err = ErrDetectionChanged
 		}
 		return "", err
 	}
 	run := channelDetectionRun{GroupID: id, Owner: owner, SampleID: uuid.NewString(), Source: source}
-	var previousNoSend bool
+	active, err := s.coordinator.ActiveLeases(ctx)
+	if err != nil {
+		return "", err
+	}
 	started, err := s.updateRunSnapshot(ctx, run, expected, false, func(config channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
-		now := time.Now().UTC()
+		now := active.Now.UTC()
 		if !slices.Contains(config.Groups, selection) ||
-			(source == "automatic" && !detectionGroupDue(config, *latest, id, now)) {
+			(source == "automatic" && !detectionGroupDue(config, *latest, id, now, active.FeatureSince)) {
 			return false
+		}
+		if source == "automatic" && *config.DailyAnchorTime != "" {
+			if latest.LastSlot == nil {
+				latest.LastSlot = make(map[int64]time.Time)
+			}
+			latest.LastSlot[id] = channelDetectionSlot(*config.DailyAnchorTime, config.IntervalMinutes, now)
+		}
+		if *config.AutoConfirmMissingSVG {
+			run.SuspensionRevision = config.SuspensionRevision
+			run.GroupPlatform = group.Platform
 		}
 		run.PreviousAttemptedAt = nil
 		if previous, exists := latest.AttemptedAt[id]; exists {
 			run.PreviousAttemptedAt = &previous
 		}
-		previousNoSend = latest.NoSend[id]
 		latest.RunningByGroup[id] = run
-		delete(latest.NoSend, id)
 		latest.AttemptedAt[id] = now
 		return true
 	})
@@ -671,12 +729,6 @@ func (s *ChannelDetection) admit(ctx context.Context, selection ChannelDetection
 				delete(latest.AttemptedAt, id)
 			} else {
 				latest.AttemptedAt[id] = *marker.PreviousAttemptedAt
-			}
-			if previousNoSend {
-				if latest.NoSend == nil {
-					latest.NoSend = make(map[int64]bool)
-				}
-				latest.NoSend[id] = true
 			}
 			return true
 		})
@@ -728,7 +780,7 @@ func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run ch
 		return ok
 	}
 	go watchDetectionConfiguration(roundCtx, current, cancel)
-	budget := &detectionRoundBudget{reserve: func(ctx context.Context, group *Group) (bool, error) {
+	budget := &detectionRoundBudget{trackCompletion: run.SuspensionRevision != "", reserve: func(ctx context.Context, group *Group) (bool, error) {
 		guard, current, err := currentGuard(ctx)
 		if err != nil || !current {
 			return false, err
@@ -759,20 +811,25 @@ func (s *ChannelDetection) run(ctx context.Context, gateway http.Handler, run ch
 		return
 	}
 	proof, entered := budget.proof(run)
-	noSend := run.Source == "manual" && !entered
-	_, err := s.updateRunSnapshot(writeCtx, run, expected, !noSend, func(_ channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
+	if roundCtx.Err() == nil && sample.completedMissingSVG && budget.autoConfirmable() {
+		proof.SuspensionRevision = run.SuspensionRevision
+	}
+	noSend := !entered && sample.Pelican != "generated"
+	_, err := s.updateRunSnapshot(writeCtx, run, expected, true, func(_ channelDetectionConfigRecord, latest *channelDetectionSnapshot) bool {
 		if !latest.matchesRun(run) {
 			return false
 		}
 		delete(latest.RunningByGroup, id)
+		delete(latest.NoSend, id)
 		if noSend {
+			sample.Pelican = "untested"
 			if latest.NoSend == nil {
 				latest.NoSend = make(map[int64]bool)
 			}
 			latest.NoSend[id] = true
-			return true
 		}
-		latest.Samples[id] = sample
+		latest.rememberImage(selection, sample)
+		latest.Samples[id] = &ChannelDetectionSample{CheckedAt: sample.CheckedAt, Pelican: sample.Pelican}
 		if latest.Proofs == nil {
 			latest.Proofs = make(map[int64]ChannelDetectionProof)
 		}
@@ -824,8 +881,38 @@ func (s *ChannelDetection) updateRunSnapshot(ctx context.Context, run channelDet
 	return false, ctx.Err()
 }
 
-func detectionGroupDue(config channelDetectionConfigRecord, latest channelDetectionSnapshot, id int64, now time.Time) bool {
-	return !latest.AttemptedAt[id].Add(time.Duration(config.IntervalMinutes) * time.Minute).After(now)
+func (latest *channelDetectionSnapshot) rememberImage(selection ChannelDetectionSelection, sample *ChannelDetectionSample) {
+	if sample == nil || sample.Pelican != "generated" {
+		return
+	}
+	svg := sanitizeDetectionSVG(sample.SVG)
+	if svg == "" {
+		return
+	}
+	latest.Images[selection.GroupID] = channelDetectionImage{Model: selection.Model, ChannelDetectionSample: ChannelDetectionSample{
+		CheckedAt: sample.CheckedAt, Pelican: "generated", SVG: svg,
+	}}
+}
+
+var channelDetectionBeijing = time.FixedZone("UTC+8", 8*60*60)
+
+func channelDetectionSlot(anchorTime string, minutes int, now time.Time) time.Time {
+	anchor, _ := time.Parse("15:04", anchorTime)
+	local := now.In(channelDetectionBeijing)
+	start := time.Date(local.Year(), local.Month(), local.Day(), anchor.Hour(), anchor.Minute(), 0, 0, channelDetectionBeijing)
+	if local.Before(start) {
+		start = start.AddDate(0, 0, -1)
+	}
+	interval := time.Duration(minutes) * time.Minute
+	return start.Add(local.Sub(start) / interval * interval).UTC()
+}
+
+func detectionGroupDue(config channelDetectionConfigRecord, latest channelDetectionSnapshot, id int64, now, featureSince time.Time) bool {
+	if *config.DailyAnchorTime == "" {
+		return !latest.AttemptedAt[id].Add(time.Duration(config.IntervalMinutes) * time.Minute).After(now)
+	}
+	slot := channelDetectionSlot(*config.DailyAnchorTime, config.IntervalMinutes, now)
+	return slot.After(featureSince) && slot.After(latest.ScheduleSince[id]) && slot.After(latest.LastSlot[id])
 }
 
 func watchDetectionConfiguration(ctx context.Context, current func(context.Context) bool, cancel context.CancelFunc) {

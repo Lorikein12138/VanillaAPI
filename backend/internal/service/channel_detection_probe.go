@@ -37,15 +37,18 @@ var (
 type detectionBindingKey struct{}
 
 type detectionRoundBudget struct {
-	mu               sync.Mutex
-	reserve          func(context.Context, *Group) (bool, error)
-	sends            int
-	accountingFailed bool
-	attempts         int
-	provenSends      int
-	accountID        int64
-	routeFingerprint string
-	ambiguous        bool
+	mu                 sync.Mutex
+	reserve            func(context.Context, *Group) (bool, error)
+	sends              int
+	accountingFailed   bool
+	usageSettled       int
+	completedResponses int
+	trackCompletion    bool
+	attempts           int
+	provenSends        int
+	accountID          int64
+	routeFingerprint   string
+	ambiguous          bool
 }
 
 type detectionBinding struct {
@@ -318,7 +321,10 @@ func (s *ChannelDetection) probe(ctx context.Context, gateway http.Handler, sele
 	req.Header.Set("X-Client-Request-Id", session)
 	writer := &detectionCapture{header: make(http.Header), cancel: cancel}
 	gateway.ServeHTTP(writer, req)
-	if budget.accountingFailed {
+	budget.mu.Lock()
+	accountingFailed := budget.accountingFailed
+	budget.mu.Unlock()
+	if accountingFailed {
 		return "", errDetectionAccounting
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -398,6 +404,7 @@ func (s *ChannelDetection) runSample(ctx context.Context, gateway http.Handler, 
 		if !errors.Is(err, errDetectionDispatch) && !errors.Is(err, errDetectionBudget) {
 			result.Pelican = "error"
 		}
+		result.completedMissingSVG = errors.Is(err, errDetectionNoText)
 		return result
 	}
 	var category string
@@ -406,6 +413,7 @@ func (s *ChannelDetection) runSample(ctx context.Context, gateway http.Handler, 
 		result.Pelican = "generated"
 	} else {
 		result.Pelican = "error"
+		result.completedMissingSVG = true
 		slog.Info("channel_detection.question_failed", "group_id", selection.GroupID, "model", selection.Model,
 			"question", "pelican", "category", category)
 	}

@@ -142,7 +142,7 @@ func TestChannelDetectionAnonymousRoutesNoStoreAndRateLimit(t *testing.T) {
 	request("/admin/channel-detection", http.StatusUnauthorized)
 }
 
-func TestChannelDetectionAdminConcurrencyConfig(t *testing.T) {
+func TestChannelDetectionAdminScheduleConfig(t *testing.T) {
 	repo := detectionRouteSettings{values: map[string]string{
 		service.SettingKeyChannelDetectionFeature: "on",
 		service.SettingKeyChannelDetectionConfig:  `{"enabled":false,"interval_minutes":60,"groups":[]}`,
@@ -157,11 +157,18 @@ func TestChannelDetectionAdminConcurrencyConfig(t *testing.T) {
 		require.Equal(t, status, recorder.Code, recorder.Body.String())
 		return recorder.Body.String()
 	}
-	require.Contains(t, request(http.MethodGet, "", http.StatusOK), `"concurrent_groups":3`)
-	request(http.MethodPut, `{"enabled":false,"interval_minutes":60,"groups":[]}`, http.StatusOK)
-	request(http.MethodPut, `{"enabled":false,"interval_minutes":60,"groups":[],"concurrent_groups":3}`, http.StatusOK)
+	body := request(http.MethodGet, "", http.StatusOK)
+	require.Contains(t, body, `"suspend_minutes":1440`)
+	require.Contains(t, body, `"auto_confirm_missing_svg":false`)
+	require.Contains(t, body, `"daily_anchor_time":""`)
+	require.NotContains(t, body, "concurrent_groups")
+	base := `{"enabled":false,"interval_minutes":60,"groups":[]`
+	request(http.MethodPut, base+"}", http.StatusOK)
 	for _, value := range []string{"0", "-1", "11", "1.5", `"3"`, "null"} {
-		request(http.MethodPut, `{"interval_minutes":60,"concurrent_groups":`+value+`}`, http.StatusBadRequest)
+		request(http.MethodPut, base+`,"concurrent_groups":`+value+"}", http.StatusOK)
+	}
+	for _, field := range []string{`"suspend_minutes":0`, `"suspend_minutes":10081`, `"suspend_minutes":1.5`, `"suspend_minutes":"30"`, `"daily_anchor_time":"8:00"`, `"daily_anchor_time":"24:00"`, `"daily_anchor_time":"07:60"`, `"auto_confirm_missing_svg":"true"`} {
+		request(http.MethodPut, base+","+field+"}", http.StatusBadRequest)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 const channelDetectionLeaseSetting = "channel_detection_lease"
@@ -123,18 +124,6 @@ func (r *channelDetectionCoordinator) TryAcquire(ctx context.Context, groupID in
 	if err != nil || blocked || lease.Groups[groupID].Owner != "" {
 		return false, err
 	}
-	// SavePlan also locks the lease before the config. Read the limit under
-	// those locks so a worker with an older plan cannot bypass a lowered cap.
-	var raw string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = $1 FOR SHARE`,
-		service.SettingKeyChannelDetectionConfig).Scan(&raw)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	limit, err := service.ChannelDetectionConcurrency(raw)
-	if err != nil || len(lease.Groups) >= limit {
-		return false, err
-	}
 	lease.Groups[groupID] = channelDetectionLeaseSlot{Owner: owner, ExpiresAt: now.Add(ttl)}
 	if err := storeDetectionLease(ctx, tx, lease); err != nil {
 		return false, err
@@ -145,18 +134,19 @@ func (r *channelDetectionCoordinator) TryAcquire(ctx context.Context, groupID in
 
 func (r *channelDetectionCoordinator) ActiveLeases(ctx context.Context) (service.ChannelDetectionActiveLeases, error) {
 	var raw string
-	var expiry, now time.Time
-	err := r.db.QueryRowContext(ctx, `SELECT value, updated_at, clock_timestamp() FROM settings WHERE key = $1`,
-		channelDetectionLeaseSetting).Scan(&raw, &expiry, &now)
-	if errors.Is(err, sql.ErrNoRows) {
-		return service.ChannelDetectionActiveLeases{}, nil
-	}
+	var expiry, now, featureSince time.Time
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(lease.value, ''), COALESCE(lease.updated_at, now()), clock_timestamp(), COALESCE(feature.updated_at, now())
+		FROM (SELECT 1) AS root
+		LEFT JOIN settings AS lease ON lease.key = $1
+		LEFT JOIN settings AS feature ON feature.key = $2
+	`, channelDetectionLeaseSetting, service.SettingKeyChannelDetectionFeature).Scan(&raw, &expiry, &now, &featureSince)
 	if err != nil {
 		return service.ChannelDetectionActiveLeases{}, err
 	}
 	lease, legacy, unknown := decodeDetectionLease(raw, expiry, now)
 	lease.prune(now)
-	active := service.ChannelDetectionActiveLeases{Groups: make(map[int64]string, len(lease.Groups)), LegacyOwner: legacy, Blocked: unknown}
+	active := service.ChannelDetectionActiveLeases{Groups: make(map[int64]string, len(lease.Groups)), LegacyOwner: legacy, Blocked: unknown, Now: now, FeatureSince: featureSince}
 	for id, slot := range lease.Groups {
 		active.Groups[id] = slot.Owner
 	}
@@ -260,6 +250,11 @@ func (r *channelDetectionCoordinator) SavePlan(ctx context.Context, expected ser
 	if err := reconcileDetectionPlan(ctx, tx, expected.Config, nextConfig); err != nil {
 		return false, err
 	}
+	// Resolve activation sentinels only when the locked replacement plan
+	// becomes effective. Older snapshots do not have this field.
+	if nextSnapshot, err = stampDetectionSchedule(ctx, tx, nextSnapshot); err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO settings (key,value,updated_at) VALUES ($1,$2,clock_timestamp()),($3,$4,clock_timestamp())
 		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
@@ -267,6 +262,44 @@ func (r *channelDetectionCoordinator) SavePlan(ctx context.Context, expected ser
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+func stampDetectionSchedule(ctx context.Context, tx *sql.Tx, next string) (string, error) {
+	if !json.Valid([]byte(next)) {
+		return next, nil
+	}
+	var snapshot struct {
+		ScheduleSince map[string]time.Time `json:"schedule_since"`
+	}
+	if err := json.Unmarshal([]byte(next), &snapshot); err != nil {
+		return next, err
+	}
+	var now time.Time
+	for id, since := range snapshot.ScheduleSince {
+		if !since.IsZero() {
+			continue
+		}
+		if now.IsZero() {
+			if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+				return "", err
+			}
+		}
+		snapshot.ScheduleSince[id] = now.UTC()
+	}
+	if now.IsZero() {
+		return next, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(next), &fields); err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(snapshot.ScheduleSince)
+	if err != nil {
+		return "", err
+	}
+	fields["schedule_since"] = raw
+	encoded, err := json.Marshal(fields)
+	return string(encoded), err
 }
 
 func reconcileDetectionPlan(ctx context.Context, tx sqlExecutor, previousRaw, nextRaw string) error {
@@ -473,7 +506,93 @@ func (r *channelDetectionCoordinator) CompareAndSetSnapshot(ctx context.Context,
 }
 
 func (r *channelDetectionCoordinator) PublishSnapshot(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string, completedGroupID int64) (bool, error) {
-	return r.writeSnapshot(ctx, completedGroupID, owner, expected, next, completedGroupID)
+	var latest detectionConfirmationSnapshot
+	if err := json.Unmarshal([]byte(next), &latest); err != nil {
+		return false, err
+	}
+	plan, err := readDetectionConfirmationPlan(expected.Config)
+	if err != nil {
+		return false, err
+	}
+	proof := latest.Proofs[completedGroupID]
+	sample := latest.Samples[completedGroupID]
+	if plan.AutoConfirmMissingSVG == nil || !*plan.AutoConfirmMissingSVG || !plan.Enabled ||
+		plan.SuspensionRevision == "" || plan.SuspensionRevision != proof.SuspensionRevision ||
+		latest.Revision != plan.Revision || latest.Feature != expected.Feature || sample == nil ||
+		sample.Pelican != "error" || sample.SVG != "" || latest.NoSend[completedGroupID] {
+		return r.writeSnapshot(ctx, completedGroupID, owner, expected, next, completedGroupID)
+	}
+	for _, selection := range plan.Groups {
+		if selection.GroupID == completedGroupID {
+			return r.publishDetectionWithConfirmation(ctx, owner, expected, next, selection, plan, latest)
+		}
+	}
+	return false, nil
+}
+
+func (r *channelDetectionCoordinator) publishDetectionWithConfirmation(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string, selection service.ChannelDetectionSelection, plan detectionConfirmationPlan, latest detectionConfirmationSnapshot) (bool, error) {
+	for attempt := 0; ; attempt++ {
+		published, receipt, err := r.publishAndConfirmDetection(ctx, owner, expected, next, selection, plan, latest)
+		var pgErr *pq.Error
+		if attempt < 1 && errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001") {
+			continue
+		}
+		if err == nil && receipt.AccountID > 0 {
+			r.syncDetectionConfirmation(ctx, receipt)
+		}
+		return published, err
+	}
+}
+
+func (r *channelDetectionCoordinator) publishAndConfirmDetection(ctx context.Context, owner string, expected service.ChannelDetectionSnapshotGuard, next string, selection service.ChannelDetectionSelection, plan detectionConfirmationPlan, latest detectionConfirmationSnapshot) (bool, channelDetectionReceipt, error) {
+	var receipt channelDetectionReceipt
+	id := selection.GroupID
+	tx, err := r.accounts.client.Tx(ctx)
+	if err != nil {
+		return false, receipt, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	ctx = dbent.NewTxContext(ctx, tx)
+	client := tx.Client()
+	deadline, ok, err := lockChannelDetectionState(ctx, client, id, owner, expected)
+	if err != nil || !ok {
+		return false, receipt, err
+	}
+	var previous detectionConfirmationSnapshot
+	if err := json.Unmarshal([]byte(expected.Snapshot), &previous); err != nil {
+		return false, receipt, err
+	}
+	proof := latest.Proofs[id]
+	run := previous.Running[id]
+	if run.Owner != owner || run.SampleID != proof.SampleID || latest.Running[id].Owner != "" {
+		return false, receipt, nil
+	}
+	ok, err = writeDetectionSnapshot(ctx, client, expected, next, id, deadline)
+	if err != nil || !ok {
+		return false, receipt, err
+	}
+	if run.SuspensionRevision == plan.SuspensionRevision {
+		var completed time.Time
+		err := scanDetectionRow(ctx, client, `
+			SELECT (value::jsonb #>> ARRAY['proofs', $2::text, 'completed_at'])::timestamptz FROM settings WHERE key = $1
+		`, []any{&completed}, service.SettingKeyChannelDetectionLatest, strconv.FormatInt(id, 10))
+		if err != nil {
+			return false, receipt, err
+		}
+		proof.CompletedAt = &completed
+		if proof.Attributable() {
+			input := service.ChannelDetectionConfirmationRequest{Selection: selection, Proof: proof, GroupPlatform: run.GroupPlatform}
+			receipt, err = r.applyDetectionConfirmation(ctx, client, input, latest, plan, deadline)
+			if err != nil && !errors.Is(err, service.ErrDetectionChanged) &&
+				!errors.Is(err, service.ErrDetectionScopeChanged) && !errors.Is(err, service.ErrDetectionProtected) {
+				return false, receipt, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, receipt, err
+	}
+	return true, receipt, nil
 }
 
 func (r *channelDetectionCoordinator) writeSnapshot(ctx context.Context, groupID int64, owner string, expected service.ChannelDetectionSnapshotGuard, next string, completedGroupID int64) (bool, error) {
@@ -488,7 +607,15 @@ func (r *channelDetectionCoordinator) writeSnapshot(ctx context.Context, groupID
 		return false, err
 	}
 
-	result, err := tx.ExecContext(ctx, `
+	ok, err = writeDetectionSnapshot(ctx, tx, expected, next, completedGroupID, deadline)
+	if err != nil || !ok {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+func writeDetectionSnapshot(ctx context.Context, exec sqlExecutor, expected service.ChannelDetectionSnapshotGuard, next string, completedGroupID int64, deadline time.Time) (bool, error) {
+	result, err := exec.ExecContext(ctx, `
 		INSERT INTO settings (key, value, updated_at)
 		SELECT $1::varchar, CASE WHEN $5::text = '0' THEN $2::text ELSE
 			jsonb_set($2::jsonb, ARRAY['proofs', $5::text, 'completed_at'], to_jsonb(clock_timestamp()))::text
@@ -502,11 +629,5 @@ func (r *channelDetectionCoordinator) writeSnapshot(ctx context.Context, groupID
 		return false, err
 	}
 	n, err := result.RowsAffected()
-	if err != nil || n != 1 {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return n == 1, err
 }
