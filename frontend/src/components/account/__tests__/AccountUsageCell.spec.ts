@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import AccountUsageCell from '../AccountUsageCell.vue'
 import type { Account, AccountUsageInfo } from '@/types'
+import { setSiteDisplayCurrency } from '@/utils/siteCurrency'
 
 const { getUsage } = vi.hoisted(() => ({
   getUsage: vi.fn()
@@ -113,6 +114,60 @@ const cnUsageCellStubs = {
 }
 
 describe('AccountUsageCell', () => {
+  it('shows small nonzero Antigravity quota usage', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'claude-sonnet-4-5': { utilization: 0.021136, reset_time: '2026-10-21T01:00:00Z' }
+      }
+    })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: makeAccount({ id: 6401 }) },
+      global: { stubs: { AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('0.02%')
+    wrapper.unmount()
+  })
+
+  it('shows Antigravity local usage and separate account/user costs when the upstream query fails', async () => {
+    getUsage.mockRejectedValue(new Error('upstream quota unavailable'))
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 6401 }),
+        todayStats: { requests: 56, tokens: 5715898, cost: 2.6253228, user_cost: 0.003426 }
+      },
+      global: { stubs: { AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('56 admin.dashboard.requestsShort')
+    expect(wrapper.find('[title="usage.accountBilled"]').text()).toBe('A $2.63')
+    expect(wrapper.find('[title="usage.userBilled"]').text()).toBe('· U $0.00')
+    wrapper.unmount()
+  })
+
+  it('renders zero local usage without inventing a user cost', async () => {
+    getUsage.mockResolvedValue({})
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 6402 }),
+        todayStats: { requests: 0, tokens: 0, cost: 0 }
+      },
+      global: { stubs: { AccountQuotaInfo: true } }
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('0 admin.dashboard.requestsShort')
+    expect(wrapper.find('[title="usage.accountBilled"]').text()).toBe('A $0.00')
+    expect(wrapper.find('[title="usage.userBilled"]').exists()).toBe(false)
+    setSiteDisplayCurrency('CNY')
+    try {
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[title="usage.accountBilled"]').text()).toBe('A ¥0.00')
+    } finally {
+      setSiteDisplayCurrency('USD')
+    }
+    wrapper.unmount()
+  })
+
   it.each([
     ['anthropic', 'oauth'], ['anthropic', 'setup-token'], ['gemini', 'oauth'], ['gemini', 'apikey']
   ] as const)('refreshes %s %s snapshots without forcing upstream reads and reuses the new cache', async (platform, type) => {
@@ -131,6 +186,61 @@ describe('AccountUsageCell', () => {
     await wrapper.setProps({ account: { ...next, updated_at: 'unrelated', current_concurrency: 3 } })
     await flushPromises()
     expect(getUsage).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('refetches Gemini usage when the account quota tier changes', async () => {
+    const account = makeAccount({ id: 98210, platform: 'gemini', type: 'oauth', credentials: { oauth_type: 'google_one', tier_id: 'google_ai_pro' } })
+    getUsage.mockResolvedValue({ gemini_shared_daily: { utilization: 31 } })
+    const wrapper = mount(AccountUsageCell, { props: { account } })
+    await flushPromises()
+    expect(getUsage).toHaveBeenCalledTimes(1)
+    expect(getUsage).toHaveBeenLastCalledWith(account.id)
+    await wrapper.setProps({ account: { ...account, credentials: { ...account.credentials, tier_id: 'google_ai_ultra' } } })
+    await flushPromises()
+    expect(getUsage).toHaveBeenCalledTimes(2)
+    expect(getUsage).toHaveBeenLastCalledWith(account.id)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('sends one usage request when a relay Gemini base_url becomes the official one (batch %s)', async (batch) => {
+    const requestBatchedUsage = vi.fn()
+    const relayAccount = (baseUrl: string) => makeAccount({
+      id: 98220,
+      platform: 'gemini',
+      type: 'apikey',
+      credentials: { base_url: baseUrl, tier_id: 'aistudio_free' }
+    })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: relayAccount('https://relay.example'), ...(batch ? { requestBatchedUsage } : {}) }
+    })
+    const calls = () => (batch ? requestBatchedUsage.mock.calls.length : getUsage.mock.calls.length)
+    await flushPromises()
+    const before = calls()
+    await wrapper.setProps({ account: relayAccount('https://generativelanguage.googleapis.com') })
+    await flushPromises()
+    expect(calls() - before).toBe(1)
+    if (!batch) expect(getUsage).toHaveBeenLastCalledWith(98220)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('sends no usage request when one relay Gemini base_url becomes another (batch %s)', async (batch) => {
+    const requestBatchedUsage = vi.fn()
+    const relayAccount = (baseUrl: string) => makeAccount({
+      id: 98230,
+      platform: 'gemini',
+      type: 'apikey',
+      credentials: { base_url: baseUrl, tier_id: 'aistudio_free' }
+    })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account: relayAccount('https://relay.example'), ...(batch ? { requestBatchedUsage } : {}) }
+    })
+    const calls = () => (batch ? requestBatchedUsage.mock.calls.length : getUsage.mock.calls.length)
+    await flushPromises()
+    const before = calls()
+    await wrapper.setProps({ account: relayAccount('https://relay2.example') })
+    await flushPromises()
+    expect(calls()).toBe(before)
     wrapper.unmount()
   })
 

@@ -145,6 +145,26 @@ const baseImageRow = {
 }
 
 describe('admin UsageTable tooltip', () => {
+  it('points toward the token trigger after flipping at the viewport edge', async () => {
+    const wrapper = mount(UsageTable, {
+      props: { data: [baseImageRow], loading: false, columns: [] },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    vi.stubGlobal('innerWidth', 375)
+    const trigger = wrapper.get('.group.relative')
+    vi.spyOn(trigger.element, 'getBoundingClientRect').mockReturnValue(new DOMRect(340, 60, 20, 20))
+    try {
+      await trigger.trigger('mouseenter')
+      await nextTick()
+      const tooltip = wrapper.get<HTMLElement>('.fixed')
+      expect(tooltip.element.style.left).toBe('232px')
+      expect(tooltip.find('.-right-1').exists()).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+      wrapper.unmount()
+    }
+  })
+
   it('shows the two OpenAI cache-write buckets without Anthropic lifetime labels', async () => {
     const row = { ...baseImageRow, image_count: 0, billing_mode: 'token', cache_creation_tokens: 2399, cache_creation_30m_tokens: 9, cache_creation_12h_tokens: 2390 }
     const wrapper = mount(UsageTable, {
@@ -305,6 +325,37 @@ describe('admin UsageTable tooltip', () => {
     wrapper.unmount()
   })
 
+  it('keeps the cost tooltip inside a narrow mobile viewport', async () => {
+    const originalWidth = window.innerWidth
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      // 浮层宽 260，触发图标贴在 375px 视口右侧
+      if (this.classList.contains('fixed')) return { left: 0, top: 0, right: 260, bottom: 200, width: 260, height: 200 } as DOMRect
+      return { left: 340, top: 100, right: 356, bottom: 116, width: 16, height: 16 } as DOMRect
+    })
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 })
+    const wrapper = mount(UsageTable, {
+      props: { data: [{ ...baseImageRow, billing_mode: 'token', image_count: 0, input_cost: 0.01, input_tokens: 100 }], loading: false, columns: [] },
+      global: { stubs: { DataTable: DataTableStub, EmptyState: true, Icon: true, Teleport: true } },
+    })
+    try {
+      const triggers = wrapper.findAll('.group.relative')
+      await triggers[triggers.length - 1].trigger('mouseenter')
+      await nextTick()
+      await nextTick()
+      const style = wrapper.get('.fixed').attributes('style') ?? ''
+      const left = Number(style.match(/left:\s*([\d.]+)px/)?.[1])
+      const top = Number(style.match(/top:\s*([\d.]+)px/)?.[1])
+      expect(left).toBe(340 - 8 - 260)
+      expect(left + 260).toBeLessThanOrEqual(375)
+      // 与图标垂直居中（108 - 100），再夹到视口上边距 8
+      expect(top).toBe(8)
+    } finally {
+      wrapper.unmount()
+      rectSpy.mockRestore()
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
+  })
+
   it('shows service tier and billing breakdown in cost tooltip', async () => {
     const row = {
       request_id: 'req-admin-1',
@@ -438,6 +489,47 @@ describe('admin UsageTable tooltip', () => {
     const text = wrapper.text()
     expect(text).toContain('claude-sonnet-4')
     expect(text).toContain('claude-sonnet-4-20250514')
+  })
+
+  it.each([
+    ['shows', 'gpt-5.5-2026-01-01', true],
+    ['hides', null, false],
+  ])('%s the actual response model for user rows', (_label, responseModel, visible) => {
+    const row = {
+      request_id: 'req-user-model-1',
+      model: 'gpt-5.5',
+      response_model: responseModel,
+      actual_cost: 0,
+      total_cost: 0,
+      rate_multiplier: 1,
+      input_cost: 0,
+      output_cost: 0,
+      cache_creation_cost: 0,
+      cache_read_cost: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+    }
+
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [row],
+        loading: false,
+        columns: [],
+        showAccountBilling: false,
+      },
+      global: {
+        stubs: {
+          DataTable: DataTableStub,
+          EmptyState: true,
+          Icon: true,
+          Teleport: true,
+        },
+      },
+    })
+
+    const text = wrapper.text()
+    expect(text).toContain('gpt-5.5')
+    expect(text.includes('↳gpt-5.5-2026-01-01') || text.includes('↳ gpt-5.5-2026-01-01')).toBe(visible)
   })
 
   it('shows requested and forwarded reasoning effort separately when they differ', () => {
@@ -932,5 +1024,44 @@ describe('admin UsageTable deleted-user badge', () => {
 
     expect(wrapper.text()).not.toContain('Deleted')
     expect(wrapper.text()).toContain('active@test.com')
+  })
+})
+
+describe('admin UsageTable username column', () => {
+  const DataTableStubWithUsername = {
+    props: ['data'],
+    template: `
+      <div>
+        <div v-for="row in data" :key="row.request_id" :data-request-id="row.request_id">
+          <slot name="cell-username" :row="row" />
+        </div>
+      </div>
+    `,
+  }
+
+  it('renders trimmed username when present and falls back to "-" when empty or missing', () => {
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [
+          { ...baseImageRow, request_id: 'req-with-username', user_id: 1, user: { id: 1, email: 'alice@test.com', username: '  Alice  ' } },
+          { ...baseImageRow, request_id: 'req-empty-username', user_id: 2, user: { id: 2, email: 'bob@test.com', username: '   ' } },
+          { ...baseImageRow, request_id: 'req-no-user', user_id: 3 },
+        ],
+        loading: false,
+        columns: [{ key: 'username', label: 'Username' }],
+      },
+      global: {
+        stubs: {
+          DataTable: DataTableStubWithUsername,
+          EmptyState: true,
+          Icon: true,
+          Teleport: true,
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-request-id="req-with-username"]').text()).toBe('Alice')
+    expect(wrapper.get('[data-request-id="req-empty-username"]').text()).toBe('-')
+    expect(wrapper.get('[data-request-id="req-no-user"]').text()).toBe('-')
   })
 })

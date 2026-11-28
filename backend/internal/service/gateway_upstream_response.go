@@ -904,6 +904,9 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	needModelReplace := originalModel != mappedModel
 	clientModel := compositeClientModel(ctx, "")
 	clientDisconnected := false // 客户端断开标志，断开后继续读取上游以获取完整usage
+	toolNameRestorer := newToolNameStreamRestorer(toolNameRewriteFromContext(c))
+	var advisorBlockIndexes map[int64]bool
+	wroteDataEvent := false
 	sawTerminalEvent := false
 	useNoopDeltaKeepalive := c != nil && c.Request != nil && shouldUseClaudeCodeNoopDeltaKeepalive(c.GetHeader("User-Agent"))
 	noopDeltaKeepaliveBlockIndex := -1
@@ -1110,6 +1113,62 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 		return []string{block}, string(newData), usagePatch, nil
 	}
 
+	markDisconnected := func() {
+		clientDisconnected = true
+		logger.LegacyPrintf("service.gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
+		// 不 break：客户端断开后仍需继续合并本事件及后续事件的 usage，
+		// 否则会漏计当前事件携带的 usage 导致少计费。后续写入由
+		// clientDisconnected 守卫跳过。
+	}
+
+	writeRestoredBlock := func(block, payload string, advisorOwned bool) {
+		if clientDisconnected {
+			return
+		}
+		if !advisorOwned {
+			block = advisor.restoreString(c, block, payload)
+		}
+		if _, werr := io.WriteString(w, block); werr != nil {
+			markDisconnected()
+			return
+		}
+		flusher.Flush()
+		lastDataAt = time.Now()
+		resetKeepaliveTimer()
+	}
+
+	// writeRestoredParts 分三段写出被改写的块，不重建整块字符串。
+	writeRestoredParts := func(prefix string, ev []byte) {
+		if clientDisconnected {
+			return
+		}
+		if _, werr := io.WriteString(w, prefix); werr != nil {
+			markDisconnected()
+			return
+		}
+		// These are ordinary deltas already restored by the stream restorer.
+		// Advisor-owned blocks and usage events take the original-block path.
+		if _, werr := w.Write(ev); werr != nil {
+			markDisconnected()
+			return
+		}
+		if _, werr := io.WriteString(w, "\n\n"); werr != nil {
+			markDisconnected()
+			return
+		}
+		flusher.Flush()
+		lastDataAt = time.Now()
+		resetKeepaliveTimer()
+	}
+
+	flushCarry := func() {
+		if clientDisconnected || !wroteDataEvent || toolNameRestorer == nil {
+			return
+		}
+		for _, payload := range toolNameRestorer.flush() {
+			writeRestoredParts("event: content_block_delta\ndata: ", payload)
+		}
+	}
 	for {
 		select {
 		case ev, ok := <-events:
@@ -1118,6 +1177,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 			if !ok {
 				// 上游完成，返回结果
+				flushCarry()
 				if !sawTerminalEvent {
 					if advisor.disconnectedBeforeIterations() && (clientDisconnected || errors.Is(ctx.Err(), context.Canceled)) {
 						return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
@@ -1128,6 +1188,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			}
 			if ev.err != nil {
 				if sawTerminalEvent {
+					flushCarry()
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: clientDisconnected}, nil
 				}
 				if advisor.disconnectedBeforeIterations() && (clientDisconnected || errors.Is(ev.err, context.Canceled)) {
@@ -1144,6 +1205,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				// 客户端未断开，正常的错误处理
 				if errors.Is(ev.err, bufio.ErrTooLong) {
 					logger.LegacyPrintf("service.gateway", "SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, ev.err)
+					flushCarry()
 					sendErrorEvent("response_too_large", fmt.Sprintf("upstream SSE line exceeded %d bytes", maxLineSize))
 					return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, ev.err
 				}
@@ -1169,6 +1231,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 						RetryableOnSameAccount: true,
 					}
 				}
+				flushCarry()
 				sendErrorEvent("stream_read_error", disconnectMsg)
 				return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream read error: %w", ev.err)
 			}
@@ -1187,32 +1250,73 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 					if clientDisconnected {
 						return &streamingResult{usage: usage, firstTokenMs: firstTokenMs, clientDisconnect: true}, nil
 					}
+					flushCarry()
 					return nil, err
 				}
 
-				for _, block := range outputBlocks {
-					if !clientDisconnected {
-						restored := advisor.restoreString(c, block, data)
-						if _, werr := io.WriteString(w, restored); werr != nil {
-							clientDisconnected = true
-							logger.LegacyPrintf("service.gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
-							// 不 break：客户端断开后仍需继续合并本事件及后续事件的 usage，
-							// 否则会漏计当前事件携带的 usage 导致少计费。后续写入由
-							// clientDisconnected 守卫跳过。
-						} else {
-							flusher.Flush()
-							lastDataAt = time.Now()
-							resetKeepaliveTimer()
+				// usage 与首 token 时间按原事件算一次，还原器可能把这一事件拆成多个块或整段扣住。
+				if data != "" {
+					if firstTokenMs == nil && data != "[DONE]" {
+						ms := int(time.Since(startTime).Milliseconds())
+						firstTokenMs = &ms
+					}
+					if usagePatch != nil {
+						mergeSSEUsagePatch(usage, usagePatch)
+					}
+				}
+
+				if clientDisconnected {
+					continue
+				}
+				if sawTerminalEvent {
+					flushCarry()
+				}
+
+				advisorOwned := false
+				if advisor != nil && data != "" {
+					event := gjson.Parse(data)
+					if index := event.Get("index"); index.Exists() {
+						idx := index.Int()
+						switch event.Get("type").String() {
+						case "content_block_start":
+							if isAnthropicAdvisorBlock(event.Get("content_block")) {
+								if advisorBlockIndexes == nil {
+									advisorBlockIndexes = make(map[int64]bool)
+								}
+								advisorBlockIndexes[idx] = true
+							}
+						case "content_block_delta":
+							advisorOwned = advisorBlockIndexes[idx]
+						case "content_block_stop":
+							advisorOwned = advisorBlockIndexes[idx]
+							delete(advisorBlockIndexes, idx)
 						}
 					}
-					if data != "" {
-						if firstTokenMs == nil && data != "[DONE]" {
-							ms := int(time.Since(startTime).Milliseconds())
-							firstTokenMs = &ms
+				}
+
+				for _, block := range outputBlocks {
+					if toolNameRestorer == nil || data == "" || advisorOwned {
+						writeRestoredBlock(block, data, advisorOwned)
+					} else {
+						// processSSEEvent frames data verbatim followed by two newlines.
+						prefix := block[:len(block)-len(data)-2]
+						payload := streamEventBytes(data)
+						var restored [2][]byte
+						n := toolNameRestorer.restoreInto(payload, &restored)
+						if n == 2 {
+							writeRestoredParts("event: content_block_delta\ndata: ", restored[0])
 						}
-						if usagePatch != nil {
-							mergeSSEUsagePatch(usage, usagePatch)
+						if n == 0 {
+							continue
 						}
+						if isOriginalToolStreamEvent(payload, restored[n-1]) {
+							writeRestoredBlock(block, data, false)
+						} else {
+							writeRestoredParts(prefix, restored[n-1])
+						}
+					}
+					if !clientDisconnected && !wroteDataEvent && data != "" && data != "[DONE]" && gjson.Get(data, "type").String() != "ping" {
+						wroteDataEvent = true
 					}
 				}
 				continue
@@ -1236,6 +1340,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
 			}
+			flushCarry()
 			sendErrorEvent("stream_timeout", fmt.Sprintf("upstream stream idle for %s", streamInterval))
 			return &streamingResult{usage: usage, firstTokenMs: firstTokenMs}, fmt.Errorf("stream data interval timeout")
 
@@ -1326,6 +1431,12 @@ func (s *GatewayService) extractSSEUsagePatch(event map[string]any) *sseUsagePat
 			patch.hasCacheReadInput = true
 		}
 		applyAnthropicCacheReadAliases(patch, usageObj)
+		// message_start 可能已带非零 output_tokens；流在 message_delta 前中断时它是
+		// 唯一已观测到的输出用量。message_delta 的 output_tokens 是累计值，后续覆盖即可。
+		if v, ok := parseSSEUsageInt(usageObj["output_tokens"]); ok && v > 0 {
+			patch.outputTokens = v
+			patch.hasOutputTokens = true
+		}
 		if cc, ok := usageObj["cache_creation"].(map[string]any); ok {
 			if v, exists := parseSSEUsageInt(cc["ephemeral_5m_input_tokens"]); exists {
 				patch.cacheCreation5mTokens = v

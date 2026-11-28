@@ -273,7 +273,8 @@ type OpenAIForwardResult struct {
 	Stream                   bool
 	OpenAIWSMode             bool
 	// UpstreamTerminalEvent is the normalized terminal event observed on an
-	// upstream Responses WebSocket turn. Empty preserves legacy/non-WS success.
+	// upstream Responses WebSocket turn or an explicit Chat fallback failure.
+	// Empty preserves the default scheduling outcome.
 	UpstreamTerminalEvent string
 	ResponseHeaders       http.Header
 	Duration              time.Duration
@@ -310,7 +311,7 @@ type OpenAIForwardResult struct {
 // that may clear model-scoped transient state. The zero value remains a success
 // for existing non-WS callers.
 func (r *OpenAIForwardResult) SucceededForScheduling() bool {
-	if r == nil || !r.OpenAIWSMode || r.UpstreamTerminalEvent == "" {
+	if r == nil || r.UpstreamTerminalEvent == "" {
 		return true
 	}
 	switch r.UpstreamTerminalEvent {

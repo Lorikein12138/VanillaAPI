@@ -219,6 +219,23 @@
               </p>
             </div>
 
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <div id="channel-response-model-label" class="input-label mb-0">
+                  {{ t('admin.channels.form.exposeResponseModel') }}
+                </div>
+                <p id="channel-response-model-hint" class="mt-1 text-xs text-gray-400">
+                  {{ t('admin.channels.form.exposeResponseModelHint') }}
+                </p>
+              </div>
+              <Toggle
+                v-model="form.expose_response_model"
+                data-testid="channel-expose-response-model"
+                aria-labelledby="channel-response-model-label"
+                aria-describedby="channel-response-model-hint"
+              />
+            </div>
+
             <!-- Billing Basis -->
             <div>
               <label class="input-label">{{ t('admin.channels.form.billingModelSource', 'Billing Basis') }}</label>
@@ -771,6 +788,7 @@ const form = reactive({
   description: '',
   status: 'active',
   restrict_models: false,
+  expose_response_model: false,
   billing_model_source: 'channel_mapped' as string,
   platforms: [] as PlatformSection[],
   apply_pricing_to_account_stats: false,
@@ -1203,6 +1221,8 @@ function formToAPI(): { group_ids: number[], model_pricing: ChannelModelPricing[
   featuresConfig.bedrock_cc_compat = form.platforms.some(
     section => section.enabled && section.platform === 'anthropic' && section.bedrock_cc_compat
   )
+  // Channel-level boolean: lets users see the actual response model in usage records.
+  featuresConfig.expose_response_model = !!form.expose_response_model
 
   return { group_ids: uniqueGroupIds, model_pricing, model_mapping, features_config: featuresConfig }
 }
@@ -1373,6 +1393,7 @@ function resetForm() {
   form.description = ''
   form.status = 'active'
   form.restrict_models = false
+  form.expose_response_model = false
   form.billing_model_source = 'channel_mapped'
   form.platforms = []
   form.apply_pricing_to_account_stats = false
@@ -1395,6 +1416,7 @@ async function openEditDialog(channel: Channel) {
   form.description = channel.description || ''
   form.status = channel.status
   form.restrict_models = channel.restrict_models || false
+  form.expose_response_model = channel.features_config?.expose_response_model === true
   form.billing_model_source = channel.billing_model_source || 'channel_mapped'
   form.apply_pricing_to_account_stats = channel.apply_pricing_to_account_stats || false
   // Must load groups first so apiToForm can map groupID → platform

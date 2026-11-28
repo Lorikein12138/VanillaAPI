@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,6 +37,27 @@ func (s *userUsageRepoCapture) ListWithFilters(ctx context.Context, params pagin
 		Page:     params.Page,
 		PageSize: params.PageSize,
 		Pages:    0,
+	}, nil
+}
+
+func (s *userUsageRepoCapture) GetByID(_ context.Context, id int64) (*service.UsageLog, error) {
+	for i := range s.listRows {
+		if s.listRows[i].ID == id {
+			return &s.listRows[i], nil
+		}
+	}
+	return nil, service.ErrUsageLogNotFound
+}
+
+type userUsageChannelRepo struct {
+	service.ChannelRepository
+}
+
+func (userUsageChannelRepo) ListAll(context.Context) ([]service.Channel, error) {
+	return []service.Channel{
+		{ID: 1, FeaturesConfig: map[string]any{"expose_response_model": true}},
+		{ID: 2, FeaturesConfig: map[string]any{"expose_response_model": false}},
+		{ID: 3},
 	}, nil
 }
 
@@ -81,7 +103,7 @@ func (s *userUsageRepoCapture) GetGroupStatsWithFilters(ctx context.Context, sta
 func newUserUsageRequestTypeTestRouter(repo *userUsageRepoCapture) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	usageSvc := service.NewUsageService(repo, nil, nil, nil)
-	handler := NewUsageHandler(usageSvc, nil, nil, nil)
+	handler := NewUsageHandler(usageSvc, nil, nil, nil, nil)
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 42})
@@ -257,6 +279,58 @@ func TestUserUsageListKeepsUserBillingAndIPWithoutAdminCostFields(t *testing.T) 
 	require.NotContains(t, body, "billing_tier")
 	require.NotContains(t, body, "channel_id")
 	require.NotContains(t, body, `"account":`)
+}
+
+func TestUserUsageResponseModelIsScopedPerChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := &userUsageRepoCapture{listRows: []service.UsageLog{
+		{ID: 1, UserID: 42, ChannelID: new(int64(1)), Model: "requested", UpstreamModel: new("sent"), UpstreamResponseModel: new("actual")},
+		{ID: 2, UserID: 42, ChannelID: new(int64(2)), Model: "requested", UpstreamResponseModel: new("hidden")},
+		{ID: 3, UserID: 42, ChannelID: new(int64(3)), Model: "requested", UpstreamResponseModel: new("legacy")},
+		{ID: 4, UserID: 42, ChannelID: new(int64(4)), Model: "requested", UpstreamResponseModel: new("missing-channel")},
+	}}
+	channelSvc := service.NewChannelService(userUsageChannelRepo{}, nil, nil, nil, nil)
+	handler := NewUsageHandler(service.NewUsageService(repo, nil, nil, nil), nil, nil, nil, channelSvc)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 42})
+	})
+	router.GET("/usage", handler.List)
+	router.GET("/usage/:id", handler.GetByID)
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+
+	list := get("/usage")
+	require.Equal(t, http.StatusOK, list.Code)
+	var body struct {
+		Data struct {
+			Items []map[string]any `json:"items"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(list.Body.Bytes(), &body))
+	require.Len(t, body.Data.Items, 4)
+	require.Equal(t, "actual", body.Data.Items[0]["response_model"])
+	for i, item := range body.Data.Items {
+		require.NotContains(t, item, "upstream_model")
+		require.NotContains(t, item, "upstream_response_model")
+		if i > 0 {
+			require.NotContains(t, item, "response_model")
+		}
+	}
+	require.Equal(t, int64(42), repo.listFilters.UserID)
+
+	detail := get("/usage/1")
+	require.Equal(t, http.StatusOK, detail.Code)
+	require.Contains(t, detail.Body.String(), `"response_model":"actual"`)
+	require.NotContains(t, get("/usage/2").Body.String(), `"response_model"`)
+	repo.listRows[0].UserID = 43
+	forbidden := get("/usage/1")
+	require.Equal(t, http.StatusForbidden, forbidden.Code)
+	require.NotContains(t, forbidden.Body.String(), "actual")
 }
 
 func TestUserUsageStatsUsesScopedFilters(t *testing.T) {

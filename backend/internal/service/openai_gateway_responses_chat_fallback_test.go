@@ -208,7 +208,7 @@ func TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions(t
 	require.NotNil(t, result.FirstTokenMs)
 }
 
-func TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit(t *testing.T) {
+func TestForwardResponses_ChatFallbackAtToolArgumentOutputLimit(t *testing.T) {
 
 	body := []byte(`{"model":"deepseek-v4-flash","input":"run the command","stream":true}`)
 	rec := httptest.NewRecorder()
@@ -235,13 +235,94 @@ func TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit(t
 	}
 
 	result, err := svc.Forward(context.Background(), c, forceChatResponsesFallbackAccount(), body)
-	require.ErrorContains(t, err, "invalid JSON")
+	require.NoError(t, err)
 	require.NotNil(t, result)
+	require.True(t, result.SucceededForScheduling(), "a reported output limit is a valid upstream outcome")
 	require.Equal(t, 4, result.Usage.InputTokens)
 	require.Equal(t, 6492, result.Usage.OutputTokens)
 	require.NotContains(t, rec.Body.String(), "response.function_call_arguments.done")
 	require.NotContains(t, rec.Body.String(), "response.output_item.done")
-	require.NotContains(t, rec.Body.String(), "data: [DONE]")
+	require.Equal(t, 1, strings.Count(rec.Body.String(), "event: response.incomplete\n"))
+	require.Contains(t, rec.Body.String(), `"incomplete_details":{"reason":"max_output_tokens"}`)
+	require.NotContains(t, rec.Body.String(), "event: response.completed")
+	require.Contains(t, rec.Body.String(), "data: [DONE]")
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		payload, ok := extractOpenAISSEDataLine(line)
+		if ok && gjson.Get(payload, "type").String() == "response.incomplete" {
+			output := gjson.Get(payload, "response.output")
+			require.True(t, output.IsArray())
+			require.Empty(t, output.Array(), "truncated tools cannot enter client history")
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	upstream.resp.Body = io.NopCloser(strings.NewReader(strings.Replace(upstreamBody, `"length"`, `"tool_calls"`, 1)))
+	result, err = svc.Forward(context.Background(), c, forceChatResponsesFallbackAccount(), body)
+	require.ErrorContains(t, err, "invalid JSON")
+	require.Equal(t, 6492, result.Usage.OutputTokens)
+	require.NotContains(t, rec.Body.String(), "event: response.completed")
+	require.NotContains(t, rec.Body.String(), "response.function_call_arguments.done")
+}
+
+func TestChatFallbackExplicitSSEError(t *testing.T) {
+	const text = `data: {"id":"chat-error","choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n"
+	const usage = `data: {"id":"chat-error","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}` + "\n\n"
+	const wireError = `data: {"error":{"type":"server_error","message":"upstream generation failed"},"usage":{"prompt_tokens":99}}` + "\n\n"
+	const stop = `data: {"id":"chat-error","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	for _, protocol := range []string{"responses", "messages"} {
+		for _, tc := range []struct {
+			name, wire string
+			wantInput  int
+			wantError  bool
+		}{
+			{"named_error_with_observed_usage", text + usage + "event: error\n" + wireError, 4, true},
+			{"unnamed_error_without_usage", text + wireError, 0, true},
+			{"named_error_at_eof", text + "event: error\n", 0, true},
+			{"finish_reason_without_done", text + stop + usage, 4, false},
+		} {
+			t.Run(protocol+"/"+tc.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/"+protocol, nil)
+				resp := &http.Response{Header: http.Header{}, Body: io.NopCloser(strings.NewReader(tc.wire))}
+				svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig()}
+				var result *OpenAIForwardResult
+				var err error
+				failure, success := "event: response.failed\n", "event: response.completed\n"
+				if protocol == "responses" {
+					result, err = svc.streamChatCompletionsAsResponses(c, resp, "model", nil, nil, false, nil, "model", "model", nil, nil, time.Now())
+				} else {
+					failure, success = "event: error\n", "event: message_stop\n"
+					result, err = svc.streamChatCompletionsAsAnthropic(c, resp, "model", "model", "model", nil, nil, time.Now())
+				}
+				require.NotNil(t, result)
+				require.Equal(t, tc.wantInput, result.Usage.InputTokens)
+				if tc.wantInput == 0 {
+					require.Zero(t, result.Usage.OutputTokens)
+				} else {
+					require.Equal(t, 2, result.Usage.OutputTokens)
+				}
+				require.Contains(t, rec.Body.String(), "partial")
+				if tc.wantError {
+					require.ErrorIs(t, err, errCCUpstreamStream)
+					require.False(t, result.SucceededForScheduling())
+					require.True(t, IsResponseCommitted(c))
+					require.Equal(t, 1, strings.Count(rec.Body.String(), failure))
+					require.NotContains(t, rec.Body.String(), success)
+					require.NotContains(t, rec.Body.String(), "data: [DONE]")
+					if protocol == "responses" {
+						require.Equal(t, tc.wantInput > 0, strings.Contains(rec.Body.String(), `"usage":`))
+					}
+				} else {
+					require.NoError(t, err)
+					require.True(t, result.SucceededForScheduling())
+					require.Contains(t, rec.Body.String(), success)
+				}
+			})
+		}
+	}
 }
 
 func TestForwardResponses_DeepSeekReasoningOnlyStreamProducesVisibleText(t *testing.T) {

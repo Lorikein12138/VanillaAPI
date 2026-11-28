@@ -226,6 +226,10 @@ func (s *GatewayService) ForwardAsResponses(
 		return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 	}
 
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && s.rateLimitService != nil && account.IsAnthropicOAuthOrSetupToken() {
+		s.rateLimitService.UpdateSessionWindow(ctx, account, resp.Header)
+	}
+
 	// 13. Handle normal response (convert Anthropic → Responses)
 	var result *ForwardResult
 	var handleErr error
@@ -363,6 +367,10 @@ func mergeAnthropicUsage(dst *ClaudeUsage, src apicompat.AnthropicUsage) {
 	if src.OutputTokens > 0 {
 		dst.OutputTokens = src.OutputTokens
 	}
+	if src.OutputTokensDetails != nil {
+		dst.thinkingTokens = src.OutputTokensDetails.ThinkingTokens
+		dst.thinkingTokensPresent = true
+	}
 }
 
 func normalizeAnthropicPromptTotal(usage *ClaudeUsage, promptTokens int, promptCacheMissTokens *int) {
@@ -436,6 +444,9 @@ func normalizeAnthropicEventUsageForResponses(event *apicompat.AnthropicStreamEv
 		dst.CacheCreationInputTokens = usage.CacheCreationInputTokens
 		dst.CacheCreationInputTokensPresent = true
 		dst.CacheCreation = nil
+		if usage.thinkingTokensPresent {
+			dst.OutputTokensDetails = &apicompat.AnthropicOutputTokensDetails{ThinkingTokens: usage.thinkingTokens}
+		}
 	}
 	normalize(event.Usage)
 	if event.Message != nil {
@@ -652,6 +663,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	state.Model = originalModel
 	state.PreserveThinkingSignatures = isClaude55SignedThinkingModel(mappedModel)
 	clientToolRestorer := apicompat.NewResponsesClientToolStreamRestorer(clientToolMapping)
+	toolNameRestorer := newToolNameStreamRestorer(toolNameRewriteFromContext(c))
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
@@ -715,7 +727,6 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 				)
 				continue
 			}
-			payload = reverseToolNamesIfPresent(c, payload)
 			payloads, _, err := clientToolRestorer.RestoreEvent(payload)
 			if err != nil {
 				logger.L().Warn("forward_as_responses stream: failed to restore client tools",
@@ -752,8 +763,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 				if err != nil {
 					continue
 				}
-				out := reverseToolNamesIfPresentString(c, sse)
-				fmt.Fprint(c.Writer, out) //nolint:errcheck
+				fmt.Fprint(c.Writer, sse) //nolint:errcheck
 			}
 			c.Writer.Flush()
 		}
@@ -781,24 +791,35 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 			continue
 		}
 
-		var event apicompat.AnthropicStreamEvent
-		if err := json.Unmarshal([]byte(payload), &event); err != nil {
-			logger.L().Warn("forward_as_responses stream: failed to parse event",
-				zap.Error(err),
-				zap.String("request_id", requestID),
-				zap.String("event_type", eventType),
-			)
-			continue
-		}
+		var restored [2][]byte
+		wirePayload := streamEventBytes(payload)
+		n := toolNameRestorer.restoreForBridge(c, wirePayload, &restored)
+		for i, restoredPayload := range restored[:n] {
+			var event apicompat.AnthropicStreamEvent
+			if err := json.Unmarshal(restoredPayload, &event); err != nil {
+				logger.L().Warn("forward_as_responses stream: failed to parse event",
+					zap.Error(err),
+					zap.String("request_id", requestID),
+					zap.String("event_type", eventType),
+				)
+				continue
+			}
 
-		observer.ObserveAnthropic([]byte(payload))
-		stream.observe(&event, payload)
+			if i == n-1 {
+				observer.ObserveAnthropic(wirePayload)
+			}
+			stream.observe(&event, payload)
+			if stream.upstreamErrType != "" {
+				break
+			}
+			processEvent(&event)
+		}
 		if stream.upstreamErrType != "" {
 			break
 		}
-		processEvent(&event)
 	}
 
+	flushToolNameCarry(c.Writer.Size() != writerSizeBeforeStream, toolNameRestorer, processEvent)
 	return finalizeStream()
 }
 

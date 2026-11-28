@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,56 @@ import (
 type openAIWSTTFTModeTestEvent struct {
 	delay   time.Duration
 	payload string
+}
+
+// Start each scripted turn only after its response.create reaches the upstream.
+// Otherwise the reader can consume the next turn's delays while the client is
+// still handling the previous response, before that turn's TTFT clock starts.
+type openAIWSTTFTModeConn struct {
+	*openAIWSCaptureConn
+	requests chan struct{}
+	nextTurn bool
+}
+
+func (c *openAIWSTTFTModeConn) WriteJSON(ctx context.Context, value any) error {
+	if err := c.openAIWSCaptureConn.WriteJSON(ctx, value); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if gjson.GetBytes(payload, "type").String() == "response.create" {
+		select {
+		case c.requests <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (c *openAIWSTTFTModeConn) ReadMessage(ctx context.Context) ([]byte, error) {
+	if c.nextTurn {
+		select {
+		case <-c.requests:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	payload, err := c.openAIWSCaptureConn.ReadMessage(ctx)
+	eventType := gjson.GetBytes(payload, "type").String()
+	c.nextTurn = eventType == "response.completed" || eventType == "response.done"
+	return payload, err
+}
+
+func (c *openAIWSTTFTModeConn) ReadFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
+	payload, err := c.ReadMessage(ctx)
+	return coderws.MessageText, payload, err
+}
+
+func (c *openAIWSTTFTModeConn) WriteFrame(ctx context.Context, _ coderws.MessageType, payload []byte) error {
+	return c.WriteJSON(ctx, json.RawMessage(payload))
 }
 
 // openAIWSTTFTModeTestTurn replays a reasoning turn: the reasoning item is
@@ -63,7 +114,14 @@ func TestOpenAIWSPassthroughFirstTokenFollowsTTFTMode(t *testing.T) {
 	}
 	for _, mode := range []string{OpenAITTFTModeSemantic, OpenAITTFTModeVisible} {
 		t.Run(mode, func(t *testing.T) {
-			runOpenAIWSPassthroughTTFTModeCase(t, mode, turns)
+			for _, client := range []struct {
+				name  string
+				delay time.Duration
+			}{{"immediate", 0}, {"delayed", 75 * time.Millisecond}} {
+				t.Run(client.name, func(t *testing.T) {
+					runOpenAIWSPassthroughTTFTModeCase(t, mode, turns, client.delay)
+				})
+			}
 		})
 	}
 }
@@ -77,14 +135,14 @@ func TestOpenAIWSPassthroughCompletionOnlyTTFTMatchesSSE(t *testing.T) {
 					completion := strings.Replace(events[len(events)-1].payload, "response.completed", eventType, 1)
 					completion = strings.Replace(completion, `"usage":`, `"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"usage":`, 1)
 					turn := append(events[:3], openAIWSTTFTModeTestEvent{100 * time.Millisecond, completion})
-					runOpenAIWSPassthroughTTFTModeCase(t, mode, [][]openAIWSTTFTModeTestEvent{turn})
+					runOpenAIWSPassthroughTTFTModeCase(t, mode, [][]openAIWSTTFTModeTestEvent{turn}, 0)
 				})
 			}
 		})
 	}
 }
 
-func runOpenAIWSPassthroughTTFTModeCase(t *testing.T, mode string, turns [][]openAIWSTTFTModeTestEvent) {
+func runOpenAIWSPassthroughTTFTModeCase(t *testing.T, mode string, turns [][]openAIWSTTFTModeTestEvent, clientDelay time.Duration) {
 	gin.SetMode(gin.TestMode)
 	gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{openAITTFTMode: mode, expiresAt: time.Now().Add(time.Minute).UnixNano()})
 	t.Cleanup(func() {
@@ -93,7 +151,11 @@ func runOpenAIWSPassthroughTTFTModeCase(t *testing.T, mode string, turns [][]ope
 
 	const tolerance = 250 * time.Millisecond
 
-	upstreamConn := &openAIWSCaptureConn{}
+	upstreamConn := &openAIWSTTFTModeConn{
+		openAIWSCaptureConn: &openAIWSCaptureConn{},
+		requests:            make(chan struct{}, 1),
+		nextTurn:            true,
+	}
 	for _, turn := range turns {
 		for _, event := range turn {
 			upstreamConn.events = append(upstreamConn.events, []byte(event.payload))
@@ -118,7 +180,7 @@ func runOpenAIWSPassthroughTTFTModeCase(t *testing.T, mode string, turns [][]ope
 		cache:                     &stubGatewayCache{},
 		openaiWSResolver:          NewOpenAIWSProtocolResolver(cfg),
 		toolCorrector:             NewCodexToolCorrector(),
-		openaiWSPassthroughDialer: &openAIWSCaptureDialer{conn: upstreamConn},
+		openaiWSPassthroughDialer: &openAIWSSingleConnDialer{conn: upstreamConn},
 	}
 	account := &Account{
 		ID: 454, Name: "openai-ws-ttft-mode", Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
@@ -161,6 +223,9 @@ func runOpenAIWSPassthroughTTFTModeCase(t *testing.T, mode string, turns [][]ope
 
 	request := []byte(`{"type":"response.create","model":"gpt-5.4","input":"hi"}`)
 	for i, turn := range turns {
+		if i > 0 {
+			time.Sleep(clientDelay)
+		}
 		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 3*time.Second)
 		require.NoError(t, clientConn.Write(writeCtx, coderws.MessageText, request))
 		cancelWrite()
