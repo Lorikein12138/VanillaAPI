@@ -1,0 +1,119 @@
+name: PR 规范检查
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-conventions-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-conventions:
+    name: pr-conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 检查分支、标题及逐提交变动
+        env:
+          BRANCH: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: python
+        run: |
+          import os
+          import re
+          import subprocess
+          import sys
+
+          TYPES = "feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+          BRANCH_RE = re.compile(rf"(?:codex/)?(?:{TYPES})/[a-z0-9][a-z0-9._-]*")
+          TITLE_RE = re.compile(rf"(?:{TYPES})\([A-Za-z0-9./_-]+\): (\S[^\r\n]*)")
+          HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002ffff\U00030000-\U000323af]")
+          SHA_RE = re.compile(r"[0-9a-f]{40}")
+          WORKFLOWS = {".github/workflows/ci.yml", ".github/workflows/pr-conventions.yml"}
+          LOCAL_ROOTS = {
+              "openspec", "tools", "deploy", "assets", "docs", "docs-local", "skills",
+              "plugins", ".workflow", "scratchpad", "dockerfile.goreleaser", ".goreleaser.yaml",
+              ".goreleaser.simple.yaml",
+          }
+          LOCAL_COMPONENTS = {"agents.md", "claude.md", ".claude", ".codex"}
+          LOCAL_FILES = {"frontend/audit.json", "backend/config.yaml", "backend/.installed"}
+          errors = []
+
+          def git(*args):
+              return subprocess.run(
+                  ["git", *args], check=True, capture_output=True,
+              ).stdout
+
+          def check_title(label, title):
+              match = TITLE_RE.fullmatch(title)
+              if not match or not title.isprintable() or not HAN_RE.search(match[1]):
+                  errors.append(f"{label}须使用 type(scope): 中文说明")
+
+          def is_local_path(path):
+              normalized = path.lower()
+              components = normalized.split("/")
+              if components[0] == ".github":
+                  return path not in WORKFLOWS
+              if (
+                  components[0] in LOCAL_ROOTS
+                  or LOCAL_COMPONENTS.intersection(components)
+                  or normalized in LOCAL_FILES
+                  or components[:2] == ["backend", "data"]
+              ):
+                  return True
+              filename = components[-1]
+              if filename == "docker-compose.override.yml":
+                  return True
+              if filename != ".env.example" and (filename.endswith(".env") or filename.startswith(".env.")):
+                  return True
+              if normalized.endswith(".md"):
+                  return components[:-1] != ["frontend", "src", "content", "legal"]
+              return False
+
+          if not BRANCH_RE.fullmatch(os.environ["BRANCH"]):
+              errors.append("分支名须使用 type/slug 或 codex/type/slug")
+          check_title("PR 标题", os.environ["PR_TITLE"])
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          if not SHA_RE.fullmatch(base) or not SHA_RE.fullmatch(head):
+              sys.exit("::error::PR 事件中的提交 SHA 无效")
+
+          try:
+              commits = git("rev-list", f"{base}..{head}", "--").decode("ascii").splitlines()
+              for sha in commits:
+                  headers, _, message = git("cat-file", "commit", sha).partition(b"\n\n")
+                  if sum(line.startswith(b"parent ") for line in headers.split(b"\n")) > 1:
+                      errors.append(f"提交 {sha} 有多个父提交")
+                  title, _, body = message.partition(b"\n")
+                  try:
+                      check_title(f"提交 {sha} 的标题", title.decode("utf-8"))
+                  except UnicodeDecodeError:
+                      errors.append(f"提交 {sha} 的标题须使用 UTF-8")
+                  if body.strip():
+                      errors.append(f"提交 {sha} 只能写标题")
+
+                  # Treat renames and copies as additions at the destination.
+                  paths = git("diff-tree", "--root", "-m", "--no-commit-id", "-r",
+                              "--name-only", "-z", "--no-renames", "--diff-filter=ACMT", sha)
+                  if any(is_local_path(os.fsdecode(path)) for path in paths.split(b"\0") if path):
+                      errors.append(f"提交 {sha} 包含本机专用路径或未许可的 .github 路径")
+          except subprocess.CalledProcessError:
+              sys.exit("::error::无法读取 PR 提交范围或提交变动")
+
+          for error in errors:
+              print(f"::error::{error}")
+          if errors:
+              sys.exit(1)
+          print("分支、PR 标题及所有新提交均符合规范")
