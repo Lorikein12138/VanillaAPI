@@ -119,6 +119,7 @@ func (s *GatewayService) RecordDetectionAccountUsage(ctx context.Context, accoun
 	if result == nil || account == nil {
 		return
 	}
+	defer settleDetectionUsage(ctx)
 	if s.deferredService != nil {
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
 	}
@@ -138,6 +139,7 @@ func (s *OpenAIGatewayService) RecordDetectionAccountUsage(ctx context.Context, 
 	if result == nil || account == nil {
 		return
 	}
+	defer settleDetectionUsage(ctx)
 	if s.deferredService != nil {
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
 	}
@@ -187,6 +189,16 @@ func recordDetectionAccountQuota(ctx context.Context, repo AccountRepository, ac
 	defer cancel()
 	if err := writer.IncrementDetectionQuotaUsed(accountingCtx, account.ID, amount); err != nil {
 		failDetectionAccounting(ctx, account.ID, "account_quota")
+	}
+}
+
+func settleDetectionUsage(ctx context.Context) {
+	if binding := detectionBindingFromContext(ctx); binding != nil && binding.budget != nil && binding.budget.trackCompletion {
+		binding.budget.mu.Lock()
+		defer binding.budget.mu.Unlock()
+		if !binding.budget.accountingFailed {
+			binding.budget.usageSettled++
+		}
 	}
 }
 

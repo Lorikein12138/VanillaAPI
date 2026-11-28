@@ -17,7 +17,9 @@ export interface DetectionGroupOption {
 export interface DetectionConfig {
   enabled: boolean
   interval_minutes: number
-  concurrent_groups: number
+  suspend_minutes: number
+  auto_confirm_missing_svg: boolean
+  daily_anchor_time: string
   groups: DetectionSelection[]
 }
 
@@ -37,12 +39,14 @@ export interface DetectionConfirmationScope {
   account_name: string
   groups: { id: number; name: string }[]
   scope_version: string
+  suspend_minutes: number
 }
 
 export interface AdminDetectionGroup extends PublicDetectionGroup {
   group_id: number
   trigger_state: 'idle' | 'running' | 'busy' | 'no_send'
   sample_id?: string
+  latest?: { checked_at?: string; pelican_status: DetectionSample['pelican_status'] }
   confirmation?: DetectionConfirmationScope
 }
 

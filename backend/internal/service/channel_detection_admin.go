@@ -22,6 +22,8 @@ type channelDetectionRun struct {
 	Owner               string     `json:"owner"`
 	Source              string     `json:"source"`
 	PreviousAttemptedAt *time.Time `json:"previous_attempted_at,omitempty"`
+	SuspensionRevision  string     `json:"suspension_revision,omitempty"`
+	GroupPlatform       string     `json:"group_platform,omitempty"`
 }
 
 const (
@@ -32,13 +34,14 @@ const (
 
 // ChannelDetectionProof is only persisted with the private worker state.
 type ChannelDetectionProof struct {
-	Version          int        `json:"version"`
-	SampleID         string     `json:"sample_id"`
-	Source           string     `json:"source"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	AccountID        int64      `json:"account_id,omitempty"`
-	RouteFingerprint string     `json:"route_fingerprint,omitempty"`
-	Sends            int        `json:"sends,omitempty"`
+	Version            int        `json:"version"`
+	SampleID           string     `json:"sample_id"`
+	Source             string     `json:"source"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	AccountID          int64      `json:"account_id,omitempty"`
+	RouteFingerprint   string     `json:"route_fingerprint,omitempty"`
+	Sends              int        `json:"sends,omitempty"`
+	SuspensionRevision string     `json:"suspension_revision,omitempty"`
 }
 
 func (p ChannelDetectionProof) Attributable() bool {
@@ -52,17 +55,24 @@ type ChannelDetectionImpactGroup struct {
 }
 
 type ChannelDetectionScope struct {
-	AccountName string                        `json:"account_name"`
-	Groups      []ChannelDetectionImpactGroup `json:"groups"`
-	Version     string                        `json:"scope_version"`
+	AccountName    string                        `json:"account_name"`
+	Groups         []ChannelDetectionImpactGroup `json:"groups"`
+	Version        string                        `json:"scope_version"`
+	SuspendMinutes int                           `json:"suspend_minutes"`
 }
 
 type ChannelDetectionAdminGroup struct {
 	ChannelDetectionPublicGroup
-	GroupID      int64                  `json:"group_id"`
-	TriggerState string                 `json:"trigger_state"`
-	SampleID     string                 `json:"sample_id,omitempty"`
-	Confirmation *ChannelDetectionScope `json:"confirmation,omitempty"`
+	Latest       *ChannelDetectionLatestResult `json:"latest,omitempty"`
+	GroupID      int64                         `json:"group_id"`
+	TriggerState string                        `json:"trigger_state"`
+	SampleID     string                        `json:"sample_id,omitempty"`
+	Confirmation *ChannelDetectionScope        `json:"confirmation,omitempty"`
+}
+
+type ChannelDetectionLatestResult struct {
+	CheckedAt time.Time `json:"checked_at,omitzero"`
+	Pelican   string    `json:"pelican_status"`
 }
 
 type ChannelDetectionConfirmation struct {
@@ -80,7 +90,7 @@ type ChannelDetectionConfirmationRequest struct {
 }
 
 type channelDetectionActions interface {
-	ConfirmationScope(context.Context, ChannelDetectionSelection, ChannelDetectionProof) (*ChannelDetectionScope, error)
+	ConfirmationScope(context.Context, ChannelDetectionSelection, ChannelDetectionProof, string) (*ChannelDetectionScope, error)
 	Confirm(context.Context, ChannelDetectionConfirmationRequest) (ChannelDetectionConfirmation, error)
 }
 
@@ -104,16 +114,31 @@ func (s *ChannelDetection) AdminGroups(ctx context.Context) ([]ChannelDetectionA
 		switch {
 		case active.Groups[group.id] != "" || (active.LegacyOwner != "" && latest.RunningByGroup[group.id].Owner == active.LegacyOwner):
 			result.TriggerState = "running"
-		case active.Full(*config.ConcurrentGroups):
+		case active.GloballyBlocked():
 			result.TriggerState = "busy"
 		case latest.NoSend[group.id]:
 			result.TriggerState = "no_send"
 		}
 		proof := latest.Proofs[group.id]
-		if group.result.Sample != nil {
+		sample := latest.Samples[group.id]
+		if latest.NoSend[group.id] && (sample == nil || sample.Pelican != "untested") {
+			// Old no-send rounds left the sample and proof untouched.
+			attemptedAt := latest.AttemptedAt[group.id]
+			if run := latest.RunningByGroup[group.id]; run.Owner != "" {
+				attemptedAt = time.Time{}
+				if run.PreviousAttemptedAt != nil {
+					attemptedAt = *run.PreviousAttemptedAt
+				}
+			}
+			result.Latest = &ChannelDetectionLatestResult{CheckedAt: attemptedAt, Pelican: "untested"}
+		} else if sample != nil {
+			result.Latest = &ChannelDetectionLatestResult{CheckedAt: sample.CheckedAt, Pelican: sample.Pelican}
+			if proof.CompletedAt != nil {
+				result.Latest.CheckedAt = *proof.CompletedAt
+			}
 			result.SampleID = proof.SampleID
-			if actions != nil && proof.Attributable() {
-				result.Confirmation, err = actions.ConfirmationScope(ctx, ChannelDetectionSelection{GroupID: group.id, Model: group.result.Model}, proof)
+			if actions != nil && !latest.NoSend[group.id] && proof.Attributable() {
+				result.Confirmation, err = actions.ConfirmationScope(ctx, ChannelDetectionSelection{GroupID: group.id, Model: group.result.Model}, proof, config.stored)
 				if err != nil {
 					return nil, err
 				}
@@ -147,7 +172,7 @@ func (s *ChannelDetection) Confirm(ctx context.Context, groupID int64, sampleID,
 		return ChannelDetectionConfirmation{}, err
 	}
 	proof := latest.Proofs[groupID]
-	if latest.Samples[groupID] == nil || sampleID != proof.SampleID || !proof.Attributable() {
+	if latest.NoSend[groupID] || latest.Samples[groupID] == nil || sampleID != proof.SampleID || !proof.Attributable() {
 		return ChannelDetectionConfirmation{}, ErrDetectionChanged
 	}
 	return actions.Confirm(ctx, ChannelDetectionConfirmationRequest{

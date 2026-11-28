@@ -45,7 +45,7 @@ func TestChannelDetectionPlanRetainsCompletedMatchingGroups(t *testing.T) {
 	require.Len(t, kept.Samples, 2)
 	require.Equal(t, latest.Proofs, kept.Proofs)
 	require.Equal(t, map[int64]time.Time{1: past, 2: past}, kept.AttemptedAt)
-	due := detectionGroupDue(updated, kept, 3, past.Add(time.Hour))
+	due := detectionGroupDue(updated, kept, 3, past.Add(time.Hour), time.Time{})
 	require.True(t, due)
 
 	next.Enabled = true
@@ -61,7 +61,7 @@ func TestChannelDetectionPlanRetainsCompletedMatchingGroups(t *testing.T) {
 	require.NotContains(t, kept.AttemptedAt, int64(1))
 	require.Equal(t, past, kept.Samples[2].CheckedAt)
 	require.Equal(t, "prior-two", kept.Proofs[2].SampleID)
-	due = detectionGroupDue(updated, kept, 1, past.Add(45*time.Minute))
+	due = detectionGroupDue(updated, kept, 1, past.Add(45*time.Minute), time.Time{})
 	require.True(t, due)
 
 	// Removing and re-adding the same group/model cannot resurrect its data.
@@ -193,4 +193,86 @@ func TestChannelDetectionFeatureChangeCancelsUnfinishedAttempt(t *testing.T) {
 	applied, err := s.storage.CompareAndSetSnapshot(ctx, 1, "worker", latest.guard(plan), "stale")
 	require.NoError(t, err)
 	require.False(t, applied)
+}
+
+func TestChannelDetectionFixedScheduleBeijingSlots(t *testing.T) {
+	beijing := func(day, hour, minute int) time.Time {
+		return time.Date(2026, 11, day, hour, minute, 0, 0, channelDetectionBeijing)
+	}
+	for _, tc := range []struct {
+		minutes   int
+		now, slot time.Time
+	}{
+		{60, beijing(28, 7, 59), beijing(28, 7, 0)},
+		{60, beijing(28, 9, 10), beijing(28, 9, 0)},
+		{1000, beijing(28, 0, 41), beijing(28, 0, 40)},
+		{1000, beijing(28, 8, 0), beijing(28, 8, 0)},
+		{1439, beijing(28, 7, 59), beijing(28, 7, 59)},
+		{1440, beijing(28, 7, 59), beijing(27, 8, 0)},
+		{1440, beijing(28, 8, 0), beijing(28, 8, 0)},
+	} {
+		require.True(t, channelDetectionSlot("08:00", tc.minutes, tc.now.UTC()).Equal(tc.slot), "%d minutes at %s", tc.minutes, tc.now)
+	}
+
+	config := channelDetectionConfigRecord{ChannelDetectionConfig: ChannelDetectionConfig{IntervalMinutes: 60, DailyAnchorTime: new("08:00")}}
+	latest := channelDetectionSnapshot{
+		ScheduleSince: map[int64]time.Time{1: beijing(28, 8, 30)},
+		LastSlot:      map[int64]time.Time{1: beijing(27, 8, 0)},
+		AttemptedAt:   map[int64]time.Time{1: beijing(28, 8, 55)},
+	}
+	require.False(t, detectionGroupDue(config, latest, 1, beijing(28, 8, 59), time.Time{}))
+	require.True(t, detectionGroupDue(config, latest, 1, beijing(28, 9, 0), time.Time{}), "manual attempts do not push a fixed slot back")
+	require.False(t, detectionGroupDue(config, latest, 1, beijing(28, 9, 30), beijing(28, 9, 7)), "feature re-enable does not backfill")
+	latest.LastSlot[1] = beijing(28, 9, 0)
+	require.False(t, detectionGroupDue(config, latest, 1, beijing(28, 9, 50), time.Time{}))
+	require.True(t, detectionGroupDue(config, latest, 1, beijing(30, 11, 32), time.Time{}), "restart considers the latest slot")
+}
+
+func TestChannelDetectionFixedSchedulePlanKeepsSlots(t *testing.T) {
+	ctx := context.Background()
+	s := newDetectionFixture(t)
+	input := s.cfg
+	input.DailyAnchorTime = new("08:00")
+	require.NoError(t, s.Save(ctx, input))
+	_, config, latest, err := s.state(ctx, true)
+	require.NoError(t, err)
+	start := latest.ScheduleSince[1]
+	require.False(t, start.IsZero())
+	slot := channelDetectionSlot("08:00", input.IntervalMinutes, start).Add(time.Hour)
+	latest.LastSlot = map[int64]time.Time{1: slot}
+	latest.AttemptedAt[1] = slot.Add(7 * time.Minute)
+	latest.Samples[1] = &ChannelDetectionSample{CheckedAt: start, Pelican: "generated", SVG: testDetectionSVG}
+	encoded, err := json.Marshal(latest)
+	require.NoError(t, err)
+	require.NoError(t, s.storage.Set(ctx, SettingKeyChannelDetectionLatest, string(encoded)))
+
+	input.SuspendMinutes = new(15)
+	input.AutoConfirmMissingSVG = new(true)
+	require.NoError(t, s.Save(ctx, input))
+	_, policy, kept, err := s.state(ctx, true)
+	require.NoError(t, err)
+	require.NotEqual(t, config.SuspensionRevision, policy.SuspensionRevision)
+	require.Equal(t, start, kept.ScheduleSince[1])
+	require.Equal(t, slot, kept.LastSlot[1])
+	require.Equal(t, start, kept.Images[1].CheckedAt)
+
+	input.IntervalMinutes = 1439
+	require.NoError(t, s.Save(ctx, input))
+	_, later, changed, err := s.state(ctx, true)
+	require.NoError(t, err)
+	require.Equal(t, policy.SuspensionRevision, later.SuspensionRevision)
+	require.False(t, changed.ScheduleSince[1].Before(start))
+	require.Empty(t, changed.LastSlot)
+	require.Equal(t, kept.Images[1], changed.Images[1])
+	otherGroupActivation := changed.ScheduleSince[2]
+
+	input.Groups = slices.Clone(input.Groups)
+	input.Groups[0].Model = "another"
+	s.groupRows[1].ModelAllowlist.Models = append(s.groupRows[1].ModelAllowlist.Models, "another")
+	require.NoError(t, s.Save(ctx, input))
+	_, _, changed, err = s.state(ctx, true)
+	require.NoError(t, err)
+	require.NotContains(t, changed.Images, int64(1))
+	require.NotContains(t, changed.Proofs, int64(1))
+	require.Equal(t, otherGroupActivation, changed.ScheduleSince[2])
 }

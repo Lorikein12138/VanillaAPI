@@ -57,6 +57,16 @@ func TestChannelDetectionPostgresGroupLifecycle(t *testing.T) {
 			}
 			plan := fmt.Sprintf(`{"revision":"before","enabled":true,"interval_minutes":60,"concurrent_groups":2,"groups":[{"group_id":%d,"model":"one"},{"group_id":%d,"model":"two"}]}`, leaving, staying)
 			snapshot := fmt.Sprintf(`{"revision":"before","samples":{"%d":{"sample":"leaving"},"%d":{"sample":"staying"}}}`, leaving, staying)
+			if operation == "soft-delete" {
+				var fields map[string]any
+				require.NoError(t, json.Unmarshal([]byte(snapshot), &fields))
+				for _, name := range []string{"images", "schedule_since", "last_slot"} {
+					fields[name] = map[int64]string{leaving: "leaving", staying: "staying"}
+				}
+				raw, err := json.Marshal(fields)
+				require.NoError(t, err)
+				snapshot = string(raw)
+			}
 			const missing = 999999
 			if operation == "upgrade" {
 				plan = fmt.Sprintf(`{"revision":"before","enabled":true,"interval_minutes":60,"concurrent_groups":2,"groups":[{"group_id":%d,"model":"one"},{"group_id":%d,"model":"two"},{"group_id":%d,"model":"missing"}]}`, leaving, staying, missing)
@@ -135,6 +145,15 @@ func TestChannelDetectionPostgresGroupLifecycle(t *testing.T) {
 			require.NotEqual(t, "before", config.Revision)
 			require.Equal(t, config.Revision, samples.Revision)
 			require.Equal(t, []service.ChannelDetectionSelection{{GroupID: staying, Model: "two"}}, config.Groups)
+			if operation == "soft-delete" {
+				var data map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal([]byte(next.Snapshot), &data))
+				for _, name := range []string{"images", "schedule_since", "last_slot"} {
+					var records map[int64]string
+					require.NoError(t, json.Unmarshal(data[name], &records))
+					require.Equal(t, map[int64]string{staying: "staying"}, records)
+				}
+			}
 			require.Len(t, samples.Samples, 1)
 			require.JSONEq(t, `{"sample":"staying"}`, string(samples.Samples[strconv.FormatInt(staying, 10)]))
 			ok, err := worker.ReserveSend(ctx, "worker", old, leaving, 0, 20)
