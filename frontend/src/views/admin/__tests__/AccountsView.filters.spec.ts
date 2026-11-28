@@ -42,7 +42,7 @@ vi.mock('@/api/admin', () => ({
       duplicate: vi.fn(),
       createSparkShadow: vi.fn()
     },
-    proxies: { getAll: getAllProxies },
+    proxies: { getAllWithCount: getAllProxies },
     groups: { getAll: getAllGroups }
   }
 }))

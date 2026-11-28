@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -238,10 +239,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	usage := scan.Usage
 
 	if scan.Err != nil {
-		// Broken upstream read: skip finalization so no synthetic message_stop
-		// masks the truncation, and surface the error to flag usage incomplete
-		// (mirrors forwardResponsesViaRawChatCompletions).
-		return &OpenAIForwardResult{
+		result := &OpenAIForwardResult{
 			RequestID:                     requestID,
 			UpstreamHeaders:               resp.Header,
 			Usage:                         usage,
@@ -257,7 +255,27 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  scan.FirstTokenMs,
 			ClientDisconnect:              clientDisconnected,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+		}
+		if errors.Is(scan.Err, errCCUpstreamStream) {
+			result.UpstreamTerminalEvent = "response.failed"
+			if !clientDisconnected {
+				if c.Writer.Written() {
+					MarkOpsStreamError(c, "api_error", ccUpstreamStreamErrorMessage, http.StatusBadGateway)
+					payload, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{
+						"type": "api_error", "message": ccUpstreamStreamErrorMessage,
+					}})
+					if _, err := fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", payload); err == nil {
+						c.Writer.Flush()
+					} else {
+						result.ClientDisconnect = true
+					}
+				} else {
+					writeAnthropicError(c, http.StatusBadGateway, "api_error", ccUpstreamStreamErrorMessage)
+				}
+				MarkResponseCommitted(c)
+			}
+		}
+		return result, fmt.Errorf("stream usage incomplete: %w", scan.Err)
 	}
 
 	// Finalize: close open blocks + emit message_delta/message_stop.

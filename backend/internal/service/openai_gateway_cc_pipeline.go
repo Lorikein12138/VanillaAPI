@@ -220,6 +220,8 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	// 字段，上游 400 "The `reasoning_content` in the thinking mode must be
 	// passed back to the API"。在共用出站点补空格占位，真实明文不覆盖。
 	body = ensureDeepSeekChatReasoningPlaceholders(account, body)
+	// AI Studio rejects replayed tool calls without a Gemini thought signature.
+	body = ensureGeminiChatThoughtSignatures(account, body)
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	releaseUpstreamCtx()
@@ -304,11 +306,15 @@ type ccStreamScanState struct {
 	FirstTokenMs *int
 	// SawDone 表示上游发出了 [DONE] 哨兵。
 	SawDone bool
-	// Err 为 scanner 读错误（客户端 context 取消不属于此类，会原样带出）。
+	// Err 为读取错误或上游明确的 SSE 失败。
 	// 非 nil 时调用方必须跳过 finalize 并返回 usage-incomplete 错误，避免
 	// 把上游截断伪装成正常收尾。
 	Err error
 }
+
+var errCCUpstreamStream = errors.New("upstream chat stream reported an error")
+
+const ccUpstreamStreamErrorMessage = "Upstream chat stream failed"
 
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
 // 哨兵处停止、保留最新 usage、记录首 token 时延，并把每个解析成功的 chunk 交给
@@ -325,13 +331,30 @@ func (s *OpenAIGatewayService) scanCCStream(
 	var st ccStreamScanState
 
 	scanner := s.newUpstreamSSEScanner(resp.Body)
+	eventType := ""
 	for scanner.Scan() {
 		line := scanner.Text()
+		if line == "" {
+			if eventType == "error" {
+				st.Err = errCCUpstreamStream
+				return st
+			}
+			eventType = ""
+			continue
+		}
+		if event, ok := extractOpenAISSEEventLine(line); ok {
+			eventType = strings.TrimSpace(event)
+			continue
+		}
 		payload, ok := extractOpenAISSEDataLine(line)
 		if !ok {
 			continue
 		}
 		payload = strings.TrimSpace(payload)
+		if eventType == "error" || gjson.Get(payload, "type").String() == "error" || gjson.Get(payload, "error").Type != gjson.Null {
+			st.Err = errCCUpstreamStream
+			return st
+		}
 		if payload == "" {
 			continue
 		}
@@ -363,6 +386,10 @@ func (s *OpenAIGatewayService) scanCCStream(
 			st.FirstTokenMs = &ms
 		}
 		emit(&chunk)
+	}
+	if eventType == "error" {
+		st.Err = errCCUpstreamStream
+		return st
 	}
 
 	if err := scanner.Err(); err != nil {

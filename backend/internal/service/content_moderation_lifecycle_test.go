@@ -213,10 +213,10 @@ func TestContentModerationFixturesReleaseResources(t *testing.T) {
 	for i := range 30 {
 		t.Run("fixture", func(t *testing.T) {
 			svc := newContentModerationTestService(t, &contentModerationRuntimeSettingRepo{}, &contentModerationTestRepo{}, nil, nil, nil, nil, nil, nil)
-			require.Equal(t, 100000, cap(svc.asyncQueue))
+			require.Zero(t, cap(svc.asyncQueueOf()))
 			require.Equal(t, 32, svc.workerCount)
 			require.GreaterOrEqual(t, runtime.NumGoroutine(), initial+32)
-			t.Logf("iteration=%d task_bytes=%d queue_cap=%d workers=%d goroutines=%d", i, unsafe.Sizeof(contentModerationTask{}), cap(svc.asyncQueue), svc.workerCount, runtime.NumGoroutine())
+			t.Logf("iteration=%d task_bytes=%d queue_cap=%d workers=%d goroutines=%d", i, unsafe.Sizeof(contentModerationTask{}), cap(svc.asyncQueueOf()), svc.workerCount, runtime.NumGoroutine())
 		})
 	}
 	// Collection observes queues after their actual workers have joined.
