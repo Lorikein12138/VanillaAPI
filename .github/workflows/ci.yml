@@ -2,11 +2,17 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
@@ -32,6 +38,8 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -56,6 +64,8 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
         with:
           version: '10.34.6'
@@ -68,3 +78,70 @@ jobs:
       - run: pnpm run lint:check
       - run: pnpm run typecheck
       - run: pnpm run test:run --maxWorkers=2 --minWorkers=1
+
+  docker-smoke:
+    name: docker-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build runtime image and verify entrypoint version
+        run: |
+          docker build --file Dockerfile --tag vanillaapi-ci \
+            --build-arg COMMIT="$GITHUB_SHA" \
+            --build-arg GOPROXY=https://proxy.golang.org,direct \
+            --build-arg GOSUMDB=sum.golang.org .
+          version=$(tr -d '\r\n' < backend/cmd/server/VERSION)
+          test -n "$version"
+          reported=$(docker run --rm --network none vanillaapi-ci --version 2>&1)
+          grep -Fq "Sub2API $version (commit: $GITHUB_SHA, built: " <<< "$reported"
+      - name: Create isolated setup-mode container
+        id: setup-container
+        # Setup mode exposes /setup/status. The normal /health requires an installed instance.
+        run: |
+          docker create --name vanillaapi-ci --network none --no-healthcheck \
+            --env AUTO_SETUP=false --env SERVER_HOST=127.0.0.1 --env SERVER_PORT=8080 \
+            vanillaapi-ci
+      - name: Start image and verify setup readiness and embedded Web assets
+        shell: python
+        run: |
+          import json
+          import re
+          import subprocess
+          import time
+
+          def request(path):
+              return subprocess.run(
+                  ["docker", "exec", "vanillaapi-ci", "wget", "-S", "-T", "2",
+                   "-O", "-", f"http://127.0.0.1:8080{path}"],
+                  check=True, capture_output=True, timeout=5,
+              )
+
+          subprocess.run(["docker", "start", "vanillaapi-ci"], check=True, timeout=15)
+          for attempt in range(20):
+              try:
+                  status = request("/setup/status")
+                  break
+              except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                  if attempt == 19:
+                      raise SystemExit("Setup status endpoint did not become ready")
+                  time.sleep(1)
+
+          setup = json.loads(status.stdout)
+          assert setup["code"] == 0 and setup["data"]["needs_setup"] is True, "Expected a fresh installation"
+          page = request("/")
+          assert re.search(rb"^\s*Content-Type: text/html\b", page.stderr, re.I | re.M)
+          entry = re.search(rb'<script\b[^>]*\bsrc="(/assets/[a-zA-Z0-9._-]+\.js)"', page.stdout)
+          assert entry, "The embedded page must reference a built JavaScript entry"
+          asset = request(entry[1].decode("ascii"))
+          assert re.search(rb"^\s*Content-Type: (?:text|application)/(?:x-)?javascript\b",
+                           asset.stderr, re.I | re.M), "The entry must be served as JavaScript"
+          assert asset.stdout.strip(), "The JavaScript entry must be nonempty"
+      - name: Show container logs on failure
+        if: ${{ failure() && steps.setup-container.outcome == 'success' }}
+        run: docker logs vanillaapi-ci
+      - name: Remove smoke container and volumes
+        if: ${{ always() && steps.setup-container.outcome == 'success' }}
+        run: docker rm --force --volumes vanillaapi-ci
